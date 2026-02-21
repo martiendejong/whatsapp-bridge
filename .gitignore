@@ -1,0 +1,33 @@
+## Backend
+bin/
+obj/
+*.db
+*.db-shm
+*.db-wal
+appsettings.Secrets.json
+appsettings.Production.json
+
+## Frontend
+node_modules/
+dist/
+.env.local
+.env.production
+
+## WhatsApp Sessions
+.wwebjs_auth/
+.wwebjs_cache/
+
+## Deployment
+*.log
+publish/
+
+## IDE
+.vs/
+.vscode/
+.idea/
+*.suo
+*.user
+
+## OS
+.DS_Store
+Thumbs.db
