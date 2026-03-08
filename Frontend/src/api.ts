@@ -30,6 +30,7 @@ export const apiConnections = {
   create: (name: string) => api.post('/api/apiconnections', { name }),
   delete: (id: number) => api.delete(`/api/apiconnections/${id}`),
   toggle: (id: number) => api.patch(`/api/apiconnections/${id}/toggle`),
+  test: (id: number) => api.post(`/api/apiconnections/${id}/test`),
 };
 
 export const whatsapp = {

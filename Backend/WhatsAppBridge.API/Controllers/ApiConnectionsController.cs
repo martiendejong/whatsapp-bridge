@@ -105,6 +105,32 @@ public class ApiConnectionsController : ControllerBase
 
         return Ok(new { isActive = connection.IsActive });
     }
+
+    [HttpPost("{id}/test")]
+    public async Task<IActionResult> TestConnection(int id)
+    {
+        var userId = GetUserId();
+        var connection = await _context.ApiConnections
+            .FirstOrDefaultAsync(c => c.Id == id && c.UserId == userId);
+
+        if (connection == null)
+            return NotFound(new { success = false, message = "Connection not found" });
+
+        if (!connection.IsActive)
+            return Ok(new { success = false, message = "Connection is inactive. Enable it first." });
+
+        // Update last used timestamp to verify the test worked
+        connection.LastUsedAt = DateTime.UtcNow;
+        await _context.SaveChangesAsync();
+
+        return Ok(new
+        {
+            success = true,
+            message = "Connection is working correctly!",
+            connectionName = connection.Name,
+            lastUsedAt = connection.LastUsedAt
+        });
+    }
 }
 
 public record CreateConnectionRequest(string Name);

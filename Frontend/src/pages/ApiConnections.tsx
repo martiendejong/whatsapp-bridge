@@ -9,6 +9,8 @@ export default function ApiConnections() {
   const [newName, setNewName] = useState('');
   const [newToken, setNewToken] = useState('');
   const [error, setError] = useState('');
+  const [testingId, setTestingId] = useState<number | null>(null);
+  const [testResults, setTestResults] = useState<{ [key: number]: { success: boolean; message: string } }>({});
 
   useEffect(() => {
     loadConnections();
@@ -56,6 +58,39 @@ export default function ApiConnections() {
       loadConnections();
     } catch (err) {
       setError('Failed to toggle API connection');
+    }
+  };
+
+  const handleTest = async (id: number) => {
+    setTestingId(id);
+    setTestResults((prev) => {
+      const updated = { ...prev };
+      delete updated[id];
+      return updated;
+    });
+
+    try {
+      const response = await apiConnections.test(id);
+      setTestResults((prev) => ({
+        ...prev,
+        [id]: {
+          success: response.data.success,
+          message: response.data.message,
+        },
+      }));
+      if (response.data.success) {
+        loadConnections(); // Refresh to show updated lastUsedAt
+      }
+    } catch (err: any) {
+      setTestResults((prev) => ({
+        ...prev,
+        [id]: {
+          success: false,
+          message: err.response?.data?.message || 'Failed to test connection',
+        },
+      }));
+    } finally {
+      setTestingId(null);
     }
   };
 
@@ -135,31 +170,62 @@ export default function ApiConnections() {
             </thead>
             <tbody>
               {connections.map((conn) => (
-                <tr key={conn.id}>
-                  <td>{conn.name}</td>
-                  <td>
-                    <code>{conn.token.substring(0, 20)}...</code>
-                  </td>
-                  <td>{new Date(conn.createdAt).toLocaleDateString()}</td>
-                  <td>{conn.lastUsedAt ? new Date(conn.lastUsedAt).toLocaleDateString() : 'Never'}</td>
-                  <td>
-                    <span className={`status-badge ${conn.isActive ? 'status-connected' : 'status-disconnected'}`}>
-                      {conn.isActive ? 'Active' : 'Inactive'}
-                    </span>
-                  </td>
-                  <td>
-                    <button
-                      className="btn btn-secondary"
-                      onClick={() => handleToggle(conn.id)}
-                      style={{ marginRight: '8px' }}
-                    >
-                      {conn.isActive ? 'Disable' : 'Enable'}
-                    </button>
-                    <button className="btn btn-danger" onClick={() => handleDelete(conn.id)}>
-                      Delete
-                    </button>
-                  </td>
-                </tr>
+                <>
+                  <tr key={conn.id}>
+                    <td>{conn.name}</td>
+                    <td>
+                      <code>{conn.token.substring(0, 20)}...</code>
+                    </td>
+                    <td>{new Date(conn.createdAt).toLocaleDateString()}</td>
+                    <td>{conn.lastUsedAt ? new Date(conn.lastUsedAt).toLocaleDateString() : 'Never'}</td>
+                    <td>
+                      <span className={`status-badge ${conn.isActive ? 'status-connected' : 'status-disconnected'}`}>
+                        {conn.isActive ? 'Active' : 'Inactive'}
+                      </span>
+                    </td>
+                    <td>
+                      <button
+                        className="btn btn-secondary"
+                        onClick={() => handleTest(conn.id)}
+                        disabled={testingId === conn.id}
+                        style={{ marginRight: '8px' }}
+                      >
+                        {testingId === conn.id ? 'Testing...' : 'Test'}
+                      </button>
+                      <button
+                        className="btn btn-secondary"
+                        onClick={() => handleToggle(conn.id)}
+                        style={{ marginRight: '8px' }}
+                      >
+                        {conn.isActive ? 'Disable' : 'Enable'}
+                      </button>
+                      <button className="btn btn-danger" onClick={() => handleDelete(conn.id)}>
+                        Delete
+                      </button>
+                    </td>
+                  </tr>
+                  {testResults[conn.id] && (
+                    <tr key={`${conn.id}-test-result`}>
+                      <td colSpan={6} style={{ padding: '8px 16px' }}>
+                        <div
+                          style={{
+                            padding: '12px',
+                            borderRadius: '4px',
+                            background: testResults[conn.id].success ? '#f0fdf4' : '#fef2f2',
+                            border: `1px solid ${testResults[conn.id].success ? '#86efac' : '#fca5a5'}`,
+                          }}
+                        >
+                          <strong style={{ color: testResults[conn.id].success ? '#166534' : '#991b1b' }}>
+                            {testResults[conn.id].success ? '✓ Success: ' : '✗ Failed: '}
+                          </strong>
+                          <span style={{ color: testResults[conn.id].success ? '#166534' : '#991b1b' }}>
+                            {testResults[conn.id].message}
+                          </span>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </>
               ))}
             </tbody>
           </table>
