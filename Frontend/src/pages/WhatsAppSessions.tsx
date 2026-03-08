@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { whatsapp } from '../api';
+import { whatsapp, apiConnections } from '../api';
 import { WhatsAppSession } from '../types';
 
 export default function WhatsAppSessions() {
@@ -8,6 +8,8 @@ export default function WhatsAppSessions() {
   const [qrCode, setQrCode] = useState<string | null>(null);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [error, setError] = useState('');
+  const [testingId, setTestingId] = useState<number | null>(null);
+  const [testResults, setTestResults] = useState<{ [key: number]: { success: boolean; message: string; details?: any } }>({});
 
   useEffect(() => {
     loadSessions();
@@ -59,6 +61,40 @@ export default function WhatsAppSessions() {
       loadSessions();
     } catch (err: any) {
       setError(err.response?.data?.message || 'Failed to create WhatsApp session');
+    }
+  };
+
+  const handleTestSession = async (sessionId: string, sessionDbId: number) => {
+    setTestingId(sessionDbId);
+    setTestResults((prev) => {
+      const updated = { ...prev };
+      delete updated[sessionDbId];
+      return updated;
+    });
+
+    try {
+      const response = await whatsapp.testSession(sessionId);
+      setTestResults((prev) => ({
+        ...prev,
+        [sessionDbId]: {
+          success: response.data.success,
+          message: response.data.message,
+          details: response.data
+        },
+      }));
+      if (response.data.success) {
+        loadSessions(); // Refresh to show updated lastSeenAt
+      }
+    } catch (err: any) {
+      setTestResults((prev) => ({
+        ...prev,
+        [sessionDbId]: {
+          success: false,
+          message: err.response?.data?.message || 'Failed to test WhatsApp session',
+        },
+      }));
+    } finally {
+      setTestingId(null);
     }
   };
 
@@ -121,30 +157,66 @@ export default function WhatsAppSessions() {
             </thead>
             <tbody>
               {sessions.map((session) => (
-                <tr key={session.id}>
-                  <td>{session.phoneNumber || 'N/A'}</td>
-                  <td>
-                    <span
-                      className={`status-badge ${
-                        session.status === 'connected'
-                          ? 'status-connected'
-                          : session.status === 'qr_pending'
-                          ? 'status-pending'
-                          : 'status-disconnected'
-                      }`}
-                    >
-                      {session.status}
-                    </span>
-                  </td>
-                  <td>{new Date(session.createdAt).toLocaleDateString()}</td>
-                  <td>{session.connectedAt ? new Date(session.connectedAt).toLocaleDateString() : 'N/A'}</td>
-                  <td>{session.lastSeenAt ? new Date(session.lastSeenAt).toLocaleString() : 'N/A'}</td>
-                  <td>
-                    <button className="btn btn-danger" onClick={() => handleDeleteSession(session.sessionId)}>
-                      Disconnect
-                    </button>
-                  </td>
-                </tr>
+                <>
+                  <tr key={session.id}>
+                    <td>{session.phoneNumber || 'N/A'}</td>
+                    <td>
+                      <span
+                        className={`status-badge ${
+                          session.status === 'connected'
+                            ? 'status-connected'
+                            : session.status === 'qr_pending'
+                            ? 'status-pending'
+                            : 'status-disconnected'
+                        }`}
+                      >
+                        {session.status}
+                      </span>
+                    </td>
+                    <td>{new Date(session.createdAt).toLocaleDateString()}</td>
+                    <td>{session.connectedAt ? new Date(session.connectedAt).toLocaleDateString() : 'N/A'}</td>
+                    <td>{session.lastSeenAt ? new Date(session.lastSeenAt).toLocaleString() : 'N/A'}</td>
+                    <td>
+                      <button
+                        className="btn btn-secondary"
+                        onClick={() => handleTestSession(session.sessionId, session.id)}
+                        disabled={testingId === session.id}
+                        style={{ marginRight: '8px' }}
+                      >
+                        {testingId === session.id ? 'Testing...' : 'Test Connection'}
+                      </button>
+                      <button className="btn btn-danger" onClick={() => handleDeleteSession(session.sessionId)}>
+                        Disconnect
+                      </button>
+                    </td>
+                  </tr>
+                  {testResults[session.id] && (
+                    <tr key={`${session.id}-test-result`}>
+                      <td colSpan={6} style={{ padding: '8px 16px' }}>
+                        <div
+                          style={{
+                            padding: '12px',
+                            borderRadius: '4px',
+                            background: testResults[session.id].success ? '#f0fdf4' : '#fef2f2',
+                            border: `1px solid ${testResults[session.id].success ? '#86efac' : '#fca5a5'}`,
+                          }}
+                        >
+                          <strong style={{ color: testResults[session.id].success ? '#166534' : '#991b1b' }}>
+                            {testResults[session.id].success ? '✓ Success: ' : '✗ Failed: '}
+                          </strong>
+                          <span style={{ color: testResults[session.id].success ? '#166534' : '#991b1b' }}>
+                            {testResults[session.id].message}
+                          </span>
+                          {testResults[session.id].success && testResults[session.id].details?.phoneNumber && (
+                            <div style={{ marginTop: '8px', fontSize: '14px', color: '#166534' }}>
+                              Phone: {testResults[session.id].details.phoneNumber}
+                            </div>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </>
               ))}
             </tbody>
           </table>

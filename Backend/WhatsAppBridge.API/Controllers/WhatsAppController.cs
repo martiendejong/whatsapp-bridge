@@ -113,4 +113,73 @@ public class WhatsAppController : ControllerBase
 
         return NoContent();
     }
+
+    [HttpPost("sessions/{sessionId}/test")]
+    public async Task<IActionResult> TestSession(string sessionId)
+    {
+        var userId = GetUserId();
+        var session = await _context.WhatsAppSessions
+            .FirstOrDefaultAsync(s => s.SessionId == sessionId && s.UserId == userId);
+
+        if (session == null)
+            return NotFound(new { success = false, message = "Session not found" });
+
+        if (session.Status != "connected")
+        {
+            return Ok(new
+            {
+                success = false,
+                message = $"WhatsApp session is {session.Status}. Please scan the QR code to connect.",
+                sessionStatus = session.Status
+            });
+        }
+
+        // Test the actual WhatsApp connection by trying to get contacts
+        try
+        {
+            var contacts = await _whatsappService.GetContactsAsync(sessionId);
+
+            if (contacts != null)
+            {
+                // Update last seen timestamp
+                session.LastSeenAt = DateTime.UtcNow;
+                await _context.SaveChangesAsync();
+
+                return Ok(new
+                {
+                    success = true,
+                    message = "WhatsApp connection is working! Your QR code scan is still active.",
+                    sessionStatus = "connected",
+                    phoneNumber = session.PhoneNumber != null
+                        ? _encryptionService.Decrypt(session.PhoneNumber)
+                        : null,
+                    connectedAt = session.ConnectedAt,
+                    lastSeenAt = session.LastSeenAt
+                });
+            }
+            else
+            {
+                // WhatsApp service returned null - session might be disconnected
+                session.Status = "disconnected";
+                await _context.SaveChangesAsync();
+
+                return Ok(new
+                {
+                    success = false,
+                    message = "WhatsApp session appears to be disconnected. Please scan the QR code again.",
+                    sessionStatus = "disconnected"
+                });
+            }
+        }
+        catch (Exception ex)
+        {
+            return Ok(new
+            {
+                success = false,
+                message = "Failed to test WhatsApp connection. The session may be disconnected or the WhatsApp service is unavailable.",
+                sessionStatus = "error",
+                error = ex.Message
+            });
+        }
+    }
 }

@@ -38,6 +38,7 @@ export const whatsapp = {
   createSession: () => api.post('/api/whatsapp/sessions/create'),
   getQr: (sessionId: string) => api.get(`/api/whatsapp/sessions/${sessionId}/qr`),
   deleteSession: (sessionId: string) => api.delete(`/api/whatsapp/sessions/${sessionId}`),
+  testSession: (sessionId: string) => api.post(`/api/whatsapp/sessions/${sessionId}/test`),
 };
 
 export default api;
