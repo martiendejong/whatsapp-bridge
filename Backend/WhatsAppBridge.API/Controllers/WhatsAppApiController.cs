@@ -152,11 +152,11 @@ public class WhatsAppApiController : ControllerBase
         // Decrypt messages if encryption enabled
         if (_encryptionService.IsEncryptionEnabled && messages != null)
         {
-            foreach (var msg in messages)
-            {
-                if (!string.IsNullOrEmpty(msg.Body))
-                    msg.Body = _encryptionService.Decrypt(msg.Body);
-            }
+            messages = messages.Select(msg =>
+                !string.IsNullOrEmpty(msg.Body)
+                    ? msg with { Body = _encryptionService.Decrypt(msg.Body) }
+                    : msg
+            ).ToList();
         }
 
         return Ok(messages);
@@ -202,11 +202,11 @@ public class WhatsAppApiController : ControllerBase
         // Decrypt phone numbers if encryption enabled
         if (_encryptionService.IsEncryptionEnabled && contacts != null)
         {
-            foreach (var contact in contacts)
-            {
-                if (!string.IsNullOrEmpty(contact.Number))
-                    contact.Number = _encryptionService.Decrypt(contact.Number);
-            }
+            contacts = contacts.Select(contact =>
+                !string.IsNullOrEmpty(contact.Number)
+                    ? contact with { Number = _encryptionService.Decrypt(contact.Number) }
+                    : contact
+            ).ToList();
         }
 
         return Ok(contacts);
