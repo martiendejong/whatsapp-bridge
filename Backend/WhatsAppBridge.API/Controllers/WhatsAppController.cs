@@ -182,4 +182,42 @@ public class WhatsAppController : ControllerBase
             });
         }
     }
+
+    [AllowAnonymous] // Webhook from WhatsApp Service (localhost only)
+    [HttpPost("webhook/status")]
+    public async Task<IActionResult> StatusWebhook([FromBody] StatusWebhookRequest request)
+    {
+        // Find session (no user filter for webhook)
+        var session = await _context.WhatsAppSessions
+            .FirstOrDefaultAsync(s => s.SessionId == request.SessionId);
+
+        if (session == null)
+            return NotFound();
+
+        // Update status
+        session.Status = request.Status;
+        session.LastSeenAt = DateTime.UtcNow;
+
+        if (request.Status == "connected" && request.PhoneNumber != null)
+        {
+            session.PhoneNumber = _encryptionService.Encrypt(request.PhoneNumber);
+            session.ConnectedAt = DateTime.UtcNow;
+        }
+
+        if (request.Status == "disconnected")
+        {
+            session.ConnectedAt = null;
+        }
+
+        await _context.SaveChangesAsync();
+
+        return Ok();
+    }
+}
+
+public class StatusWebhookRequest
+{
+    public string SessionId { get; set; } = string.Empty;
+    public string Status { get; set; } = string.Empty;
+    public string? PhoneNumber { get; set; }
 }

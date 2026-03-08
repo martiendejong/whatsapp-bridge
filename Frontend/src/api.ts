@@ -20,9 +20,9 @@ api.interceptors.request.use((config) => {
 
 export const auth = {
   register: (email: string, password: string) =>
-    api.post('/api/auth/register', { email, password }),
+    api.post('/api/auth/register', { Email: email, Password: password }),
   login: (email: string, password: string) =>
-    api.post('/api/auth/login', { email, password }),
+    api.post('/api/auth/login', { Email: email, Password: password }),
 };
 
 export const apiConnections = {

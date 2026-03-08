@@ -24,7 +24,7 @@ public class WhatsAppBridgeService
         try
         {
             var response = await _httpClient.PostAsJsonAsync(
-                $"{_whatsappServiceUrl}/session/create",
+                $"{_whatsappServiceUrl}/sessions/create",
                 new { sessionId });
 
             if (response.IsSuccessStatusCode)
@@ -43,11 +43,14 @@ public class WhatsAppBridgeService
         }
     }
 
+    // Alias for InitializeSessionAsync
+    public Task<string?> CreateSessionAsync(string sessionId) => InitializeSessionAsync(sessionId);
+
     public async Task<bool> DisconnectSessionAsync(string sessionId)
     {
         try
         {
-            var response = await _httpClient.DeleteAsync($"{_whatsappServiceUrl}/session/{sessionId}");
+            var response = await _httpClient.DeleteAsync($"{_whatsappServiceUrl}/sessions/{sessionId}");
             return response.IsSuccessStatusCode;
         }
         catch (Exception ex)
@@ -62,7 +65,7 @@ public class WhatsAppBridgeService
         try
         {
             var response = await _httpClient.PostAsJsonAsync(
-                $"{_whatsappServiceUrl}/message/send",
+                $"{_whatsappServiceUrl}/messages/send",
                 new { sessionId, to, body });
 
             if (response.IsSuccessStatusCode)
@@ -84,7 +87,7 @@ public class WhatsAppBridgeService
         try
         {
             var response = await _httpClient.PostAsJsonAsync(
-                $"{_whatsappServiceUrl}/message/sendMedia",
+                $"{_whatsappServiceUrl}/messages/sendMedia",
                 new { sessionId, to, mediaUrl, caption });
 
             if (response.IsSuccessStatusCode)

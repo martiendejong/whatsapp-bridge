@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { whatsapp, apiConnections } from '../api';
+import { whatsapp } from '../api';
 import { WhatsAppSession } from '../types';
 
 export default function WhatsAppSessions() {
