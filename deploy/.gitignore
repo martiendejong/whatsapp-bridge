@@ -1,0 +1,8 @@
+# Deployment scripts with passwords - DO NOT COMMIT
+*.py
+
+# Allow README
+!README.md
+
+# Logs
+*.log
