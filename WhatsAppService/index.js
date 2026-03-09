@@ -3,6 +3,7 @@ import pkg from 'whatsapp-web.js';
 const { Client, LocalAuth } = pkg;
 import qrcode from 'qrcode';
 import cors from 'cors';
+import axios from 'axios';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -18,8 +19,26 @@ app.get('/health', (req, res) => {
     res.json({ status: 'ok', activeSessions: clients.size });
 });
 
+
+// Webhook to notify backend when status changes
+async function notifyBackendStatusChange(sessionId, status, phoneNumber = null) {
+    try {
+        const backendUrl = 'http://localhost:5000/api/whatsapp/webhook/status';
+        await axios.post(backendUrl, {
+            sessionId,
+            status,
+            phoneNumber
+        }, {
+            timeout: 5000
+        });
+        console.log(`Notified backend: session ${sessionId} -> ${status}`);
+    } catch (error) {
+        console.error(`Failed to notify backend for session ${sessionId}:`, error.message);
+    }
+}
+
 // Create new WhatsApp session and get QR code
-app.post('/session/create', async (req, res) => {
+app.post('/sessions/create', async (req, res) => {
     try {
         const { sessionId } = req.body;
 
@@ -35,7 +54,8 @@ app.post('/session/create', async (req, res) => {
             authStrategy: new LocalAuth({ clientId: sessionId }),
             puppeteer: {
                 headless: true,
-                args: ['--no-sandbox', '--disable-setuid-sandbox']
+                args: ['--no-sandbox', '--disable-setuid-sandbox'],
+                // executablePath: auto-detect local Chromium
             }
         });
 
@@ -46,20 +66,30 @@ app.post('/session/create', async (req, res) => {
             qrCodeData = await qrcode.toDataURL(qr);
         });
 
-        client.on('ready', () => {
+        client.on('ready', async () => {
             console.log(`WhatsApp client ready for session ${sessionId}`);
+
+            try {
+                const info = await client.info;
+                const phoneNumber = info.wid.user;
+                await notifyBackendStatusChange(sessionId, 'connected', phoneNumber);
+            } catch (error) {
+                console.error(`Error getting phone number for ${sessionId}:`, error.message);
+            }
         });
 
-        client.on('authenticated', () => {
+        client.on('authenticated', async () => {
             console.log(`Session ${sessionId} authenticated`);
+            await notifyBackendStatusChange(sessionId, 'authenticated');
         });
 
         client.on('auth_failure', (msg) => {
             console.error(`Auth failure for session ${sessionId}:`, msg);
         });
 
-        client.on('disconnected', (reason) => {
+        client.on('disconnected', async (reason) => {
             console.log(`Session ${sessionId} disconnected:`, reason);
+            await notifyBackendStatusChange(sessionId, 'disconnected');
             clients.delete(sessionId);
         });
 
@@ -81,7 +111,7 @@ app.post('/session/create', async (req, res) => {
 });
 
 // Get session status
-app.get('/session/:sessionId/status', async (req, res) => {
+app.get('/sessions/:sessionId/status', async (req, res) => {
     const { sessionId } = req.params;
     const client = clients.get(sessionId);
 
@@ -98,7 +128,7 @@ app.get('/session/:sessionId/status', async (req, res) => {
 });
 
 // Disconnect and delete session
-app.delete('/session/:sessionId', async (req, res) => {
+app.delete('/sessions/:sessionId', async (req, res) => {
     const { sessionId } = req.params;
     const client = clients.get(sessionId);
 
@@ -116,7 +146,7 @@ app.delete('/session/:sessionId', async (req, res) => {
 });
 
 // Send text message
-app.post('/message/send', async (req, res) => {
+app.post('/messages/send', async (req, res) => {
     const { sessionId, to, body } = req.body;
 
     if (!sessionId || !to || !body) {
@@ -144,7 +174,7 @@ app.post('/message/send', async (req, res) => {
 });
 
 // Send media (image, video, document)
-app.post('/message/sendMedia', async (req, res) => {
+app.post('/messages/sendMedia', async (req, res) => {
     const { sessionId, to, mediaUrl, caption } = req.body;
 
     if (!sessionId || !to || !mediaUrl) {
