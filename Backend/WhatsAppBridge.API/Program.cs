@@ -8,6 +8,18 @@ using WhatsAppBridge.API.Authentication;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Configure IIS integration for production
+if (builder.Environment.IsProduction())
+{
+    // Use IIS integration - IIS will handle all port binding
+    builder.WebHost.UseIIS();
+}
+else
+{
+    // In development, allow binding to localhost
+    builder.WebHost.UseUrls("http://localhost:5149");
+}
+
 // Add services to the container
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();

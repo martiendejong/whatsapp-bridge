@@ -1,5 +1,6 @@
 import express from 'express';
-import { Client, LocalAuth } from 'whatsapp-web.js';
+import pkg from 'whatsapp-web.js';
+const { Client, LocalAuth } = pkg;
 import qrcode from 'qrcode';
 import cors from 'cors';
 
@@ -281,6 +282,7 @@ app.get('/number/check', async (req, res) => {
     }
 });
 
-app.listen(PORT, () => {
-    console.log(`WhatsApp Bridge Service running on port ${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`WhatsApp Bridge Service running on 0.0.0.0:${PORT}`);
+    console.log(`Accessible via http://localhost:${PORT} and http://85.215.217.154:${PORT}`);
 });

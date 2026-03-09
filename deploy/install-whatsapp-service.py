@@ -6,7 +6,7 @@ import time
 
 SSH_HOST = "85.215.217.154"
 SSH_USER = "administrator"
-SSH_PASSWORD = "3WsXcFr$7YhNmKi*"
+SSH_PASSWORD = "SpaceElevator1tam!"
 
 SCRIPT = r"""# Install WhatsApp Service
 Write-Host "Installing WhatsApp Service..."

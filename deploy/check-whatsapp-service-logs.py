@@ -5,7 +5,7 @@ import paramiko
 
 SSH_HOST = "85.215.217.154"
 SSH_USER = "administrator"
-SSH_PASSWORD = "3WsXcFr$7YhNmKi*"
+SSH_PASSWORD = "SpaceElevator1tam!"
 
 ssh = paramiko.SSHClient()
 ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
