@@ -1,0 +1,6 @@
+@WhatsAppBridge_HostAddress = http://localhost:5250
+
+GET {{WhatsAppBridge_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
