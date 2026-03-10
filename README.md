@@ -11,6 +11,7 @@ A complete WhatsApp Web API bridge that allows you to integrate WhatsApp messagi
 - **RESTful API**: Clean API endpoints mirroring WhatsApp Web functionality
 - **Optional Encryption**: AES-256 encryption for sensitive data (phone numbers, tokens, messages)
 - **Windows VPS Ready**: Complete deployment scripts for production
+- **AI Integration**: Comprehensive API documentation for automated systems - [See AI Integration Guide](./AI-INTEGRATION.md)
 
 ## Architecture
 
