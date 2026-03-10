@@ -77,14 +77,51 @@ public class WhatsAppApiController : ControllerBase
         return (false, null, "Invalid API token");
     }
 
-    private async Task<string?> GetUserSessionId(int userId)
+    private async Task<string?> GetUserSessionId(int userId, string? sessionIdOrPhone = null)
     {
-        var session = await _context.WhatsAppSessions
-            .Where(s => s.UserId == userId && s.Status == "connected")
+        var query = _context.WhatsAppSessions
+            .Where(s => s.UserId == userId && s.Status == "connected");
+
+        // If sessionId or phoneNumber specified, try to find that specific session
+        if (!string.IsNullOrEmpty(sessionIdOrPhone))
+        {
+            // Try as session ID first
+            var session = await query
+                .FirstOrDefaultAsync(s => s.SessionId == sessionIdOrPhone);
+
+            if (session != null)
+                return session.SessionId;
+
+            // Try as phone number (decrypt if needed)
+            if (_encryptionService.IsEncryptionEnabled)
+            {
+                // Find session by encrypted phone number
+                session = await query
+                    .ToListAsync()
+                    .ContinueWith(t => t.Result.FirstOrDefault(s =>
+                        !string.IsNullOrEmpty(s.PhoneNumber) &&
+                        _encryptionService.Decrypt(s.PhoneNumber) == sessionIdOrPhone
+                    ));
+            }
+            else
+            {
+                session = await query
+                    .FirstOrDefaultAsync(s => s.PhoneNumber == sessionIdOrPhone);
+            }
+
+            if (session != null)
+                return session.SessionId;
+
+            // Specific session requested but not found
+            return null;
+        }
+
+        // No specific session - return first active session
+        var defaultSession = await query
             .OrderByDescending(s => s.ConnectedAt)
             .FirstOrDefaultAsync();
 
-        return session?.SessionId;
+        return defaultSession?.SessionId;
     }
 
     /// <summary>
@@ -98,9 +135,11 @@ public class WhatsAppApiController : ControllerBase
         if (!success)
             return Unauthorized(new { error });
 
-        var sessionId = await GetUserSessionId(userId!.Value);
+        var sessionId = await GetUserSessionId(userId!.Value, request.SessionId);
         if (sessionId == null)
-            return BadRequest(new { error = "No active WhatsApp session" });
+            return BadRequest(new { error = request.SessionId != null
+                ? $"WhatsApp session '{request.SessionId}' not found or not connected"
+                : "No active WhatsApp session" });
 
         // Encrypt message if encryption enabled
         var messageToSend = _encryptionService.IsEncryptionEnabled
@@ -123,9 +162,11 @@ public class WhatsAppApiController : ControllerBase
         if (!success)
             return Unauthorized(new { error });
 
-        var sessionId = await GetUserSessionId(userId!.Value);
+        var sessionId = await GetUserSessionId(userId!.Value, request.SessionId);
         if (sessionId == null)
-            return BadRequest(new { error = "No active WhatsApp session" });
+            return BadRequest(new { error = request.SessionId != null
+                ? $"WhatsApp session '{request.SessionId}' not found or not connected"
+                : "No active WhatsApp session" });
 
         var result = await _whatsappService.SendMediaAsync(sessionId, request.To, request.MediaUrl, request.Caption);
 
@@ -137,17 +178,19 @@ public class WhatsAppApiController : ControllerBase
     /// GET /api/wa/getMessages?chatId=123456789@c.us&limit=50
     /// </summary>
     [HttpGet("getMessages")]
-    public async Task<IActionResult> GetMessages([FromQuery] string chatId, [FromQuery] int limit = 50)
+    public async Task<IActionResult> GetMessages([FromQuery] string chatId, [FromQuery] int limit = 50, [FromQuery] string? sessionId = null)
     {
         var (success, userId, error) = await ValidateApiToken();
         if (!success)
             return Unauthorized(new { error });
 
-        var sessionId = await GetUserSessionId(userId!.Value);
-        if (sessionId == null)
-            return BadRequest(new { error = "No active WhatsApp session" });
+        var resolvedSessionId = await GetUserSessionId(userId!.Value, sessionId);
+        if (resolvedSessionId == null)
+            return BadRequest(new { error = sessionId != null
+                ? $"WhatsApp session '{sessionId}' not found or not connected"
+                : "No active WhatsApp session" });
 
-        var messages = await _whatsappService.GetMessagesAsync(sessionId, chatId, limit);
+        var messages = await _whatsappService.GetMessagesAsync(resolvedSessionId, chatId, limit);
 
         // Decrypt messages if encryption enabled
         if (_encryptionService.IsEncryptionEnabled && messages != null)
@@ -167,17 +210,19 @@ public class WhatsAppApiController : ControllerBase
     /// GET /api/wa/getChats
     /// </summary>
     [HttpGet("getChats")]
-    public async Task<IActionResult> GetChats()
+    public async Task<IActionResult> GetChats([FromQuery] string? sessionId = null)
     {
         var (success, userId, error) = await ValidateApiToken();
         if (!success)
             return Unauthorized(new { error });
 
-        var sessionId = await GetUserSessionId(userId!.Value);
-        if (sessionId == null)
-            return BadRequest(new { error = "No active WhatsApp session" });
+        var resolvedSessionId = await GetUserSessionId(userId!.Value, sessionId);
+        if (resolvedSessionId == null)
+            return BadRequest(new { error = sessionId != null
+                ? $"WhatsApp session '{sessionId}' not found or not connected"
+                : "No active WhatsApp session" });
 
-        var chats = await _whatsappService.GetChatsAsync(sessionId);
+        var chats = await _whatsappService.GetChatsAsync(resolvedSessionId);
 
         return Ok(chats);
     }
@@ -187,17 +232,19 @@ public class WhatsAppApiController : ControllerBase
     /// GET /api/wa/getContacts
     /// </summary>
     [HttpGet("getContacts")]
-    public async Task<IActionResult> GetContacts()
+    public async Task<IActionResult> GetContacts([FromQuery] string? sessionId = null)
     {
         var (success, userId, error) = await ValidateApiToken();
         if (!success)
             return Unauthorized(new { error });
 
-        var sessionId = await GetUserSessionId(userId!.Value);
-        if (sessionId == null)
-            return BadRequest(new { error = "No active WhatsApp session" });
+        var resolvedSessionId = await GetUserSessionId(userId!.Value, sessionId);
+        if (resolvedSessionId == null)
+            return BadRequest(new { error = sessionId != null
+                ? $"WhatsApp session '{sessionId}' not found or not connected"
+                : "No active WhatsApp session" });
 
-        var contacts = await _whatsappService.GetContactsAsync(sessionId);
+        var contacts = await _whatsappService.GetContactsAsync(resolvedSessionId);
 
         // Decrypt phone numbers if encryption enabled
         if (_encryptionService.IsEncryptionEnabled && contacts != null)
@@ -217,23 +264,25 @@ public class WhatsAppApiController : ControllerBase
     /// GET /api/wa/checkNumberStatus?number=1234567890
     /// </summary>
     [HttpGet("checkNumberStatus")]
-    public async Task<IActionResult> CheckNumberStatus([FromQuery] string number)
+    public async Task<IActionResult> CheckNumberStatus([FromQuery] string number, [FromQuery] string? sessionId = null)
     {
         var (success, userId, error) = await ValidateApiToken();
         if (!success)
             return Unauthorized(new { error });
 
-        var sessionId = await GetUserSessionId(userId!.Value);
-        if (sessionId == null)
-            return BadRequest(new { error = "No active WhatsApp session" });
+        var resolvedSessionId = await GetUserSessionId(userId!.Value, sessionId);
+        if (resolvedSessionId == null)
+            return BadRequest(new { error = sessionId != null
+                ? $"WhatsApp session '{sessionId}' not found or not connected"
+                : "No active WhatsApp session" });
 
-        var result = await _whatsappService.CheckNumberStatusAsync(sessionId, number);
+        var result = await _whatsappService.CheckNumberStatusAsync(resolvedSessionId, number);
 
         return Ok(result);
     }
 }
 
-public record SendMessageRequest(string To, string Body);
-public record SendMediaRequest(string To, string MediaUrl, string? Caption);
+public record SendMessageRequest(string To, string Body, string? SessionId = null);
+public record SendMediaRequest(string To, string MediaUrl, string? Caption = null, string? SessionId = null);
 public record WhatsAppMessage(string Id, string From, string To, string Body, long Timestamp);
 public record WhatsAppContact(string Id, string Name, string Number);
