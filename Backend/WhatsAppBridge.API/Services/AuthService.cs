@@ -107,4 +107,14 @@ public class AuthService
 
         return connection.User;
     }
+
+    public async Task UpdateLastLoginAsync(int userId)
+    {
+        var user = await _context.Users.FindAsync(userId);
+        if (user != null)
+        {
+            user.LastLoginAt = DateTime.UtcNow;
+            await _context.SaveChangesAsync();
+        }
+    }
 }

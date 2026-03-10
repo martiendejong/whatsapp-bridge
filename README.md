@@ -5,6 +5,7 @@ A complete WhatsApp Web API bridge that allows you to integrate WhatsApp messagi
 ## Features
 
 - **User Authentication**: Secure login/signup system with JWT
+- **Two-Factor Authentication**: 2FA via WhatsApp with clickable links - [See 2FA Guide](./2FA-WHATSAPP.md)
 - **API Token Management**: Create and manage multiple API connections
 - **WhatsApp Integration**: Connect WhatsApp via QR code scanning
 - **RESTful API**: Clean API endpoints mirroring WhatsApp Web functionality
