@@ -21,6 +21,12 @@ public class User
 
     public bool IsAdmin { get; set; } = false;
 
+    public string? PhoneNumber { get; set; } // Phone number for 2FA
+
+    public bool TwoFactorEnabled { get; set; } = false;
+
+    public string TwoFactorMethod { get; set; } = "email"; // email or whatsapp
+
     // Navigation properties
     public ICollection<ApiConnection> ApiConnections { get; set; } = new List<ApiConnection>();
     public ICollection<WhatsAppSession> WhatsAppSessions { get; set; } = new List<WhatsAppSession>();
