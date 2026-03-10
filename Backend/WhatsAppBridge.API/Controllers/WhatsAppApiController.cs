@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using WhatsAppBridge.API.Data;
+using WhatsAppBridge.API.Models;
 using WhatsAppBridge.API.Services;
 
 namespace WhatsAppBridge.API.Controllers;
@@ -94,22 +95,35 @@ public class WhatsAppApiController : ControllerBase
     [HttpPost("sendMessage")]
     public async Task<IActionResult> SendMessage([FromBody] SendMessageRequest request)
     {
-        var (success, userId, error) = await ValidateApiToken();
-        if (!success)
-            return Unauthorized(new { error });
+        try
+        {
+            var (success, userId, error) = await ValidateApiToken();
+            if (!success)
+                return Unauthorized(new { error });
 
-        var sessionId = await GetUserSessionId(userId!.Value);
-        if (sessionId == null)
-            return BadRequest(new { error = "No active WhatsApp session" });
+            var sessionId = await GetUserSessionId(userId!.Value);
+            if (sessionId == null)
+                return BadRequest(new { error = "No active WhatsApp session" });
 
-        // Encrypt message if encryption enabled
-        var messageToSend = _encryptionService.IsEncryptionEnabled
-            ? _encryptionService.Encrypt(request.Body)
-            : request.Body;
+            // Encrypt message if encryption enabled
+            var messageToSend = _encryptionService.IsEncryptionEnabled
+                ? _encryptionService.Encrypt(request.Body)
+                : request.Body;
 
-        var result = await _whatsappService.SendMessageAsync(sessionId, request.To, messageToSend);
+            var result = await _whatsappService.SendMessageAsync(sessionId, request.To, messageToSend);
 
-        return Ok(result);
+            return Ok(result);
+        }
+        catch (WhatsAppServiceException ex)
+        {
+            // Return user-friendly error message
+            return StatusCode(400, new
+            {
+                error = ex.Error.UserMessage,
+                errorCode = ex.Error.ErrorCode,
+                details = ex.Error.AdditionalInfo
+            });
+        }
     }
 
     /// <summary>
@@ -119,17 +133,30 @@ public class WhatsAppApiController : ControllerBase
     [HttpPost("sendMedia")]
     public async Task<IActionResult> SendMedia([FromBody] SendMediaRequest request)
     {
-        var (success, userId, error) = await ValidateApiToken();
-        if (!success)
-            return Unauthorized(new { error });
+        try
+        {
+            var (success, userId, error) = await ValidateApiToken();
+            if (!success)
+                return Unauthorized(new { error });
 
-        var sessionId = await GetUserSessionId(userId!.Value);
-        if (sessionId == null)
-            return BadRequest(new { error = "No active WhatsApp session" });
+            var sessionId = await GetUserSessionId(userId!.Value);
+            if (sessionId == null)
+                return BadRequest(new { error = "No active WhatsApp session" });
 
-        var result = await _whatsappService.SendMediaAsync(sessionId, request.To, request.MediaUrl, request.Caption);
+            var result = await _whatsappService.SendMediaAsync(sessionId, request.To, request.MediaUrl, request.Caption);
 
-        return Ok(result);
+            return Ok(result);
+        }
+        catch (WhatsAppServiceException ex)
+        {
+            // Return user-friendly error message
+            return StatusCode(400, new
+            {
+                error = ex.Error.UserMessage,
+                errorCode = ex.Error.ErrorCode,
+                details = ex.Error.AdditionalInfo
+            });
+        }
     }
 
     /// <summary>
