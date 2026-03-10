@@ -18,4 +18,9 @@
     <PackageReference Include="Swashbuckle.AspNetCore" Version="6.5.0" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Dawa: C# WhatsApp client replacing Node.js/Baileys -->
+    <ProjectReference Include="..\..\..\whatsapp-bridge\dawa\Dawa\Dawa.csproj" />
+  </ItemGroup>
+
 </Project>

@@ -78,8 +78,8 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
 builder.Services.AddScoped<AuthService>();
 builder.Services.AddScoped<TwoFactorService>();
 builder.Services.AddSingleton<EncryptionService>();
-builder.Services.AddScoped<WhatsAppBridgeService>();
-builder.Services.AddHttpClient();
+// Singleton: holds long-lived Dawa WhatsAppClient instances (one per user session)
+builder.Services.AddSingleton<WhatsAppBridgeService>();
 
 // CORS
 builder.Services.AddCors(options =>
