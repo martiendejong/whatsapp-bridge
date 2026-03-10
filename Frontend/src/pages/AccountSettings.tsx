@@ -19,7 +19,7 @@ export default function AccountSettings() {
     setLoading(true);
 
     try {
-      const response = await api.put('/auth/update-email', { email });
+      await api.put('/auth/update-email', { email });
       setMessage('Email updated successfully');
 
       // Update user in context
