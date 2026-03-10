@@ -18,6 +18,9 @@ export default function Navbar() {
           <Link to="/whatsapp-sessions" style={{ color: 'white', textDecoration: 'none' }}>
             WhatsApp
           </Link>
+          <Link to="/account" style={{ color: 'white', textDecoration: 'none' }}>
+            Account
+          </Link>
           <span style={{ color: 'white', opacity: 0.8 }}>{user?.email}</span>
           <button className="btn" onClick={logout}>
             Logout

@@ -1,6 +1,9 @@
 export interface User {
   id: number;
   email: string;
+  createdAt?: string;
+  lastLoginAt?: string;
+  isActive?: boolean;
 }
 
 export interface ApiConnection {

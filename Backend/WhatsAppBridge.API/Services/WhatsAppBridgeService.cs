@@ -1,5 +1,7 @@
+using System.Net;
 using System.Text;
 using System.Text.Json;
+using WhatsAppBridge.API.Models;
 
 namespace WhatsAppBridge.API.Services;
 
@@ -70,12 +72,38 @@ public class WhatsAppBridgeService
                 return await response.Content.ReadFromJsonAsync<object>();
             }
 
-            return null;
+            // Handle specific error responses
+            var errorContent = await response.Content.ReadAsStringAsync();
+            _logger.LogError("Failed to send message. Status: {StatusCode}, Error: {Error}", response.StatusCode, errorContent);
+
+            throw response.StatusCode switch
+            {
+                HttpStatusCode.NotFound when errorContent.Contains("session", StringComparison.OrdinalIgnoreCase) =>
+                    new WhatsAppServiceException(WhatsAppError.SessionNotFound(sessionId)),
+                HttpStatusCode.Gone or HttpStatusCode.Unauthorized when errorContent.Contains("qr", StringComparison.OrdinalIgnoreCase) =>
+                    new WhatsAppServiceException(WhatsAppError.QrExpired(sessionId)),
+                HttpStatusCode.BadRequest when errorContent.Contains("disconnected", StringComparison.OrdinalIgnoreCase) =>
+                    new WhatsAppServiceException(WhatsAppError.SessionDisconnected(sessionId)),
+                HttpStatusCode.TooManyRequests =>
+                    new WhatsAppServiceException(WhatsAppError.RateLimitExceeded()),
+                HttpStatusCode.BadRequest when errorContent.Contains("invalid number", StringComparison.OrdinalIgnoreCase) =>
+                    new WhatsAppServiceException(WhatsAppError.InvalidNumber(to)),
+                _ => new WhatsAppServiceException(WhatsAppError.MessageFailed(errorContent))
+            };
+        }
+        catch (WhatsAppServiceException)
+        {
+            throw; // Re-throw WhatsApp-specific exceptions
+        }
+        catch (HttpRequestException ex)
+        {
+            _logger.LogError(ex, "Network error sending message to sessionId: {SessionId}", sessionId);
+            throw new WhatsAppServiceException(WhatsAppError.ServiceUnavailable(), ex);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error sending message");
-            return null;
+            _logger.LogError(ex, "Unexpected error sending message");
+            throw new WhatsAppServiceException(WhatsAppError.UnknownError(ex.Message), ex);
         }
     }
 
@@ -92,12 +120,36 @@ public class WhatsAppBridgeService
                 return await response.Content.ReadFromJsonAsync<object>();
             }
 
-            return null;
+            // Handle specific error responses
+            var errorContent = await response.Content.ReadAsStringAsync();
+            _logger.LogError("Failed to send media. Status: {StatusCode}, Error: {Error}", response.StatusCode, errorContent);
+
+            throw response.StatusCode switch
+            {
+                HttpStatusCode.NotFound when errorContent.Contains("session", StringComparison.OrdinalIgnoreCase) =>
+                    new WhatsAppServiceException(WhatsAppError.SessionNotFound(sessionId)),
+                HttpStatusCode.Gone or HttpStatusCode.Unauthorized when errorContent.Contains("qr", StringComparison.OrdinalIgnoreCase) =>
+                    new WhatsAppServiceException(WhatsAppError.QrExpired(sessionId)),
+                HttpStatusCode.BadRequest when errorContent.Contains("disconnected", StringComparison.OrdinalIgnoreCase) =>
+                    new WhatsAppServiceException(WhatsAppError.SessionDisconnected(sessionId)),
+                HttpStatusCode.TooManyRequests =>
+                    new WhatsAppServiceException(WhatsAppError.RateLimitExceeded()),
+                _ => new WhatsAppServiceException(WhatsAppError.MessageFailed(errorContent))
+            };
+        }
+        catch (WhatsAppServiceException)
+        {
+            throw;
+        }
+        catch (HttpRequestException ex)
+        {
+            _logger.LogError(ex, "Network error sending media to sessionId: {SessionId}", sessionId);
+            throw new WhatsAppServiceException(WhatsAppError.ServiceUnavailable(), ex);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error sending media");
-            return null;
+            _logger.LogError(ex, "Unexpected error sending media");
+            throw new WhatsAppServiceException(WhatsAppError.UnknownError(ex.Message), ex);
         }
     }
 
