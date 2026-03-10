@@ -19,6 +19,8 @@ public class User
 
     public bool IsActive { get; set; } = true;
 
+    public bool IsAdmin { get; set; } = false;
+
     public string? PhoneNumber { get; set; } // Phone number for 2FA
 
     public bool TwoFactorEnabled { get; set; } = false;

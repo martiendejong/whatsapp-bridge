@@ -4,6 +4,7 @@ export interface User {
   createdAt?: string;
   lastLoginAt?: string;
   isActive?: boolean;
+  isAdmin?: boolean;
 }
 
 export interface ApiConnection {

@@ -36,7 +36,7 @@ public class AuthController : ControllerBase
 
         return Ok(new
         {
-            user = new { user.Id, user.Email, user.CreatedAt },
+            user = new { user.Id, user.Email, user.CreatedAt, user.IsAdmin },
             token
         });
     }
@@ -100,7 +100,7 @@ public class AuthController : ControllerBase
 
         return Ok(new
         {
-            user = new { user.Id, user.Email, user.LastLoginAt, user.CreatedAt, user.IsActive },
+            user = new { user.Id, user.Email, user.LastLoginAt, user.CreatedAt, user.IsActive, user.IsAdmin },
             token
         });
     }
