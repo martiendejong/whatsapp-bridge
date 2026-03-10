@@ -12,6 +12,7 @@ public class AppDbContext : DbContext
     public DbSet<User> Users { get; set; }
     public DbSet<ApiConnection> ApiConnections { get; set; }
     public DbSet<WhatsAppSession> WhatsAppSessions { get; set; }
+    public DbSet<TwoFactorToken> TwoFactorTokens { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

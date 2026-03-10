@@ -107,4 +107,47 @@ public class AuthService
 
         return connection.User;
     }
+
+    public async Task<bool> UpdateEmailAsync(int userId, string newEmail)
+    {
+        var user = await _context.Users.FindAsync(userId);
+        if (user == null)
+            return false;
+
+        // Check if email is already in use by another user
+        if (await _context.Users.AnyAsync(u => u.Email == newEmail && u.Id != userId))
+            return false;
+
+        user.Email = newEmail;
+        await _context.SaveChangesAsync();
+
+        return true;
+    }
+
+    public async Task<bool> UpdatePasswordAsync(int userId, string currentPassword, string newPassword)
+    {
+        var user = await _context.Users.FindAsync(userId);
+        if (user == null)
+            return false;
+
+        // Verify current password
+        if (!BCrypt.Net.BCrypt.Verify(currentPassword, user.PasswordHash))
+            return false;
+
+        // Update to new password
+        user.PasswordHash = BCrypt.Net.BCrypt.HashPassword(newPassword);
+        await _context.SaveChangesAsync();
+
+        return true;
+    }
+
+    public async Task UpdateLastLoginAsync(int userId)
+    {
+        var user = await _context.Users.FindAsync(userId);
+        if (user != null)
+        {
+            user.LastLoginAt = DateTime.UtcNow;
+            await _context.SaveChangesAsync();
+        }
+    }
 }
