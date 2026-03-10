@@ -5,13 +5,15 @@ A complete WhatsApp Web API bridge that allows you to integrate WhatsApp messagi
 ## Features
 
 - **User Authentication**: Secure login/signup system with JWT
+- **Admin Role System**: Administrator privileges with server-side setup scripts - [See Admin Setup](./Backend/ADMIN-SETUP.md)
+- **Account Management**: Users can update their email and password
 - **Comprehensive Error Handling**: Friendly error messages with QR expiration detection - [See Error Guide](./ERROR-HANDLING.md)
 - **API Token Management**: Create and manage multiple API connections
 - **WhatsApp Integration**: Connect WhatsApp via QR code scanning
 - **RESTful API**: Clean API endpoints mirroring WhatsApp Web functionality
+- **AI Integration**: Comprehensive API documentation for automated systems - [See AI Integration Guide](./AI-INTEGRATION.md)
 - **Optional Encryption**: AES-256 encryption for sensitive data (phone numbers, tokens, messages)
 - **Windows VPS Ready**: Complete deployment scripts for production
-- **AI Integration**: Comprehensive API documentation for automated systems - [See AI Integration Guide](./AI-INTEGRATION.md)
 
 ## Architecture
 
@@ -100,6 +102,25 @@ Or deploy individually:
 - **Backend API**: `C:\inetpub\whatsappbridge-api` (Port 5000)
 - **WhatsApp Service**: `C:\Services\WhatsAppBridge` (Port 3000)
 - **Frontend**: `C:\inetpub\whatsappbridge-web` (Port 80)
+
+## Admin User Setup
+
+WhatsApp Bridge includes an admin role system. See [Backend/ADMIN-SETUP.md](./Backend/ADMIN-SETUP.md) for detailed instructions.
+
+**Quick setup:**
+
+```bash
+# Navigate to Backend directory
+cd Backend
+
+# Make a user admin (PowerShell)
+.\make-admin.ps1 -Email "admin@example.com"
+
+# Or using bash
+./make-admin.sh admin@example.com
+```
+
+**Requirements:** SQLite3 command-line tool must be installed on the server.
 
 ## Security Configuration
 

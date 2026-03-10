@@ -19,6 +19,8 @@ public class User
 
     public bool IsActive { get; set; } = true;
 
+    public bool IsAdmin { get; set; } = false;
+
     // Navigation properties
     public ICollection<ApiConnection> ApiConnections { get; set; } = new List<ApiConnection>();
     public ICollection<WhatsAppSession> WhatsAppSessions { get; set; } = new List<WhatsAppSession>();
