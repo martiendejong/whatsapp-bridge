@@ -10,6 +10,7 @@ public static class BinaryNodeEncoder
     public static byte[] Encode(BinaryNode node)
     {
         var ms = new MemoryStream();
+        ms.WriteByte(0); // Leading type byte: 0x00 = regular binary node (mirrors the decoder which strips this byte)
         WriteNode(ms, node);
         return ms.ToArray();
     }
@@ -96,10 +97,10 @@ public static class BinaryNodeEncoder
         }
 
         // Try dictionary lookup first
-        if (WATags.TryGetToken(value, out var dictByte, out var idxByte))
+        if (WATags.TryGetToken(value, out var byte1, out var byte2, out var isSingleByte))
         {
-            s.WriteByte(dictByte);
-            s.WriteByte(idxByte);
+            s.WriteByte(byte1);
+            if (!isSingleByte) s.WriteByte(byte2);
             return;
         }
 

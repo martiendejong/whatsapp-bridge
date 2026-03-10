@@ -10,6 +10,8 @@ public static class BinaryNodeDecoder
     public static BinaryNode Decode(byte[] data)
     {
         var reader = new BinaryReader(data);
+        // WA frames have a leading type byte (0x00 = regular binary node). Strip it.
+        if (reader.HasMore) reader.ReadByte();
         return ReadNode(ref reader);
     }
 
@@ -91,11 +93,16 @@ public static class BinaryNodeDecoder
     {
         var b = reader.ReadByte();
 
+        // Bytes 1-235: single-byte tokens — byte value IS the index into SingleByteTokens
+        if (b >= 1 && b < WATags.SingleByteTokens.Length)
+            return WATags.SingleByteTokens[b];
+
+        // Bytes 236-239: double-byte tokens — next byte is index within sub-array
         if (b >= WATags.DictionaryBase && b <= WATags.DictionaryBase + 3)
         {
             int dictIndex = b - WATags.DictionaryBase;
             int tokenIndex = reader.ReadByte();
-            return WATags.GetToken(dictIndex, tokenIndex) ?? $"[DICT{dictIndex}:{tokenIndex}]";
+            return WATags.GetDoubleByteToken(dictIndex, tokenIndex) ?? $"[DICT{dictIndex}:{tokenIndex}]";
         }
 
         switch (b)
@@ -122,6 +129,32 @@ public static class BinaryNodeDecoder
                 var user = ReadString(ref reader);
                 var server = ReadString(ref reader);
                 return $"{user}@{server}";
+            }
+            case WATags.InteropJid:
+            {
+                // device:agent:user@server
+                var user = ReadString(ref reader);
+                var device = reader.ReadByte();
+                var agent = reader.ReadByte();
+                var server = ReadString(ref reader);
+                return $"{user}:{device}:{agent}@{server}";
+            }
+            case WATags.FbJid:
+            {
+                var user = ReadString(ref reader);
+                var device = reader.ReadByte();
+                var agent = reader.ReadByte();
+                var server = ReadString(ref reader);
+                return $"{user}:{device}:{agent}@{server}";
+            }
+            case WATags.AdJid:
+            {
+                // AD JID: user:device:agent@server
+                var user = ReadString(ref reader);
+                var device = reader.ReadByte();
+                var agent = reader.ReadByte();
+                var server = ReadString(ref reader);
+                return $"{user}:{device}:{agent}@{server}";
             }
             case WATags.Nibble8:
             {

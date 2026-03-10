@@ -42,11 +42,10 @@ public sealed class NoiseState
     /// <summary>Mixes input key material into the chaining key and optionally sets a new cipher key.</summary>
     public void MixKey(byte[] inputKeyMaterial)
     {
-        // HKDF output: first 32 bytes = new encryption key (k), second 32 bytes = new chaining key (ck).
-        // Matches Baileys: encKey = hashOutput.slice(0, 32), salt = hashOutput.slice(32)
-        var (k, ck) = DawaHKDF.DeriveKeys(inputKeyMaterial, _ck);
-        _ck = ck;
-        _k = k;
+        // Noise spec + Baileys keyDerivation: first 32 bytes = new chaining key, second 32 bytes = new cipher key.
+        var (newCk, newK) = DawaHKDF.DeriveKeys(inputKeyMaterial, _ck);
+        _ck = newCk;
+        _k = newK;
         _n = 0;
     }
 

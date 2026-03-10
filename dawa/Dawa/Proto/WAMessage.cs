@@ -64,18 +64,73 @@ public sealed class DevicePairingRegistrationData
 /// <summary>DeviceProps (companion registration info), field 8 of DevicePairingRegistrationData.</summary>
 public sealed class DevicePropsMessage
 {
-    public string Os             { get; set; } = "Windows";
-    // PlatformType: CHROME=1
-    public int PlatformType      { get; set; } = 1;
-    public bool RequireFullSync  { get; set; } = false;
+    public string Os             { get; set; } = "Mac OS";
+    // PlatformType: CHROME=1, SAFARI=5, CATALINA=12
+    public int PlatformType      { get; set; } = 1; // CHROME
+    public DevicePropsVersion? Version { get; set; }
+    public bool RequireFullSync  { get; set; } = true;
+    public HistorySyncConfig? HistorySyncConfig { get; set; }
 
     public byte[] ToByteArray()
     {
-        // Match Baileys exactly: only os (field 1) + platformType (field 3).
-        // requireFullSync=false is proto3 default — omit. No version, no HistorySyncConfig.
         var buf = new List<byte>();
         ProtoEncoder.WriteString(buf, 1, Os);
+        if (Version != null) ProtoEncoder.WriteMessage(buf, 2, Version.ToByteArray());
         ProtoEncoder.WriteInt32(buf, 3, PlatformType);
+        ProtoEncoder.WriteBoolAlways(buf, 4, RequireFullSync);
+        if (HistorySyncConfig != null) ProtoEncoder.WriteMessage(buf, 5, HistorySyncConfig.ToByteArray());
+        return [.. buf];
+    }
+}
+
+public sealed class DevicePropsVersion
+{
+    public uint Primary   { get; set; } = 10;
+    public uint Secondary { get; set; } = 15;
+    public uint Tertiary  { get; set; } = 7;
+
+    public byte[] ToByteArray()
+    {
+        var buf = new List<byte>();
+        ProtoEncoder.WriteUInt32(buf, 1, Primary);
+        ProtoEncoder.WriteUInt32(buf, 2, Secondary);
+        ProtoEncoder.WriteUInt32(buf, 3, Tertiary);
+        return [.. buf];
+    }
+}
+
+/// <summary>HistorySyncConfig for DeviceProps — matches Baileys DEFAULT_CONNECTION_CONFIG.syncFullHistory=true defaults.</summary>
+public sealed class HistorySyncConfig
+{
+    public byte[] ToByteArray()
+    {
+        var buf = new List<byte>();
+        // storageQuotaMb = 10240 (field 3)
+        ProtoEncoder.WriteUInt32(buf, 3, 10240);
+        // inlineInitialPayloadInE2EeMsg = true (field 4)
+        ProtoEncoder.WriteBoolAlways(buf, 4, true);
+        // recentSyncDaysLimit: undefined → skip (field 5)
+        // supportCallLogHistory = false (field 6) — explicitly set in Baileys
+        ProtoEncoder.WriteBoolAlways(buf, 6, false);
+        // supportBotUserAgentChatHistory = true (field 7)
+        ProtoEncoder.WriteBoolAlways(buf, 7, true);
+        // supportCagReactionsAndPolls = true (field 8)
+        ProtoEncoder.WriteBoolAlways(buf, 8, true);
+        // supportBizHostedMsg = true (field 9)
+        ProtoEncoder.WriteBoolAlways(buf, 9, true);
+        // supportRecentSyncChunkMessageCountTuning = true (field 10)
+        ProtoEncoder.WriteBoolAlways(buf, 10, true);
+        // supportHostedGroupMsg = true (field 11)
+        ProtoEncoder.WriteBoolAlways(buf, 11, true);
+        // supportFbidBotChatHistory = true (field 12)
+        ProtoEncoder.WriteBoolAlways(buf, 12, true);
+        // supportAddOnHistorySyncMigration: undefined → skip (field 13)
+        // supportMessageAssociation = true (field 14)
+        ProtoEncoder.WriteBoolAlways(buf, 14, true);
+        // supportGroupHistory = false (field 15) — explicitly set in Baileys
+        ProtoEncoder.WriteBoolAlways(buf, 15, false);
+        // onDemandReady: undefined → skip (field 16)
+        // supportGuestChat: undefined → skip (field 17)
         return [.. buf];
     }
 }

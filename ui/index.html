@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WhatsApp Bridge — QR Pairing</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      min-height: 100vh;
+      background: #0f172a;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: system-ui, -apple-system, sans-serif;
+      color: #f1f5f9;
+    }
+    .card {
+      background: #1e293b;
+      border-radius: 16px;
+      padding: 40px;
+      max-width: 480px;
+      width: 100%;
+      box-shadow: 0 25px 50px rgba(0,0,0,0.5);
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 28px;
+    }
+    .header svg { flex-shrink: 0; }
+    .header h1 { font-size: 20px; font-weight: 700; }
+    .header p { font-size: 13px; color: #94a3b8; margin-top: 2px; }
+    .status-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 14px;
+      background: #0f172a;
+      border-radius: 8px;
+      margin-bottom: 24px;
+      font-size: 14px;
+      color: #cbd5e1;
+    }
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .dot.green  { background: #22c55e; box-shadow: 0 0 6px #22c55e; }
+    .dot.yellow { background: #f59e0b; box-shadow: 0 0 6px #f59e0b; }
+    .dot.red    { background: #ef4444; box-shadow: 0 0 6px #ef4444; }
+    .qr-box {
+      background: #fff;
+      border-radius: 12px;
+      padding: 16px;
+      display: flex;
+      justify-content: center;
+      margin-bottom: 20px;
+    }
+    .qr-box img { width: 220px; height: 220px; display: block; }
+    .instructions { color: #94a3b8; font-size: 13px; line-height: 1.8; padding-left: 20px; }
+    .connected-icon { font-size: 64px; text-align: center; margin-bottom: 16px; }
+    .connected-text { color: #94a3b8; text-align: center; margin-bottom: 24px; font-size: 14px; }
+    .btn-logout {
+      display: block;
+      margin: 0 auto;
+      background: #ef4444;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: 10px 20px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    .btn-logout:hover { background: #dc2626; }
+    .spinner-wrap { text-align: center; padding: 40px; }
+    .spinner {
+      width: 40px; height: 40px;
+      border: 3px solid #334155;
+      border-top-color: #25d366;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      margin: 0 auto 16px;
+    }
+    .error-wrap { text-align: center; padding: 40px; }
+    .error-icon { font-size: 48px; margin-bottom: 16px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="header">
+      <svg width="32" height="32" viewBox="0 0 24 24" fill="#25d366">
+        <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347z"/>
+        <path d="M12 0C5.373 0 0 5.373 0 12c0 2.125.558 4.122 1.532 5.856L.057 23.571a.75.75 0 0 0 .918.919l5.815-1.485A11.945 11.945 0 0 0 12 24c6.627 0 12-5.373 12-12S18.627 0 12 0zm0 22c-1.907 0-3.693-.503-5.24-1.382l-.376-.215-3.892.995.977-3.79-.233-.389A9.96 9.96 0 0 1 2 12C2 6.477 6.477 2 12 2s10 4.477 10 10-4.477 10-10 10z"/>
+      </svg>
+      <div>
+        <h1>WhatsApp Bridge</h1>
+        <p>Dawa — QR Pairing &amp; Status</p>
+      </div>
+    </div>
+
+    <div class="status-bar">
+      <div class="dot" id="dot"></div>
+      <span id="status-text">Connecting...</span>
+    </div>
+
+    <div id="content"></div>
+  </div>
+
+  <script>
+    // API base — client-manager API runs on 54501 in dev
+    const API = 'https://localhost:54501/api/whatsapp'
+    let qrTs = Date.now()
+    let lastState = null
+
+    async function fetchStatus() {
+      try {
+        const r = await fetch(`${API}/status`, { mode: 'cors' })
+        if (!r.ok) throw new Error(`HTTP ${r.status}`)
+        return await r.json()
+      } catch {
+        return null
+      }
+    }
+
+    function renderConnected() {
+      document.getElementById('content').innerHTML = `
+        <div class="connected-icon">✅</div>
+        <p class="connected-text">WhatsApp is connected and ready.</p>
+        <button class="btn-logout" onclick="logout()">Logout / Re-pair</button>
+      `
+    }
+
+    function renderQR() {
+      document.getElementById('content').innerHTML = `
+        <div class="qr-box">
+          <img id="qr-img" src="${API}/qr.png?t=${qrTs}" alt="QR Code" onerror="this.style.opacity=0.3" />
+        </div>
+        <ol class="instructions">
+          <li>Open WhatsApp on your phone</li>
+          <li>Go to Settings → Linked Devices</li>
+          <li>Tap "Link a Device" and scan this code</li>
+        </ol>
+      `
+    }
+
+    function renderWaiting() {
+      document.getElementById('content').innerHTML = `
+        <div class="spinner-wrap">
+          <div class="spinner"></div>
+          <p style="color:#94a3b8">Waiting for QR code...</p>
+        </div>
+      `
+    }
+
+    function renderError() {
+      document.getElementById('content').innerHTML = `
+        <div class="error-wrap">
+          <div class="error-icon">⚠️</div>
+          <p style="color:#94a3b8">Cannot reach the WhatsApp Bridge API.<br/>Make sure the client-manager API is running on port 54501.</p>
+        </div>
+      `
+    }
+
+    async function logout() {
+      if (!confirm('Delete WhatsApp session? You will need to scan QR again.')) return
+      await fetch(`${API}/logout`, { method: 'POST', mode: 'cors' })
+      qrTs = Date.now()
+      lastState = null
+      poll()
+    }
+
+    async function poll() {
+      const s = await fetchStatus()
+      const dot = document.getElementById('dot')
+      const txt = document.getElementById('status-text')
+
+      if (!s) {
+        dot.className = 'dot red'
+        txt.textContent = 'API unreachable'
+        renderError()
+        return
+      }
+
+      const stateKey = `${s.state}-${s.isConnected}-${s.qrPending}`
+      if (stateKey !== lastState) {
+        lastState = stateKey
+        if (s.isConnected) {
+          dot.className = 'dot green'
+          txt.textContent = 'Connected' + (s.hasSession ? ' (session saved)' : '')
+          renderConnected()
+        } else if (s.qrPending) {
+          dot.className = 'dot yellow'
+          txt.textContent = s.state
+          renderQR()
+        } else {
+          dot.className = 'dot yellow'
+          txt.textContent = s.state
+          renderWaiting()
+        }
+      }
+    }
+
+    // Poll every 3s, refresh QR image every 20s
+    poll()
+    setInterval(poll, 3000)
+    setInterval(() => {
+      qrTs = Date.now()
+      const img = document.getElementById('qr-img')
+      if (img) img.src = `${API}/qr.png?t=${qrTs}`
+    }, 20000)
+  </script>
+</body>
+</html>

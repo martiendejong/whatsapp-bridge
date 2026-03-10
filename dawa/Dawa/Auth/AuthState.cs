@@ -95,10 +95,11 @@ public sealed class AuthState
 
     private static byte[] SignPreKey(byte[] identityPriv, byte[] preKeyPub)
     {
+        // Baileys/Signal convention: sign [0x05 || preKeyPub] (33 bytes), not just preKeyPub.
+        // generateSignalPubKey() in Baileys prepends KEY_BUNDLE_TYPE (0x05) before signing.
         // XEdDSA: uses the Curve25519 identity private key directly as an Ed25519 scalar.
-        // This matches Baileys / Signal's curve25519-js curve25519_sign() behaviour.
-        // Returns a 64-byte signature (R ‖ s).
-        return XEdDSA.Sign(identityPriv, preKeyPub);
+        byte[] msgToSign = [0x05, .. preKeyPub];
+        return XEdDSA.Sign(identityPriv, msgToSign);
     }
 }
 

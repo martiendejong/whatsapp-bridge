@@ -170,8 +170,9 @@ public sealed class NoiseProcessor : IAsyncDisposable
                 if (frame == null) break;
 
                 var decrypted = DecryptFrame(frame);
+                _logger.LogInformation("Raw frame ({Len} bytes): {Hex}", decrypted.Length, BitConverter.ToString(decrypted, 0, Math.Min(32, decrypted.Length)));
                 var node = BinaryNodeDecoder.Decode(decrypted);
-                _logger.LogDebug("Received node: {Tag}", node.Tag);
+                _logger.LogInformation("Received node: {Node}", node.ToString());
 
                 await HandleNodeAsync(node, ct);
             }
@@ -237,40 +238,51 @@ public sealed class NoiseProcessor : IAsyncDisposable
         }
         else if (type == "set")
         {
-            // Server is initiating a request (e.g., pair-device from server side)
+            // Server sends pair-device IQ: ACK it, then generate QR from the contained refs
             var pairDevice = iq.FindChild("pair-device");
             if (pairDevice != null)
             {
-                // Respond with an ack
                 var ack = new BinaryNode("iq", new()
                 {
-                    ["id"] = iq.GetAttr("id") ?? "",
+                    ["id"]   = iq.GetAttr("id") ?? "",
                     ["type"] = "result",
-                    ["to"] = iq.GetAttr("from") ?? "s.whatsapp.net",
+                    ["to"]   = "s.whatsapp.net",
                 });
                 await SendNodeAsync(ack, ct);
+                GenerateQRCode(pairDevice);
             }
         }
     }
 
-    private async Task HandlePairDeviceResultAsync(BinaryNode pairDevice, CancellationToken ct)
+    private void GenerateQRCode(BinaryNode pairDevice)
     {
-        // Extract ref token from server
+        // Collect all ref nodes (server may send multiple for QR rotation)
         var refNode = pairDevice.FindChild("ref");
-        if (refNode?.Text == null) return;
+        if (refNode == null) return;
 
-        var ref_ = refNode.Text;
-        var qrParts = new[]
-        {
+        // ref content is binary (UTF-8 bytes) per Baileys
+        string ref_;
+        if (refNode.Data != null)
+            ref_ = System.Text.Encoding.UTF8.GetString(refNode.Data);
+        else if (refNode.Text != null)
+            ref_ = refNode.Text;
+        else return;
+
+        var qrString = string.Join(",",
             ref_,
             Convert.ToBase64String(_auth.NoiseKeyPublic),
             Convert.ToBase64String(_auth.SignedIdentityKeyPublic),
-            Convert.ToBase64String(_auth.AdvSecretKey),
-        };
-        var qrString = string.Join(",", qrParts);
+            Convert.ToBase64String(_auth.AdvSecretKey));
 
         _logger.LogInformation("QR Code ready for scanning.");
         QRCodeGenerated?.Invoke(this, qrString);
+    }
+
+    private async Task HandlePairDeviceResultAsync(BinaryNode pairDevice, CancellationToken ct)
+    {
+        // Called when server sends iq type="result" with pair-device (legacy path)
+        GenerateQRCode(pairDevice);
+        await Task.CompletedTask;
     }
 
     private void HandlePairSuccess(BinaryNode pairSuccess)
@@ -422,20 +434,19 @@ public sealed class NoiseProcessor : IAsyncDisposable
 
     // ─── Helpers ────────────────────────────────────────────────────────────
 
-    // Baileys default version: [2, 3000, 1015920]
-    // buildHash = MD5("2.3000.1015920")
-    private const string WA_VERSION = "2.3000.1015920";
+    // WA version: matches Baileys 7.0.0-rc.9 DEFAULT_CONNECTION_CONFIG version [2,3000,1027934701].
+    private const string WA_VERSION = "2.3000.1027934701";
 
     private byte[] BuildClientPayload()
     {
         var userAgent = new UserAgent
         {
-            Platform = 14, // WEB
-            AppVersion = new AppVersion { Primary = 2, Secondary = 3000, Tertiary = 1015920 },
+            Platform = 24, // MACOS — server accepts this for fresh registration
+            AppVersion = new AppVersion { Primary = 2, Secondary = 3000, Tertiary = 1027934701 },
             Mcc = "000",
             Mnc = "000",
             OsVersion = "0.1",
-            Device = "Chrome",    // Baileys browser[1] = "Chrome" (Browsers.ubuntu('Chrome'))
+            Device = "Desktop",
             OsBuildNumber = "0.1",
             LocaleLanguageIso6391 = "en",
             LocaleCountryIso31661Alpha2 = "US",
@@ -461,8 +472,11 @@ public sealed class NoiseProcessor : IAsyncDisposable
 
             var deviceProps = new DevicePropsMessage
             {
-                Os = "Windows",
-                PlatformType = 1, // CHROME
+                Os = "Mac OS",
+                PlatformType = 1, // CHROME — matches Baileys Browsers.macOS('Chrome') default
+                Version = new DevicePropsVersion { Primary = 10, Secondary = 15, Tertiary = 7 },
+                RequireFullSync = true,
+                HistorySyncConfig = new HistorySyncConfig(),
             }.ToByteArray();
 
             return new ClientPayload

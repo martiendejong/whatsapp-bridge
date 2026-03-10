@@ -1,0 +1,9 @@
+{
+  "name": "whatsapp-bridge-ui",
+  "version": "1.0.0",
+  "description": "Standalone dev UI for WhatsApp Bridge QR pairing",
+  "scripts": {
+    "dev": "npx serve . --listen 5174 --no-clipboard"
+  },
+  "devPort": 5174
+}
