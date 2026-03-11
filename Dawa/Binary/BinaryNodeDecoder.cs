@@ -91,6 +91,14 @@ public static class BinaryNodeDecoder
     {
         var b = reader.ReadByte();
 
+        // Single-byte tokens: bytes 3–235 map directly to Dictionary0.
+        // Baileys: singleByteTokens[3] = "xmlstreamstart" = Dictionary0[0].
+        if (b >= 3 && b < WATags.DictionaryBase)
+        {
+            int tokenIndex = b - 3;
+            return WATags.GetToken(0, tokenIndex) ?? $"[TOKEN{b}]";
+        }
+
         if (b >= WATags.DictionaryBase && b <= WATags.DictionaryBase + 3)
         {
             int dictIndex = b - WATags.DictionaryBase;
