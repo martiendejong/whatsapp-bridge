@@ -694,10 +694,15 @@ public sealed class NoiseProcessor : IAsyncDisposable
         else
         {
             // Session restore (login)
-            ulong.TryParse(_auth.Me?.Id.Split('@')[0] ?? "0", out var userId);
+            // Me.Id format: "31633984381:20@s.whatsapp.net" — extract phone and device number
+            var rawId = _auth.Me?.Id.Split('@')[0] ?? "0"; // "31633984381:20"
+            var parts = rawId.Split(':');
+            ulong.TryParse(parts[0], out var userId);      // "31633984381" → 31633984381
+            uint.TryParse(parts.Length > 1 ? parts[1] : "0", out var deviceId); // "20" → 20
             return new ClientPayload
             {
                 Username = userId,
+                Device = deviceId,   // CRITICAL: server needs device number to route the session
                 Passive = true,
                 Pull = true,
                 ConnectType = 1,

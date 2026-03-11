@@ -9,6 +9,7 @@ export default function WhatsAppSessions() {
   const [qrCode, setQrCode] = useState<string | null>(null);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [error, setError] = useState('');
+  const [disconnectedAt, setDisconnectedAt] = useState<number | null>(null);
   const [testingId, setTestingId] = useState<number | null>(null);
   const [testResults, setTestResults] = useState<{ [key: number]: { success: boolean; message: string; details?: any } }>({});
 
@@ -44,13 +45,27 @@ export default function WhatsAppSessions() {
       if (response.data.status === 'connected') {
         setQrCode(null);
         setCurrentSessionId(null);
+        setDisconnectedAt(null);
         loadSessions();
-      } else if (response.data.status === 'failed' || response.data.status === 'disconnected') {
-        // Server rejected the connection (rate limiting, bad payload, etc.)
+      } else if (response.data.status === 'failed') {
+        // Hard failure (e.g. rate limiting before QR was even generated)
         setQrCode(null);
         setCurrentSessionId(null);
+        setDisconnectedAt(null);
         setError('WhatsApp rejected the connection. This is usually due to rate limiting — please wait a few minutes and try again.');
         loadSessions();
+      } else if (response.data.status === 'disconnected') {
+        // After QR scan, WhatsApp sends stream:error 515 (normal) then the client
+        // auto-reconnects within ~5s. Keep polling for up to 15s before giving up.
+        if (!disconnectedAt) {
+          setDisconnectedAt(Date.now());
+        } else if (Date.now() - disconnectedAt > 15000) {
+          setQrCode(null);
+          setCurrentSessionId(null);
+          setDisconnectedAt(null);
+          setError('WhatsApp rejected the connection. This is usually due to rate limiting — please wait a few minutes and try again.');
+          loadSessions();
+        }
       } else if (response.data.qrCode) {
         setQrCode(response.data.qrCode);
       }
@@ -62,6 +77,7 @@ export default function WhatsAppSessions() {
   const handleCreateSession = async () => {
     setError('');
     setQrCode(null);
+    setDisconnectedAt(null);
 
     try {
       const response = await whatsapp.createSession();

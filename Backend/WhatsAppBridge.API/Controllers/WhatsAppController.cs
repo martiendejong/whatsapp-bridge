@@ -96,6 +96,35 @@ public class WhatsAppController : ControllerBase
         return Ok(new { qrCode = session.QrCode, status = session.Status });
     }
 
+    [HttpPost("sessions/{sessionId}/test")]
+    public async Task<IActionResult> TestSession(string sessionId)
+    {
+        var userId = GetUserId();
+        var session = await _context.WhatsAppSessions
+            .FirstOrDefaultAsync(s => s.SessionId == sessionId && s.UserId == userId);
+
+        if (session == null)
+            return NotFound(new { success = false, message = "Session not found" });
+
+        try
+        {
+            var isConnected = _whatsappService.IsSessionConnected(sessionId);
+            if (!isConnected)
+                return Ok(new { success = false, message = "Session is not connected" });
+
+            // Update last seen
+            session.LastSeenAt = DateTime.UtcNow;
+            await _context.SaveChangesAsync();
+
+            var phoneNumber = _encryptionService.Decrypt(session.PhoneNumber);
+            return Ok(new { success = true, message = "WhatsApp session is active", phoneNumber });
+        }
+        catch (Exception ex)
+        {
+            return Ok(new { success = false, message = ex.Message });
+        }
+    }
+
     [HttpDelete("sessions/{sessionId}")]
     public async Task<IActionResult> DeleteSession(string sessionId)
     {

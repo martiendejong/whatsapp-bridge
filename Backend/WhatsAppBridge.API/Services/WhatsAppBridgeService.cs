@@ -106,6 +106,50 @@ public class WhatsAppBridgeService : IAsyncDisposable
         return null; // Timed out waiting for QR
     }
 
+    /// <summary>
+    /// Silently restores a saved session on startup without waiting for QR.
+    /// Only works if creds.json exists in the session directory.
+    /// </summary>
+    public Task RestoreSessionAsync(string sessionId)
+    {
+        var sessionsRoot = _configuration["WhatsApp:SessionsDirectory"]
+            ?? Path.Combine(AppContext.BaseDirectory, "whatsapp-sessions");
+        var sessionDir = Path.Combine(sessionsRoot, sessionId);
+
+        if (!Directory.Exists(sessionDir))
+            return Task.CompletedTask;
+
+        if (_clients.ContainsKey(sessionId))
+            return Task.CompletedTask;
+
+        var client = WhatsAppClient.Create(sessionDir, _loggerFactory);
+        _clients[sessionId] = client;
+
+        client.QRCodeReceived += (_, qr) =>
+            _ = UpdateSessionAsync(sessionId, s => s.QrCode = qr);
+
+        client.Connected += (_, _) =>
+        {
+            _logger.LogInformation("Session {SessionId} restored and connected", sessionId);
+            _ = UpdateSessionAsync(sessionId, s =>
+            {
+                s.Status = "connected";
+                s.LastSeenAt = DateTime.UtcNow;
+            });
+        };
+
+        client.Disconnected += (_, _) =>
+            _ = UpdateSessionAsync(sessionId, s =>
+            {
+                s.Status = "disconnected";
+                s.LastSeenAt = DateTime.UtcNow;
+            });
+
+        // Fire and forget — reconnects in background
+        _ = client.ConnectAsync(CancellationToken.None);
+        return Task.CompletedTask;
+    }
+
     public async Task<bool> DisconnectSessionAsync(string sessionId)
     {
         if (_clients.TryRemove(sessionId, out var client))
@@ -147,6 +191,9 @@ public class WhatsAppBridgeService : IAsyncDisposable
         => Task.FromResult<object?>(new { number, isWhatsApp = true });
 
     // ─── Helpers ──────────────────────────────────────────────────────────────
+
+    public bool IsSessionConnected(string sessionId)
+        => _clients.TryGetValue(sessionId, out var client) && client.IsConnected;
 
     private WhatsAppClient GetConnectedClient(string sessionId)
     {

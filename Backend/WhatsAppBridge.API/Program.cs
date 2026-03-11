@@ -116,4 +116,17 @@ using (var scope = app.Services.CreateScope())
     db.Database.EnsureCreated();
 }
 
+// Restore connected WhatsApp sessions on startup
+using (var scope = app.Services.CreateScope())
+{
+    var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+    var whatsappService = app.Services.GetRequiredService<WhatsAppBridgeService>();
+    var connectedSessions = db.WhatsAppSessions
+        .Where(s => s.Status == "connected")
+        .Select(s => s.SessionId)
+        .ToList();
+    foreach (var sessionId in connectedSessions)
+        await whatsappService.RestoreSessionAsync(sessionId);
+}
+
 app.Run();
