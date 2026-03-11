@@ -422,16 +422,16 @@ public sealed class NoiseProcessor : IAsyncDisposable
 
     // ─── Helpers ────────────────────────────────────────────────────────────
 
-    // Baileys default version: [2, 3000, 1015920]
-    // buildHash = MD5("2.3000.1015920")
-    private const string WA_VERSION = "2.3000.1015920";
+    // Baileys default version: [2, 3000, 1033846690]
+    // buildHash = MD5("2.3000.1033846690")
+    private const string WA_VERSION = "2.3000.1033846690";
 
     private byte[] BuildClientPayload()
     {
         var userAgent = new UserAgent
         {
             Platform = 14, // WEB
-            AppVersion = new AppVersion { Primary = 2, Secondary = 3000, Tertiary = 1015920 },
+            AppVersion = new AppVersion { Primary = 2, Secondary = 3000, Tertiary = 1033846690 },
             Mcc = "000",
             Mnc = "000",
             OsVersion = "0.1",
@@ -461,7 +461,7 @@ public sealed class NoiseProcessor : IAsyncDisposable
 
             var deviceProps = new DevicePropsMessage
             {
-                Os = "Windows",
+                Os = "Macintosh",
                 PlatformType = 1, // CHROME
             }.ToByteArray();
 
