@@ -64,12 +64,14 @@ public sealed class DevicePairingRegistrationData
 /// <summary>DeviceProps (companion registration info), field 8 of DevicePairingRegistrationData.</summary>
 public sealed class DevicePropsMessage
 {
-    public string Os             { get; set; } = "Mac OS";
-    // PlatformType: CHROME=1, SAFARI=5, CATALINA=12
-    public int PlatformType      { get; set; } = 1; // CHROME
-    public DevicePropsVersion? Version { get; set; }
+    public string Os             { get; set; } = "Ubuntu";
+    // Version = WA app version (Baileys sends [2, 3000, tertiary]), NOT the OS/browser version.
+    public AppVersion? Version   { get; set; } = new AppVersion { Primary = 2, Secondary = 3000, Tertiary = 1033846690 };
+    // PlatformType: CHROME=1
+    public int PlatformType      { get; set; } = 1;
+    // requireFullSync: true triggers the server to include history in initial sync (Baileys default: true)
     public bool RequireFullSync  { get; set; } = true;
-    public HistorySyncConfig? HistorySyncConfig { get; set; }
+    public HistorySyncConfigMessage? HistorySyncConfig { get; set; } = new();
 
     public byte[] ToByteArray()
     {
@@ -77,60 +79,31 @@ public sealed class DevicePropsMessage
         ProtoEncoder.WriteString(buf, 1, Os);
         if (Version != null) ProtoEncoder.WriteMessage(buf, 2, Version.ToByteArray());
         ProtoEncoder.WriteInt32(buf, 3, PlatformType);
-        ProtoEncoder.WriteBoolAlways(buf, 4, RequireFullSync);
+        ProtoEncoder.WriteBool(buf, 4, RequireFullSync);  // always emit — server expects it
         if (HistorySyncConfig != null) ProtoEncoder.WriteMessage(buf, 5, HistorySyncConfig.ToByteArray());
         return [.. buf];
     }
 }
 
-public sealed class DevicePropsVersion
-{
-    public uint Primary   { get; set; } = 10;
-    public uint Secondary { get; set; } = 15;
-    public uint Tertiary  { get; set; } = 7;
-
-    public byte[] ToByteArray()
-    {
-        var buf = new List<byte>();
-        ProtoEncoder.WriteUInt32(buf, 1, Primary);
-        ProtoEncoder.WriteUInt32(buf, 2, Secondary);
-        ProtoEncoder.WriteUInt32(buf, 3, Tertiary);
-        return [.. buf];
-    }
-}
-
-/// <summary>HistorySyncConfig for DeviceProps — matches Baileys DEFAULT_CONNECTION_CONFIG.syncFullHistory=true defaults.</summary>
-public sealed class HistorySyncConfig
+/// <summary>HistorySyncConfig nested in DeviceProps (field 5).</summary>
+public sealed class HistorySyncConfigMessage
 {
     public byte[] ToByteArray()
     {
         var buf = new List<byte>();
-        // storageQuotaMb = 10240 (field 3)
-        ProtoEncoder.WriteUInt32(buf, 3, 10240);
-        // inlineInitialPayloadInE2EeMsg = true (field 4)
-        ProtoEncoder.WriteBoolAlways(buf, 4, true);
-        // recentSyncDaysLimit: undefined → skip (field 5)
-        // supportCallLogHistory = false (field 6) — explicitly set in Baileys
-        ProtoEncoder.WriteBoolAlways(buf, 6, false);
-        // supportBotUserAgentChatHistory = true (field 7)
-        ProtoEncoder.WriteBoolAlways(buf, 7, true);
-        // supportCagReactionsAndPolls = true (field 8)
-        ProtoEncoder.WriteBoolAlways(buf, 8, true);
-        // supportBizHostedMsg = true (field 9)
-        ProtoEncoder.WriteBoolAlways(buf, 9, true);
-        // supportRecentSyncChunkMessageCountTuning = true (field 10)
-        ProtoEncoder.WriteBoolAlways(buf, 10, true);
-        // supportHostedGroupMsg = true (field 11)
-        ProtoEncoder.WriteBoolAlways(buf, 11, true);
-        // supportFbidBotChatHistory = true (field 12)
-        ProtoEncoder.WriteBoolAlways(buf, 12, true);
-        // supportAddOnHistorySyncMigration: undefined → skip (field 13)
-        // supportMessageAssociation = true (field 14)
-        ProtoEncoder.WriteBoolAlways(buf, 14, true);
-        // supportGroupHistory = false (field 15) — explicitly set in Baileys
-        ProtoEncoder.WriteBoolAlways(buf, 15, false);
-        // onDemandReady: undefined → skip (field 16)
-        // supportGuestChat: undefined → skip (field 17)
+        ProtoEncoder.WriteUInt32(buf, 1, 3);        // fullSyncDaysLimit = 3  (Baileys: fullCount)
+        ProtoEncoder.WriteUInt32(buf, 3, 2048);     // storageQuotaMb = 2048  (Baileys default)
+        ProtoEncoder.WriteBool(buf, 4, true);        // inlineInitialPayloadInE2EeMsg
+        ProtoEncoder.WriteUInt32(buf, 5, 25);        // recentSyncChunkSize = 25  (Baileys: count)
+        // field 6: supportCallLogHistory = false — omit
+        ProtoEncoder.WriteBool(buf, 7, true);        // supportBotUserAgentChatHistory
+        ProtoEncoder.WriteBool(buf, 8, true);        // supportCagReactionsAndPolls
+        ProtoEncoder.WriteBool(buf, 9, true);        // supportBizHostedMsg
+        ProtoEncoder.WriteBool(buf, 10, true);       // supportRecentSyncChunkMessageCountTuning
+        ProtoEncoder.WriteBool(buf, 11, true);       // supportHostedGroupMsg
+        ProtoEncoder.WriteBool(buf, 12, true);       // supportFbidBotChatHistory
+        ProtoEncoder.WriteBool(buf, 14, true);       // supportMessageAssociation
+        // field 15: supportGroupHistory = false — omit
         return [.. buf];
     }
 }
@@ -196,6 +169,106 @@ public sealed class WebInfo
         var buf = new List<byte>();
         ProtoEncoder.WriteInt32Always(buf, 4, WebSubPlatform); // always emit 0 (Baileys does this)
         return [.. buf];
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// ADV (Advanced Device Verification) protos used in QR pairing.
+// Field numbers verified against WAProto.proto from Baileys.
+// ─────────────────────────────────────────────────────────────
+
+/// <summary>Server sends this in device-identity during pair-success. Contains HMAC-protected device identity.</summary>
+public sealed class ADVSignedDeviceIdentityHMAC
+{
+    public byte[] Details     { get; set; } = [];  // field 1: encoded ADVSignedDeviceIdentity
+    public byte[] Hmac        { get; set; } = [];  // field 2: HMAC-SHA256 over details
+    public int    AccountType { get; set; } = 0;   // field 3: 0=E2EE, 1=HOSTED
+
+    public static ADVSignedDeviceIdentityHMAC ParseFrom(byte[] data)
+    {
+        var msg = new ADVSignedDeviceIdentityHMAC();
+        var r = ProtoEncoder.CreateReader(data);
+        while (r.HasMore)
+        {
+            var (field, wire) = r.ReadTag();
+            switch (field)
+            {
+                case 1: msg.Details     = r.ReadBytes(); break;
+                case 2: msg.Hmac        = r.ReadBytes(); break;
+                case 3: msg.AccountType = r.ReadInt32(); break;
+                default: r.Skip(wire); break;
+            }
+        }
+        return msg;
+    }
+}
+
+/// <summary>Decoded from ADVSignedDeviceIdentityHMAC.Details. Client adds deviceSignature and re-encodes.</summary>
+public sealed class ADVSignedDeviceIdentity
+{
+    public byte[] Details             { get; set; } = [];  // field 1: encoded ADVDeviceIdentity
+    public byte[] AccountSignatureKey { get; set; } = [];  // field 2: phone's Curve25519 public key
+    public byte[] AccountSignature    { get; set; } = [];  // field 3: phone's XEdDSA signature
+    public byte[] DeviceSignature     { get; set; } = [];  // field 4: client fills this in
+
+    public static ADVSignedDeviceIdentity ParseFrom(byte[] data)
+    {
+        var msg = new ADVSignedDeviceIdentity();
+        var r = ProtoEncoder.CreateReader(data);
+        while (r.HasMore)
+        {
+            var (field, wire) = r.ReadTag();
+            switch (field)
+            {
+                case 1: msg.Details             = r.ReadBytes(); break;
+                case 2: msg.AccountSignatureKey = r.ReadBytes(); break;
+                case 3: msg.AccountSignature    = r.ReadBytes(); break;
+                case 4: msg.DeviceSignature     = r.ReadBytes(); break;
+                default: r.Skip(wire); break;
+            }
+        }
+        return msg;
+    }
+
+    /// <summary>Encode WITHOUT accountSignatureKey (field 2 omitted per Baileys protocol).</summary>
+    public byte[] ToByteArrayForReply()
+    {
+        var buf = new List<byte>();
+        ProtoEncoder.WriteBytes(buf, 1, Details);
+        // field 2 (accountSignatureKey) intentionally omitted in reply
+        ProtoEncoder.WriteBytes(buf, 3, AccountSignature);
+        ProtoEncoder.WriteBytes(buf, 4, DeviceSignature);
+        return [.. buf];
+    }
+}
+
+/// <summary>Decoded from ADVSignedDeviceIdentity.Details. Used to get keyIndex for the reply.</summary>
+public sealed class ADVDeviceIdentity
+{
+    public uint   RawId       { get; set; }  // field 1
+    public ulong  Timestamp   { get; set; }  // field 2
+    public uint   KeyIndex    { get; set; }  // field 3
+    public int    AccountType { get; set; }  // field 4
+    public int    DeviceType  { get; set; }  // field 5
+
+    public static ADVDeviceIdentity ParseFrom(byte[] data)
+    {
+        var msg = new ADVDeviceIdentity();
+        var r = ProtoEncoder.CreateReader(data);
+        while (r.HasMore)
+        {
+            var (field, wire) = r.ReadTag();
+            switch (field)
+            {
+                case 1: msg.RawId       = r.ReadUInt32(); break;
+                case 2: msg.Timestamp   = r.ReadUInt64(); break;
+                case 3: msg.KeyIndex    = r.ReadUInt32(); break;
+                case 4: msg.AccountType = r.ReadInt32();  break;
+                case 5: msg.DeviceType  = r.ReadInt32();  break;
+                default: r.Skip(wire); break;
+            }
+        }
+        return msg;
     }
 }
 

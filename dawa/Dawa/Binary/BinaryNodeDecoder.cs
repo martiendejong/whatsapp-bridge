@@ -10,8 +10,6 @@ public static class BinaryNodeDecoder
     public static BinaryNode Decode(byte[] data)
     {
         var reader = new BinaryReader(data);
-        // WA frames have a leading type byte (0x00 = regular binary node). Strip it.
-        if (reader.HasMore) reader.ReadByte();
         return ReadNode(ref reader);
     }
 
@@ -89,20 +87,27 @@ public static class BinaryNodeDecoder
         return reader.ReadBytes(length);
     }
 
+    // Sentinel returned when ReadString encounters StreamEnd (byte 0x02).
+    internal const string StreamEndSentinel = "\x02";
+
     private static string ReadString(ref BinaryReader reader)
     {
         var b = reader.ReadByte();
 
-        // Bytes 1-235: single-byte tokens — byte value IS the index into SingleByteTokens
-        if (b >= 1 && b < WATags.SingleByteTokens.Length)
-            return WATags.SingleByteTokens[b];
+        // StreamEnd byte — signals server closed the stream.
+        if (b == WATags.StreamEnd)
+            return StreamEndSentinel;
 
-        // Bytes 236-239: double-byte tokens — next byte is index within sub-array
+        // Single-byte tokens: byte value IS the index into SingleByteTokens (Baileys convention).
+        if (b >= 1 && b < WATags.DictionaryBase)
+            return WATags.GetSingleByteToken(b) ?? $"[TOKEN{b}]";
+
+        // Double-byte tokens: next byte is the index into the chosen dictionary.
         if (b >= WATags.DictionaryBase && b <= WATags.DictionaryBase + 3)
         {
             int dictIndex = b - WATags.DictionaryBase;
             int tokenIndex = reader.ReadByte();
-            return WATags.GetDoubleByteToken(dictIndex, tokenIndex) ?? $"[DICT{dictIndex}:{tokenIndex}]";
+            return WATags.GetToken(dictIndex, tokenIndex) ?? $"[DICT{dictIndex}:{tokenIndex}]";
         }
 
         switch (b)
@@ -130,31 +135,24 @@ public static class BinaryNodeDecoder
                 var server = ReadString(ref reader);
                 return $"{user}@{server}";
             }
-            case WATags.InteropJid:
-            {
-                // device:agent:user@server
-                var user = ReadString(ref reader);
-                var device = reader.ReadByte();
-                var agent = reader.ReadByte();
-                var server = ReadString(ref reader);
-                return $"{user}:{device}:{agent}@{server}";
-            }
-            case WATags.FbJid:
-            {
-                var user = ReadString(ref reader);
-                var device = reader.ReadByte();
-                var agent = reader.ReadByte();
-                var server = ReadString(ref reader);
-                return $"{user}:{device}:{agent}@{server}";
-            }
             case WATags.AdJid:
             {
-                // AD JID: user:device:agent@server
-                var user = ReadString(ref reader);
+                // AD_JID (0xF7): domainType byte + device byte + user string
+                // Baileys: readAdJid() in decode.js
+                var domainType = reader.ReadByte();
                 var device = reader.ReadByte();
-                var agent = reader.ReadByte();
-                var server = ReadString(ref reader);
-                return $"{user}:{device}:{agent}@{server}";
+                var user = ReadString(ref reader);
+                var server = (domainType == 0 || domainType == 128) ? "s.whatsapp.net" : "lid";
+                return device == 0 ? $"{user}@{server}" : $"{user}:{device}@{server}";
+            }
+            case WATags.InteropJid:
+            case WATags.FbJid:
+            {
+                // Consume bytes to stay in sync, return placeholder
+                var domainType = reader.ReadByte();
+                var device = reader.ReadByte();
+                var user = ReadString(ref reader);
+                return $"{user}@fb";
             }
             case WATags.Nibble8:
             {

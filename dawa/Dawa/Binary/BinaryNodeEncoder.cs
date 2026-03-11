@@ -10,7 +10,6 @@ public static class BinaryNodeEncoder
     public static byte[] Encode(BinaryNode node)
     {
         var ms = new MemoryStream();
-        ms.WriteByte(0); // Leading type byte: 0x00 = regular binary node (mirrors the decoder which strips this byte)
         WriteNode(ms, node);
         return ms.ToArray();
     }
@@ -96,17 +95,24 @@ public static class BinaryNodeEncoder
             return;
         }
 
-        // Try dictionary lookup first
-        if (WATags.TryGetToken(value, out var byte1, out var byte2, out var isSingleByte))
+        // Try single-byte token first (1 byte)
+        if (WATags.TryGetSingleByteToken(value, out var singleByte))
         {
-            s.WriteByte(byte1);
-            if (!isSingleByte) s.WriteByte(byte2);
+            s.WriteByte(singleByte);
             return;
         }
 
-        // Check if it's a JID (user@server)
+        // Try double-byte token (2 bytes: DictionaryBase+dict, index)
+        if (WATags.TryGetDoubleByteToken(value, out var dictByte, out var idxByte))
+        {
+            s.WriteByte(dictByte);
+            s.WriteByte(idxByte);
+            return;
+        }
+
+        // Check if it's a JID (user@server or @server with empty user)
         var atIdx = value.IndexOf('@');
-        if (atIdx > 0)
+        if (atIdx >= 0)
         {
             var user = value[..atIdx];
             var server = value[(atIdx + 1)..];
