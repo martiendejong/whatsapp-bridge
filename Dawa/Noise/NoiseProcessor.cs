@@ -288,7 +288,23 @@ public sealed class NoiseProcessor : IAsyncDisposable
     private async Task HandleIQAsync(BinaryNode iq, CancellationToken ct)
     {
         var type = iq.GetAttr("type");
-        if (type == "result")
+        if (type == "get")
+        {
+            // Respond to keep-alive pings from the server
+            if (iq.FindChild("ping") != null)
+            {
+                var pong = new BinaryNode("iq", new()
+                {
+                    ["id"]   = iq.GetAttr("id") ?? "",
+                    ["type"] = "result",
+                    ["to"]   = iq.GetAttr("from") ?? "s.whatsapp.net",
+                });
+                await SendNodeAsync(pong, ct);
+                _logger.LogDebug("Responded to server ping id={Id}", iq.GetAttr("id"));
+            }
+            return;
+        }
+        else if (type == "result")
         {
             // Check for pair-device result (QR code ref)
             var pairDevice = iq.FindChild("pair-device");
@@ -298,11 +314,11 @@ public sealed class NoiseProcessor : IAsyncDisposable
                 return;
             }
 
-            // Check for pair-success (phone scanned QR)
+            // Check for pair-success (phone scanned QR) — also handle type="result" path
             var pairSuccess = iq.FindChild("pair-success");
             if (pairSuccess != null)
             {
-                HandlePairSuccess(pairSuccess);
+                await HandlePairSuccessAsync(iq, pairSuccess, ct);
                 return;
             }
         }
@@ -320,32 +336,36 @@ public sealed class NoiseProcessor : IAsyncDisposable
                     ["to"] = iq.GetAttr("from") ?? "s.whatsapp.net",
                 });
                 await SendNodeAsync(ack, ct);
+                // Generate QR from the first ref in the pair-device node
+                await HandlePairDeviceResultAsync(pairDevice, ct);
             }
 
             // pair-success arrives as type="set" (server-initiated), not type="result"
             var pairSuccess2 = iq.FindChild("pair-success");
             if (pairSuccess2 != null)
             {
-                // MUST ack before processing — otherwise the phone shows "couldn't link device"
-                var ack = new BinaryNode("iq", new()
-                {
-                    ["id"] = iq.GetAttr("id") ?? "",
-                    ["type"] = "result",
-                    ["to"] = iq.GetAttr("from") ?? "s.whatsapp.net",
-                });
-                await SendNodeAsync(ack, ct);
-                HandlePairSuccess(pairSuccess2);
+                await HandlePairSuccessAsync(iq, pairSuccess2, ct);
             }
         }
     }
 
     private async Task HandlePairDeviceResultAsync(BinaryNode pairDevice, CancellationToken ct)
     {
-        // Extract ref token from server
+        // Extract ref token from server — the ref is a binary blob encoded as base64 in the QR
         var refNode = pairDevice.FindChild("ref");
-        if (refNode?.Text == null) return;
+        if (refNode == null) return;
 
-        var ref_ = refNode.Text;
+        // ref content arrives as raw bytes that are actually a UTF-8 string
+        // (the server sends e.g. 102 ASCII chars of a base64-like token as byte[])
+        // Do NOT base64-encode it again — decode the bytes as UTF-8.
+        string ref_;
+        if (refNode.Data != null)
+            ref_ = System.Text.Encoding.UTF8.GetString(refNode.Data);
+        else if (refNode.Text != null)
+            ref_ = refNode.Text;
+        else
+            return;
+
         var qrParts = new[]
         {
             ref_,
@@ -359,29 +379,102 @@ public sealed class NoiseProcessor : IAsyncDisposable
         QRCodeGenerated?.Invoke(this, qrString);
     }
 
-    private void HandlePairSuccess(BinaryNode pairSuccess)
+    private async Task HandlePairSuccessAsync(BinaryNode iq, BinaryNode pairSuccess, CancellationToken ct)
     {
-        _logger.LogInformation("Pairing successful! node={Node}", pairSuccess.ToString());
+        var msgId = iq.GetAttr("id") ?? "";
+        _logger.LogInformation("=== PAIR-SUCCESS RECEIVED === id={Id}", msgId);
 
         var platform = pairSuccess.GetAttr("platform") ?? "UNKNOWN";
-        _auth.Platform = platform;
 
-        // Extract JID from <device jid="..."> child
+        // Extract JID
         var deviceNode = pairSuccess.FindChild("device");
-        if (deviceNode != null)
+        var jid = deviceNode?.GetAttr("jid") ?? "";
+        _logger.LogInformation("Paired as {Jid} on platform {Platform}", jid, platform);
+
+        // ── ADV device-identity verification & signing ─────────────────────
+        // Baileys: configureSuccessfulPairing() in validate-connection.js
+        var devIdentityNode = pairSuccess.FindChild("device-identity");
+        if (devIdentityNode?.Data == null)
         {
-            var jid = deviceNode.GetAttr("jid");
-            if (!string.IsNullOrEmpty(jid))
-            {
-                _auth.Me = new MeInfo { Id = jid };
-                _logger.LogInformation("Paired as {Jid} on platform {Platform}", jid, platform);
-            }
+            _logger.LogError("pair-success missing device-identity content — cannot complete pairing.");
+            return;
         }
 
-        // Log device-identity if present (for debugging; full ADV verification not implemented yet)
-        var devIdentity = pairSuccess.FindChild("device-identity");
-        if (devIdentity != null)
-            _logger.LogInformation("device-identity present: {Details}", devIdentity.ToString());
+        // 1. Decode ADVSignedDeviceIdentityHMAC
+        var hmacMsg = ADVSignedDeviceIdentityHMAC.ParseFrom(devIdentityNode.Data);
+
+        // 2. Verify HMAC-SHA256(details, advSecretKey)
+        //    isHostedAccount = (hmacMsg.AccountType == 1) => prefix [6,5], else empty
+        var isHosted = hmacMsg.AccountType == 1;
+        var hmacInput = isHosted
+            ? (new byte[] { 6, 5 }).Concat(hmacMsg.Details).ToArray()
+            : hmacMsg.Details;
+        var expectedHmac = HMACSHA256.HashData(_auth.AdvSecretKey, hmacInput);
+        if (!expectedHmac.AsSpan().SequenceEqual(hmacMsg.Hmac))
+        {
+            _logger.LogError("ADV HMAC verification failed — pairing rejected.");
+            return;
+        }
+        _logger.LogInformation("ADV HMAC verified OK.");
+
+        // 3. Decode ADVSignedDeviceIdentity
+        var account = ADVSignedDeviceIdentity.ParseFrom(hmacMsg.Details);
+
+        // 4. Verify account signature: XEdDSA.Verify(accountSignatureKey, [6,0] + deviceDetails + identityPub, accountSignature)
+        var accountMsg = new byte[] { 6, 0 }
+            .Concat(account.Details)
+            .Concat(_auth.SignedIdentityKeyPublic)
+            .ToArray();
+        if (!XEdDSA.Verify(account.AccountSignatureKey, accountMsg, account.AccountSignature))
+        {
+            _logger.LogError("Account signature verification failed — pairing rejected.");
+            return;
+        }
+        _logger.LogInformation("Account signature verified OK.");
+
+        // 5. Sign device identity: XEdDSA.Sign(identityPrivate, prefix + deviceDetails + identityPub + accountSigKey)
+        var devicePrefix = isHosted ? new byte[] { 6, 6 } : new byte[] { 6, 1 };
+        var deviceMsg = devicePrefix
+            .Concat(account.Details)
+            .Concat(_auth.SignedIdentityKeyPublic)
+            .Concat(account.AccountSignatureKey)
+            .ToArray();
+        account.DeviceSignature = XEdDSA.Sign(_auth.SignedIdentityKeyPrivate, deviceMsg);
+        _logger.LogInformation("Device signature created.");
+
+        // 6. Decode ADVDeviceIdentity to get keyIndex
+        var deviceIdentity = ADVDeviceIdentity.ParseFrom(account.Details);
+
+        // 7. Re-encode ADVSignedDeviceIdentity (WITHOUT accountSignatureKey per Baileys protocol)
+        var accountEnc = account.ToByteArrayForReply();
+
+        // 8. Send pair-device-sign IQ as the result (this IS the ack — same msgId)
+        var deviceIdentityNode2 = new BinaryNode("device-identity", new()
+        {
+            ["key-index"] = deviceIdentity.KeyIndex.ToString(),
+        })
+        {
+            Content = accountEnc,
+        };
+        var pairDeviceSign = new BinaryNode("pair-device-sign")
+        {
+            Content = new List<BinaryNode> { deviceIdentityNode2 },
+        };
+        var reply = new BinaryNode("iq", new()
+        {
+            ["to"]   = "s.whatsapp.net",
+            ["type"] = "result",
+            ["id"]   = msgId,
+        })
+        {
+            Content = new List<BinaryNode> { pairDeviceSign },
+        };
+        await SendNodeAsync(reply, ct);
+        _logger.LogInformation("pair-device-sign sent (keyIndex={KeyIndex}).", deviceIdentity.KeyIndex);
+
+        // 9. Update auth state
+        _auth.Platform = platform;
+        _auth.Me = new MeInfo { Id = jid };
 
         _logger.LogInformation("Firing Authenticated event — session established.");
         Authenticated?.Invoke(this, _auth);
@@ -463,7 +556,12 @@ public sealed class NoiseProcessor : IAsyncDisposable
     private async Task SendNodeAsync(BinaryNode node, CancellationToken ct)
     {
         var encoded = BinaryNodeEncoder.Encode(node);
-        var encrypted = EncryptFrame(encoded);
+        // Prepend flags byte (0x00 = uncompressed) — server strips this on receive
+        // just as we strip it from server frames in StripFlagsAndDecompress().
+        var frameData = new byte[1 + encoded.Length];
+        frameData[0] = 0;
+        encoded.CopyTo(frameData, 1);
+        var encrypted = EncryptFrame(frameData);
         await _socket.SendFrameAsync(encrypted, ct);
     }
 

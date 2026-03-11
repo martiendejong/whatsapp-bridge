@@ -98,14 +98,11 @@ public static class BinaryNodeDecoder
         if (b == WATags.StreamEnd)
             return StreamEndSentinel;
 
-        // Single-byte tokens: bytes 3–235 map directly to Dictionary0.
-        // Baileys: singleByteTokens[3] = "xmlstreamstart" = Dictionary0[0].
-        if (b >= 3 && b < WATags.DictionaryBase)
-        {
-            int tokenIndex = b - 3;
-            return WATags.GetToken(0, tokenIndex) ?? $"[TOKEN{b}]";
-        }
+        // Single-byte tokens: byte value IS the index into SingleByteTokens (Baileys convention).
+        if (b >= 1 && b < WATags.DictionaryBase)
+            return WATags.GetSingleByteToken(b) ?? $"[TOKEN{b}]";
 
+        // Double-byte tokens: next byte is the index into the chosen dictionary.
         if (b >= WATags.DictionaryBase && b <= WATags.DictionaryBase + 3)
         {
             int dictIndex = b - WATags.DictionaryBase;
@@ -137,6 +134,25 @@ public static class BinaryNodeDecoder
                 var user = ReadString(ref reader);
                 var server = ReadString(ref reader);
                 return $"{user}@{server}";
+            }
+            case WATags.AdJid:
+            {
+                // AD_JID (0xF7): domainType byte + device byte + user string
+                // Baileys: readAdJid() in decode.js
+                var domainType = reader.ReadByte();
+                var device = reader.ReadByte();
+                var user = ReadString(ref reader);
+                var server = (domainType == 0 || domainType == 128) ? "s.whatsapp.net" : "lid";
+                return device == 0 ? $"{user}@{server}" : $"{user}:{device}@{server}";
+            }
+            case WATags.InteropJid:
+            case WATags.FbJid:
+            {
+                // Consume bytes to stay in sync, return placeholder
+                var domainType = reader.ReadByte();
+                var device = reader.ReadByte();
+                var user = ReadString(ref reader);
+                return $"{user}@fb";
             }
             case WATags.Nibble8:
             {

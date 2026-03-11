@@ -95,17 +95,24 @@ public static class BinaryNodeEncoder
             return;
         }
 
-        // Try dictionary lookup first
-        if (WATags.TryGetToken(value, out var dictByte, out var idxByte))
+        // Try single-byte token first (1 byte)
+        if (WATags.TryGetSingleByteToken(value, out var singleByte))
+        {
+            s.WriteByte(singleByte);
+            return;
+        }
+
+        // Try double-byte token (2 bytes: DictionaryBase+dict, index)
+        if (WATags.TryGetDoubleByteToken(value, out var dictByte, out var idxByte))
         {
             s.WriteByte(dictByte);
             s.WriteByte(idxByte);
             return;
         }
 
-        // Check if it's a JID (user@server)
+        // Check if it's a JID (user@server or @server with empty user)
         var atIdx = value.IndexOf('@');
-        if (atIdx > 0)
+        if (atIdx >= 0)
         {
             var user = value[..atIdx];
             var server = value[(atIdx + 1)..];

@@ -172,6 +172,106 @@ public sealed class WebInfo
     }
 }
 
+// ─────────────────────────────────────────────────────────────
+// ADV (Advanced Device Verification) protos used in QR pairing.
+// Field numbers verified against WAProto.proto from Baileys.
+// ─────────────────────────────────────────────────────────────
+
+/// <summary>Server sends this in device-identity during pair-success. Contains HMAC-protected device identity.</summary>
+public sealed class ADVSignedDeviceIdentityHMAC
+{
+    public byte[] Details     { get; set; } = [];  // field 1: encoded ADVSignedDeviceIdentity
+    public byte[] Hmac        { get; set; } = [];  // field 2: HMAC-SHA256 over details
+    public int    AccountType { get; set; } = 0;   // field 3: 0=E2EE, 1=HOSTED
+
+    public static ADVSignedDeviceIdentityHMAC ParseFrom(byte[] data)
+    {
+        var msg = new ADVSignedDeviceIdentityHMAC();
+        var r = ProtoEncoder.CreateReader(data);
+        while (r.HasMore)
+        {
+            var (field, wire) = r.ReadTag();
+            switch (field)
+            {
+                case 1: msg.Details     = r.ReadBytes(); break;
+                case 2: msg.Hmac        = r.ReadBytes(); break;
+                case 3: msg.AccountType = r.ReadInt32(); break;
+                default: r.Skip(wire); break;
+            }
+        }
+        return msg;
+    }
+}
+
+/// <summary>Decoded from ADVSignedDeviceIdentityHMAC.Details. Client adds deviceSignature and re-encodes.</summary>
+public sealed class ADVSignedDeviceIdentity
+{
+    public byte[] Details             { get; set; } = [];  // field 1: encoded ADVDeviceIdentity
+    public byte[] AccountSignatureKey { get; set; } = [];  // field 2: phone's Curve25519 public key
+    public byte[] AccountSignature    { get; set; } = [];  // field 3: phone's XEdDSA signature
+    public byte[] DeviceSignature     { get; set; } = [];  // field 4: client fills this in
+
+    public static ADVSignedDeviceIdentity ParseFrom(byte[] data)
+    {
+        var msg = new ADVSignedDeviceIdentity();
+        var r = ProtoEncoder.CreateReader(data);
+        while (r.HasMore)
+        {
+            var (field, wire) = r.ReadTag();
+            switch (field)
+            {
+                case 1: msg.Details             = r.ReadBytes(); break;
+                case 2: msg.AccountSignatureKey = r.ReadBytes(); break;
+                case 3: msg.AccountSignature    = r.ReadBytes(); break;
+                case 4: msg.DeviceSignature     = r.ReadBytes(); break;
+                default: r.Skip(wire); break;
+            }
+        }
+        return msg;
+    }
+
+    /// <summary>Encode WITHOUT accountSignatureKey (field 2 omitted per Baileys protocol).</summary>
+    public byte[] ToByteArrayForReply()
+    {
+        var buf = new List<byte>();
+        ProtoEncoder.WriteBytes(buf, 1, Details);
+        // field 2 (accountSignatureKey) intentionally omitted in reply
+        ProtoEncoder.WriteBytes(buf, 3, AccountSignature);
+        ProtoEncoder.WriteBytes(buf, 4, DeviceSignature);
+        return [.. buf];
+    }
+}
+
+/// <summary>Decoded from ADVSignedDeviceIdentity.Details. Used to get keyIndex for the reply.</summary>
+public sealed class ADVDeviceIdentity
+{
+    public uint   RawId       { get; set; }  // field 1
+    public ulong  Timestamp   { get; set; }  // field 2
+    public uint   KeyIndex    { get; set; }  // field 3
+    public int    AccountType { get; set; }  // field 4
+    public int    DeviceType  { get; set; }  // field 5
+
+    public static ADVDeviceIdentity ParseFrom(byte[] data)
+    {
+        var msg = new ADVDeviceIdentity();
+        var r = ProtoEncoder.CreateReader(data);
+        while (r.HasMore)
+        {
+            var (field, wire) = r.ReadTag();
+            switch (field)
+            {
+                case 1: msg.RawId       = r.ReadUInt32(); break;
+                case 2: msg.Timestamp   = r.ReadUInt64(); break;
+                case 3: msg.KeyIndex    = r.ReadUInt32(); break;
+                case 4: msg.AccountType = r.ReadInt32();  break;
+                case 5: msg.DeviceType  = r.ReadInt32();  break;
+                default: r.Skip(wire); break;
+            }
+        }
+        return msg;
+    }
+}
+
 /// <summary>WhatsApp message content proto.</summary>
 public sealed class WAMessage
 {

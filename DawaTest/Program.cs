@@ -134,7 +134,7 @@ app.MapGet("/", () => Results.Content("""
             text: currentQr,
             width: 256,
             height: 256,
-            correctLevel: QRCode.CorrectLevel.L
+            correctLevel: QRCode.CorrectLevel.M
           });
         }
       } catch (e) {

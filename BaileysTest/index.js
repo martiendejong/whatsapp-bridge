@@ -1,4 +1,4 @@
-import { makeWASocket, useMultiFileAuthState, DisconnectReason, makeCacheableSignalKeyStore } from '@whiskeysockets/baileys'
+import { makeWASocket, useMultiFileAuthState, DisconnectReason, makeCacheableSignalKeyStore, fetchLatestBaileysVersion } from '@whiskeysockets/baileys'
 import { Boom } from '@hapi/boom'
 import qrcode from 'qrcode'
 import { createServer } from 'http'
@@ -26,8 +26,10 @@ const logger = pino({ level: 'silent' })
 
 async function startBaileys() {
   const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR)
+  const { version } = await fetchLatestBaileysVersion()
 
   const sock = makeWASocket({
+    version,
     auth: {
       creds: state.creds,
       keys: makeCacheableSignalKeyStore(state.keys, logger),
