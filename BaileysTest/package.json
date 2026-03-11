@@ -1,0 +1,14 @@
+{
+  "name": "baileys-test",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "fresh": "node index.js --fresh"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.16",
+    "qrcode": "^1.5.4",
+    "pino": "^9.6.0"
+  }
+}

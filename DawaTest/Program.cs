@@ -1,4 +1,25 @@
 using Dawa;
+using Dawa.Crypto;
+
+// ─── XEdDSA self-test ────────────────────────────────────────────────────────
+{
+    var (priv, pub) = Curve25519Helper.GenerateKeyPair();
+    var msg = System.Text.Encoding.UTF8.GetBytes("hello world");
+    var sig = XEdDSA.Sign(priv, msg);
+    var ok  = XEdDSA.Verify(pub, msg, sig);
+    Console.WriteLine($"[XEdDSA self-test] Sign+Verify: {(ok ? "PASS ✓" : "FAIL ✗")}");
+
+    // Also verify the actual pre-key signing (message = [0x05 || pubKey])
+    var (idPriv, idPub) = Curve25519Helper.GenerateKeyPair();
+    var (spkPriv, spkPub) = Curve25519Helper.GenerateKeyPair();
+    var preKeyMsg = new byte[33];
+    preKeyMsg[0] = 0x05;
+    spkPub.CopyTo(preKeyMsg, 1);
+    var spkSig  = XEdDSA.Sign(idPriv, preKeyMsg);
+    var spkOk   = XEdDSA.Verify(idPub, preKeyMsg, spkSig);
+    Console.WriteLine($"[XEdDSA self-test] PreKey Sign+Verify: {(spkOk ? "PASS ✓" : "FAIL ✗")}");
+}
+// ─────────────────────────────────────────────────────────────────────────────
 
 // --fresh flag wipes the saved session so you always get a fresh QR
 var sessionDir = Path.Combine(AppContext.BaseDirectory, "dawa-test-session");
@@ -42,8 +63,13 @@ client.Connected += (_, _) =>
 
 client.Disconnected += (_, _) =>
 {
-    if (status != "connected")
+    // If we have a QR code, keep showing it — client will auto-reconnect to pick up pair-success.
+    // Only mark failed if we never reached the QR stage.
+    if (status == "connected")
+        status = "disconnected";
+    else if (latestQr == "")
         status = "failed";
+    // else: QR is displayed, reconnect in progress — keep status as qr_ready
     Console.WriteLine("[Dawa] Disconnected.");
 };
 
@@ -98,7 +124,7 @@ app.MapGet("/", () => Results.Content("""
         if (d.status === 'failed') {
           document.getElementById('qr').style.display = 'none';
           document.getElementById('error').style.display = 'block';
-          return;
+          return; // stop polling
         }
 
         if (d.qr && d.qr !== currentQr) {

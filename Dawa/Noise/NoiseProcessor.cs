@@ -321,6 +321,21 @@ public sealed class NoiseProcessor : IAsyncDisposable
                 });
                 await SendNodeAsync(ack, ct);
             }
+
+            // pair-success arrives as type="set" (server-initiated), not type="result"
+            var pairSuccess2 = iq.FindChild("pair-success");
+            if (pairSuccess2 != null)
+            {
+                // MUST ack before processing — otherwise the phone shows "couldn't link device"
+                var ack = new BinaryNode("iq", new()
+                {
+                    ["id"] = iq.GetAttr("id") ?? "",
+                    ["type"] = "result",
+                    ["to"] = iq.GetAttr("from") ?? "s.whatsapp.net",
+                });
+                await SendNodeAsync(ack, ct);
+                HandlePairSuccess(pairSuccess2);
+            }
         }
     }
 
@@ -346,16 +361,12 @@ public sealed class NoiseProcessor : IAsyncDisposable
 
     private void HandlePairSuccess(BinaryNode pairSuccess)
     {
-        _logger.LogInformation("Pairing successful! Extracting credentials.");
+        _logger.LogInformation("Pairing successful! node={Node}", pairSuccess.ToString());
 
         var platform = pairSuccess.GetAttr("platform") ?? "UNKNOWN";
         _auth.Platform = platform;
 
-        // In a full implementation: extract device ID, JID from the pair-success node,
-        // then save them into auth state. This requires decrypting the device identity
-        // proof which involves ADV (account data verification).
-
-        // Simplified: extract JID if present
+        // Extract JID from <device jid="..."> child
         var deviceNode = pairSuccess.FindChild("device");
         if (deviceNode != null)
         {
@@ -363,10 +374,16 @@ public sealed class NoiseProcessor : IAsyncDisposable
             if (!string.IsNullOrEmpty(jid))
             {
                 _auth.Me = new MeInfo { Id = jid };
-                _logger.LogInformation("Paired as {Jid}", jid);
+                _logger.LogInformation("Paired as {Jid} on platform {Platform}", jid, platform);
             }
         }
 
+        // Log device-identity if present (for debugging; full ADV verification not implemented yet)
+        var devIdentity = pairSuccess.FindChild("device-identity");
+        if (devIdentity != null)
+            _logger.LogInformation("device-identity present: {Details}", devIdentity.ToString());
+
+        _logger.LogInformation("Firing Authenticated event — session established.");
         Authenticated?.Invoke(this, _auth);
     }
 

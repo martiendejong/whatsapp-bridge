@@ -65,10 +65,12 @@ public sealed class DevicePairingRegistrationData
 public sealed class DevicePropsMessage
 {
     public string Os             { get; set; } = "Ubuntu";
-    public AppVersion? Version   { get; set; } = new AppVersion { Primary = 10, Secondary = 15, Tertiary = 7 };
+    // Version = WA app version (Baileys sends [2, 3000, tertiary]), NOT the OS/browser version.
+    public AppVersion? Version   { get; set; } = new AppVersion { Primary = 2, Secondary = 3000, Tertiary = 1033846690 };
     // PlatformType: CHROME=1
     public int PlatformType      { get; set; } = 1;
-    public bool RequireFullSync  { get; set; } = false;
+    // requireFullSync: true triggers the server to include history in initial sync (Baileys default: true)
+    public bool RequireFullSync  { get; set; } = true;
     public HistorySyncConfigMessage? HistorySyncConfig { get; set; } = new();
 
     public byte[] ToByteArray()
@@ -77,7 +79,7 @@ public sealed class DevicePropsMessage
         ProtoEncoder.WriteString(buf, 1, Os);
         if (Version != null) ProtoEncoder.WriteMessage(buf, 2, Version.ToByteArray());
         ProtoEncoder.WriteInt32(buf, 3, PlatformType);
-        // requireFullSync=false is proto3 default — omit.
+        ProtoEncoder.WriteBool(buf, 4, RequireFullSync);  // always emit — server expects it
         if (HistorySyncConfig != null) ProtoEncoder.WriteMessage(buf, 5, HistorySyncConfig.ToByteArray());
         return [.. buf];
     }
@@ -89,8 +91,10 @@ public sealed class HistorySyncConfigMessage
     public byte[] ToByteArray()
     {
         var buf = new List<byte>();
-        ProtoEncoder.WriteUInt32(buf, 3, 10240);   // storageQuotaMb
+        ProtoEncoder.WriteUInt32(buf, 1, 3);        // fullSyncDaysLimit = 3  (Baileys: fullCount)
+        ProtoEncoder.WriteUInt32(buf, 3, 2048);     // storageQuotaMb = 2048  (Baileys default)
         ProtoEncoder.WriteBool(buf, 4, true);        // inlineInitialPayloadInE2EeMsg
+        ProtoEncoder.WriteUInt32(buf, 5, 25);        // recentSyncChunkSize = 25  (Baileys: count)
         // field 6: supportCallLogHistory = false — omit
         ProtoEncoder.WriteBool(buf, 7, true);        // supportBotUserAgentChatHistory
         ProtoEncoder.WriteBool(buf, 8, true);        // supportCagReactionsAndPolls

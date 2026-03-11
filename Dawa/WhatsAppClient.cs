@@ -198,7 +198,7 @@ public sealed class WhatsAppClient : IAsyncDisposable
 
     private async Task RunReceiveLoopAsync(CancellationToken ct)
     {
-        var wasConnected = false;
+        var shouldReconnect = false;
         try
         {
             await _noiseProcessor!.ReceiveLoopAsync(ct);
@@ -210,7 +210,11 @@ public sealed class WhatsAppClient : IAsyncDisposable
         }
         finally
         {
-            wasConnected = _state == ConnectionState.Connected;
+            // Reconnect if we were connected OR authenticating (QR phase):
+            // WhatsApp server closes the stream after sending QR refs — client must
+            // reconnect to pick up pair-success once the phone scans the code.
+            shouldReconnect = _state == ConnectionState.Connected
+                           || _state == ConnectionState.Authenticating;
             if (_state != ConnectionState.Disconnected && !ct.IsCancellationRequested)
             {
                 SetState(ConnectionState.Disconnected);
@@ -218,7 +222,7 @@ public sealed class WhatsAppClient : IAsyncDisposable
             }
         }
 
-        if (wasConnected && _options.AutoReconnect && !ct.IsCancellationRequested)
+        if (shouldReconnect && _options.AutoReconnect && !ct.IsCancellationRequested)
         {
             _logger.LogInformation("Reconnecting in {Delay}…", _options.ReconnectDelay);
             await Task.Delay(_options.ReconnectDelay, CancellationToken.None);
