@@ -112,8 +112,8 @@
   </div>
 
   <script>
-    // API base — client-manager API runs on 54501 in dev
-    const API = 'https://localhost:54501/api/whatsapp'
+    // API base — standalone WhatsApp Bridge (port 5005)
+    const API = 'http://localhost:5005/api/whatsapp'
     let qrTs = Date.now()
     let lastState = null
 
@@ -161,7 +161,7 @@
       document.getElementById('content').innerHTML = `
         <div class="error-wrap">
           <div class="error-icon">⚠️</div>
-          <p style="color:#94a3b8">Cannot reach the WhatsApp Bridge API.<br/>Make sure the client-manager API is running on port 54501.</p>
+          <p style="color:#94a3b8">Cannot reach the WhatsApp Bridge API.<br/>Make sure the WhatsApp Bridge is running (port 5005).</p>
         </div>
       `
     }
