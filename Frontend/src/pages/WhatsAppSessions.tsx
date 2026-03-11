@@ -1,4 +1,5 @@
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
+import { QRCodeSVG } from 'qrcode.react';
 import { whatsapp } from '../api';
 import { WhatsAppSession } from '../types';
 
@@ -44,6 +45,14 @@ export default function WhatsAppSessions() {
         setQrCode(null);
         setCurrentSessionId(null);
         loadSessions();
+      } else if (response.data.status === 'failed' || response.data.status === 'disconnected') {
+        // Server rejected the connection (rate limiting, bad payload, etc.)
+        setQrCode(null);
+        setCurrentSessionId(null);
+        setError('WhatsApp rejected the connection. This is usually due to rate limiting — please wait a few minutes and try again.');
+        loadSessions();
+      } else if (response.data.qrCode) {
+        setQrCode(response.data.qrCode);
       }
     } catch (err) {
       console.error('Error checking QR status:', err);
@@ -117,8 +126,8 @@ export default function WhatsAppSessions() {
     <div className="container">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
         <h2>WhatsApp Sessions</h2>
-        <button className="btn btn-primary" onClick={handleCreateSession} disabled={!!qrCode}>
-          {qrCode ? 'Connecting...' : 'Connect WhatsApp'}
+        <button className="btn btn-primary" onClick={handleCreateSession} disabled={!!currentSessionId}>
+          {currentSessionId ? 'Connecting...' : 'Connect WhatsApp'}
         </button>
       </div>
 
@@ -131,7 +140,7 @@ export default function WhatsAppSessions() {
             <p style={{ color: '#666', marginBottom: '16px' }}>
               Open WhatsApp on your phone, go to Settings → Linked Devices → Link a Device, and scan this QR code.
             </p>
-            <img src={qrCode} alt="QR Code" />
+            <QRCodeSVG value={qrCode} size={256} />
             <p style={{ color: '#666', fontSize: '14px' }}>
               Waiting for connection... This page will automatically update when connected.
             </p>
@@ -157,8 +166,8 @@ export default function WhatsAppSessions() {
             </thead>
             <tbody>
               {sessions.map((session) => (
-                <>
-                  <tr key={session.id}>
+                <React.Fragment key={session.id}>
+                  <tr>
                     <td>{session.phoneNumber || 'N/A'}</td>
                     <td>
                       <span
@@ -216,7 +225,7 @@ export default function WhatsAppSessions() {
                       </td>
                     </tr>
                   )}
-                </>
+                </React.Fragment>
               ))}
             </tbody>
           </table>

@@ -115,6 +115,13 @@ public sealed class NoiseProcessor : IAsyncDisposable
         var clientPayload = BuildClientPayload();
         var encPayload = noise.EncryptWithAssociatedData(clientPayload);
 
+        _logger.LogInformation("Noise: ClientFinish encStaticPub({Len})={Hex}",
+            encStaticPub.Length, BitConverter.ToString(encStaticPub));
+        _logger.LogInformation("Noise: ClientFinish encPayload({Len})={Hex}",
+            encPayload.Length, BitConverter.ToString(encPayload));
+        _logger.LogInformation("Noise: ClientPayload raw({Len})={Hex}",
+            clientPayload.Length, BitConverter.ToString(clientPayload));
+
         var clientFinish = new ClientFinish
         {
             Static = encStaticPub,
@@ -170,13 +177,19 @@ public sealed class NoiseProcessor : IAsyncDisposable
                 var frame = await _socket.ReceiveFrameAsync(ct);
                 if (frame == null) break;
 
+                _logger.LogInformation("Noise: Received raw frame ({Len} bytes), first bytes={Hex}",
+                    frame.Length, BitConverter.ToString(frame, 0, Math.Min(32, frame.Length)));
+
                 var decrypted = DecryptFrame(frame);
                 // Baileys protocol: first byte is a flags byte.
                 // Bit 1 (value 2) = payload is zlib raw-deflate compressed.
                 // Always strip this byte before decoding the binary node.
                 var nodeData = StripFlagsAndDecompress(decrypted);
+                _logger.LogInformation("Noise: Decrypted frame ({Len} bytes), first bytes={Hex}",
+                    decrypted.Length, BitConverter.ToString(decrypted, 0, Math.Min(32, decrypted.Length)));
+
                 var node = BinaryNodeDecoder.Decode(nodeData);
-                _logger.LogDebug("Received node: {Tag}", node.Tag);
+                _logger.LogInformation("Received node: {Node}", node.ToString());
 
                 await HandleNodeAsync(node, ct);
             }

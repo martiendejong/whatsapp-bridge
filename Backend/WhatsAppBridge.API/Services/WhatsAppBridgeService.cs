@@ -55,6 +55,7 @@ public class WhatsAppBridgeService : IAsyncDisposable
 
         // Wire events — these fire from background threads
         var qrTcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var everConnected = false;
 
         client.QRCodeReceived += (_, qr) =>
         {
@@ -65,6 +66,7 @@ public class WhatsAppBridgeService : IAsyncDisposable
 
         client.Connected += (_, _) =>
         {
+            everConnected = true;
             _logger.LogInformation("Session {SessionId} connected", sessionId);
             _ = UpdateSessionAsync(sessionId, s =>
             {
@@ -76,10 +78,14 @@ public class WhatsAppBridgeService : IAsyncDisposable
 
         client.Disconnected += (_, _) =>
         {
-            _logger.LogInformation("Session {SessionId} disconnected", sessionId);
+            // If we never reached "connected", the server rejected us (e.g. rate limiting, bad payload).
+            // Mark as "failed" so the frontend stops polling instead of hanging on "qr_pending".
+            var status = everConnected ? "disconnected" : "failed";
+            _logger.LogInformation("Session {SessionId} disconnected (status → {Status})", sessionId, status);
+            qrTcs.TrySetException(new Exception($"Connection rejected by server (status: {status})"));
             _ = UpdateSessionAsync(sessionId, s =>
             {
-                s.Status = "disconnected";
+                s.Status = status;
                 s.LastSeenAt = DateTime.UtcNow;
             });
         };
@@ -87,11 +93,17 @@ public class WhatsAppBridgeService : IAsyncDisposable
         // Start connecting in background
         _ = client.ConnectAsync(CancellationToken.None);
 
-        // If session is already saved, client connects directly (no QR)
-        // If not, QR fires within ~2s
+        // If session is already saved, client connects directly (no QR).
+        // If not, QR fires within ~2s. If server rejects (rate limit, bad payload),
+        // qrTcs completes with exception so we don't hang for 30s.
         var winner = await Task.WhenAny(qrTcs.Task, Task.Delay(TimeSpan.FromSeconds(30)));
 
-        return winner == qrTcs.Task ? await qrTcs.Task : null;
+        if (winner == qrTcs.Task)
+        {
+            try { return await qrTcs.Task; }
+            catch { return null; } // Server rejected — status already updated to "failed" via Disconnected event
+        }
+        return null; // Timed out waiting for QR
     }
 
     public async Task<bool> DisconnectSessionAsync(string sessionId)

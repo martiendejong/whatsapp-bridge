@@ -198,30 +198,32 @@ public sealed class WhatsAppClient : IAsyncDisposable
 
     private async Task RunReceiveLoopAsync(CancellationToken ct)
     {
+        var wasConnected = false;
         try
         {
             await _noiseProcessor!.ReceiveLoopAsync(ct);
         }
-        catch (OperationCanceledException) { }
+        catch (OperationCanceledException) { return; }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Receive loop crashed.");
         }
         finally
         {
-            if (_state == ConnectionState.Connected)
+            wasConnected = _state == ConnectionState.Connected;
+            if (_state != ConnectionState.Disconnected && !ct.IsCancellationRequested)
             {
                 SetState(ConnectionState.Disconnected);
                 Disconnected?.Invoke(this, EventArgs.Empty);
-
-                if (_options.AutoReconnect && !ct.IsCancellationRequested)
-                {
-                    _logger.LogInformation("Reconnecting in {Delay}…", _options.ReconnectDelay);
-                    await Task.Delay(_options.ReconnectDelay, CancellationToken.None);
-                    try { await ConnectAsync(CancellationToken.None); }
-                    catch (Exception ex) { _logger.LogError(ex, "Reconnect failed."); }
-                }
             }
+        }
+
+        if (wasConnected && _options.AutoReconnect && !ct.IsCancellationRequested)
+        {
+            _logger.LogInformation("Reconnecting in {Delay}…", _options.ReconnectDelay);
+            await Task.Delay(_options.ReconnectDelay, CancellationToken.None);
+            try { await ConnectAsync(CancellationToken.None); }
+            catch (Exception ex) { _logger.LogError(ex, "Reconnect failed."); }
         }
     }
 
