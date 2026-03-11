@@ -7,7 +7,7 @@ using WhatsAppBridge.API.Services;
 
 namespace WhatsAppBridge.API.Controllers;
 
-[Authorize]
+[Authorize(AuthenticationSchemes = "Bearer,ApiKey")]
 [ApiController]
 [Route("api/[controller]")]
 public class WhatsAppController : ControllerBase

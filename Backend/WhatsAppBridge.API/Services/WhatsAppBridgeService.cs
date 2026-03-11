@@ -67,12 +67,18 @@ public class WhatsAppBridgeService : IAsyncDisposable
         client.Connected += (_, _) =>
         {
             everConnected = true;
-            _logger.LogInformation("Session {SessionId} connected", sessionId);
+            _logger.LogInformation("Session {SessionId} connected as {Jid}", sessionId, client.MyJid);
             _ = UpdateSessionAsync(sessionId, s =>
             {
                 s.Status = "connected";
                 s.ConnectedAt = DateTime.UtcNow;
                 s.QrCode = null; // QR no longer needed
+                // Extract phone number from JID: "31633984381:20@s.whatsapp.net" → "31633984381"
+                if (client.MyJid != null)
+                {
+                    var phone = client.MyJid.Split('@')[0].Split(':')[0];
+                    s.PhoneNumber = phone;
+                }
             });
         };
 
@@ -130,11 +136,15 @@ public class WhatsAppBridgeService : IAsyncDisposable
 
         client.Connected += (_, _) =>
         {
-            _logger.LogInformation("Session {SessionId} restored and connected", sessionId);
+            _logger.LogInformation("Session {SessionId} restored and connected as {Jid}", sessionId, client.MyJid);
             _ = UpdateSessionAsync(sessionId, s =>
             {
                 s.Status = "connected";
                 s.LastSeenAt = DateTime.UtcNow;
+                if (client.MyJid != null && string.IsNullOrEmpty(s.PhoneNumber))
+                {
+                    s.PhoneNumber = client.MyJid.Split('@')[0].Split(':')[0];
+                }
             });
         };
 

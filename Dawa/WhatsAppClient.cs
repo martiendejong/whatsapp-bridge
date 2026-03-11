@@ -31,6 +31,7 @@ public sealed class WhatsAppClient : IAsyncDisposable
     private FrameSocket? _frameSocket;
     private NoiseProcessor? _noiseProcessor;
     private ConnectionState _state = ConnectionState.Disconnected;
+    private AuthState? _authState;
     private CancellationTokenSource? _cts;
     private TaskCompletionSource<bool>? _connectedTcs;
 
@@ -58,7 +59,7 @@ public sealed class WhatsAppClient : IAsyncDisposable
 
     public ConnectionState State => _state;
     public bool IsConnected => _state == ConnectionState.Connected;
-    public string? MyJid => null; // Set after authentication
+    public string? MyJid => _authState?.Me?.Id;
 
     // ─── Construction ────────────────────────────────────────────────────────
 
@@ -100,13 +101,13 @@ public sealed class WhatsAppClient : IAsyncDisposable
 
         try
         {
-            var authState = await _sessionStore.LoadAsync(_cts.Token);
+            _authState = await _sessionStore.LoadAsync(_cts.Token);
 
             _frameSocket = new FrameSocket(_logger);
             SetState(ConnectionState.Handshaking);
             await _frameSocket.ConnectAsync(ct: _cts.Token);
 
-            _noiseProcessor = new NoiseProcessor(_frameSocket, authState, _options, _logger);
+            _noiseProcessor = new NoiseProcessor(_frameSocket, _authState, _options, _logger);
             _noiseProcessor.QRCodeGenerated += (_, qr) =>
             {
                 SetState(ConnectionState.Authenticating);
@@ -114,6 +115,7 @@ public sealed class WhatsAppClient : IAsyncDisposable
             };
             _noiseProcessor.Authenticated += async (_, auth) =>
             {
+                _authState = auth;
                 await _sessionStore.SaveAsync(auth, _cts!.Token);
                 SetState(ConnectionState.Connected);
                 _connectedTcs?.TrySetResult(true);
