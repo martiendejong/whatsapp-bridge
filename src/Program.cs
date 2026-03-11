@@ -5,6 +5,7 @@ var builder = WebApplication.CreateBuilder(args);
 
 // ─── Services ────────────────────────────────────────────────────────────────
 builder.Services.AddControllers();
+builder.Services.AddCors(o => o.AddDefaultPolicy(p => p.AllowAnyOrigin().AllowAnyMethod().AllowAnyHeader()));
 
 // Register Dawa WhatsApp client as singleton
 builder.Services.AddWhatsApp(options =>
@@ -24,6 +25,7 @@ builder.Services.AddHostedService<WhatsAppConnectionService>();
 // ─── App ─────────────────────────────────────────────────────────────────────
 var app = builder.Build();
 
+app.UseCors();
 app.UseRouting();
 app.MapControllers();
 
