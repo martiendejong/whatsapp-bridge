@@ -19,8 +19,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- Dawa: C# WhatsApp client replacing Node.js/Baileys -->
-    <ProjectReference Include="..\..\..\whatsapp-bridge\dawa\Dawa\Dawa.csproj" />
+    <!-- Dawa: C# WhatsApp client (source lives in /Dawa, no external repo dependency) -->
+    <ProjectReference Include="..\..\Dawa\Dawa.csproj" />
   </ItemGroup>
 
 </Project>
