@@ -8,11 +8,24 @@ if (args.Contains("--fresh") && Directory.Exists(sessionDir))
     Console.WriteLine("Cleared saved session.");
 }
 
+// Build the web app first so we can grab its ILoggerFactory for Dawa
+var builder = WebApplication.CreateBuilder(args);
+builder.WebHost.UseUrls("http://localhost:9191");
+
+// Suppress framework noise, show everything from Dawa
+builder.Logging.AddConsole();
+builder.Logging.AddFilter("Microsoft", LogLevel.Warning);
+builder.Logging.AddFilter("System", LogLevel.Warning);
+builder.Logging.AddFilter("Dawa", LogLevel.Debug);
+
+var app = builder.Build();
+var loggerFactory = app.Services.GetRequiredService<ILoggerFactory>();
+
 // Shared state written by Dawa events, read by the HTTP server
 var latestQr = "";
 var status = "connecting";
 
-var client = WhatsAppClient.Create(sessionDir);
+var client = WhatsAppClient.Create(sessionDir, loggerFactory);
 
 client.QRCodeReceived += (_, qr) =>
 {
@@ -24,7 +37,7 @@ client.QRCodeReceived += (_, qr) =>
 client.Connected += (_, _) =>
 {
     status = "connected";
-    Console.WriteLine("[Dawa] Connected! You can close the browser tab.");
+    Console.WriteLine("[Dawa] Connected!");
 };
 
 client.Disconnected += (_, _) =>
@@ -36,13 +49,6 @@ client.Disconnected += (_, _) =>
 
 // Start WhatsApp client in background
 _ = client.ConnectAsync();
-
-// Minimal HTTP server on port 9191
-var builder = WebApplication.CreateBuilder(args);
-builder.WebHost.UseUrls("http://localhost:9191");
-builder.Logging.SetMinimumLevel(LogLevel.Warning); // silence Kestrel noise
-
-var app = builder.Build();
 
 // JSON endpoint polled by the page
 app.MapGet("/qr", () => new { qr = latestQr, status });
@@ -69,13 +75,12 @@ app.MapGet("/", () => Results.Content("""
   <div id="card">
     <div id="status">Connecting...</div>
     <div id="qr"></div>
-    <div id="ok">✓ OK!</div>
+    <div id="ok">&#10003; OK!</div>
     <div id="error">Server rejected the connection.<br>Try again in a few minutes.</div>
   </div>
 
   <script>
     let currentQr = null;
-    let qrObj = null;
 
     async function poll() {
       try {
@@ -87,19 +92,19 @@ app.MapGet("/", () => Results.Content("""
         if (d.status === 'connected') {
           document.getElementById('qr').style.display = 'none';
           document.getElementById('ok').style.display = 'block';
-          return; // stop polling
+          return;
         }
 
         if (d.status === 'failed') {
           document.getElementById('qr').style.display = 'none';
           document.getElementById('error').style.display = 'block';
-          return; // stop polling
+          return;
         }
 
         if (d.qr && d.qr !== currentQr) {
           currentQr = d.qr;
           document.getElementById('qr').innerHTML = '';
-          qrObj = new QRCode(document.getElementById('qr'), {
+          new QRCode(document.getElementById('qr'), {
             text: currentQr,
             width: 256,
             height: 256,
@@ -119,9 +124,8 @@ app.MapGet("/", () => Results.Content("""
 """, "text/html"));
 
 Console.WriteLine("Open http://localhost:9191 in your browser");
-Console.WriteLine("(Add --fresh flag to force a new QR instead of restoring saved session)");
+Console.WriteLine("(Use --fresh to force a new QR instead of restoring saved session)");
 
-// Open browser automatically
 try
 {
     System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
@@ -130,7 +134,7 @@ try
         UseShellExecute = true
     });
 }
-catch { /* ignore if browser can't open */ }
+catch { }
 
 await app.RunAsync();
 await client.DisposeAsync();

@@ -64,18 +64,42 @@ public sealed class DevicePairingRegistrationData
 /// <summary>DeviceProps (companion registration info), field 8 of DevicePairingRegistrationData.</summary>
 public sealed class DevicePropsMessage
 {
-    public string Os             { get; set; } = "Windows";
+    public string Os             { get; set; } = "Ubuntu";
+    public AppVersion? Version   { get; set; } = new AppVersion { Primary = 10, Secondary = 15, Tertiary = 7 };
     // PlatformType: CHROME=1
     public int PlatformType      { get; set; } = 1;
     public bool RequireFullSync  { get; set; } = false;
+    public HistorySyncConfigMessage? HistorySyncConfig { get; set; } = new();
 
     public byte[] ToByteArray()
     {
-        // Match Baileys exactly: only os (field 1) + platformType (field 3).
-        // requireFullSync=false is proto3 default — omit. No version, no HistorySyncConfig.
         var buf = new List<byte>();
         ProtoEncoder.WriteString(buf, 1, Os);
+        if (Version != null) ProtoEncoder.WriteMessage(buf, 2, Version.ToByteArray());
         ProtoEncoder.WriteInt32(buf, 3, PlatformType);
+        // requireFullSync=false is proto3 default — omit.
+        if (HistorySyncConfig != null) ProtoEncoder.WriteMessage(buf, 5, HistorySyncConfig.ToByteArray());
+        return [.. buf];
+    }
+}
+
+/// <summary>HistorySyncConfig nested in DeviceProps (field 5).</summary>
+public sealed class HistorySyncConfigMessage
+{
+    public byte[] ToByteArray()
+    {
+        var buf = new List<byte>();
+        ProtoEncoder.WriteUInt32(buf, 3, 10240);   // storageQuotaMb
+        ProtoEncoder.WriteBool(buf, 4, true);        // inlineInitialPayloadInE2EeMsg
+        // field 6: supportCallLogHistory = false — omit
+        ProtoEncoder.WriteBool(buf, 7, true);        // supportBotUserAgentChatHistory
+        ProtoEncoder.WriteBool(buf, 8, true);        // supportCagReactionsAndPolls
+        ProtoEncoder.WriteBool(buf, 9, true);        // supportBizHostedMsg
+        ProtoEncoder.WriteBool(buf, 10, true);       // supportRecentSyncChunkMessageCountTuning
+        ProtoEncoder.WriteBool(buf, 11, true);       // supportHostedGroupMsg
+        ProtoEncoder.WriteBool(buf, 12, true);       // supportFbidBotChatHistory
+        ProtoEncoder.WriteBool(buf, 14, true);       // supportMessageAssociation
+        // field 15: supportGroupHistory = false — omit
         return [.. buf];
     }
 }

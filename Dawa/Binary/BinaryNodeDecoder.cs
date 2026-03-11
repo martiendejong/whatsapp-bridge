@@ -87,9 +87,16 @@ public static class BinaryNodeDecoder
         return reader.ReadBytes(length);
     }
 
+    // Sentinel returned when ReadString encounters StreamEnd (byte 0x02).
+    internal const string StreamEndSentinel = "\x02";
+
     private static string ReadString(ref BinaryReader reader)
     {
         var b = reader.ReadByte();
+
+        // StreamEnd byte — signals server closed the stream.
+        if (b == WATags.StreamEnd)
+            return StreamEndSentinel;
 
         // Single-byte tokens: bytes 3–235 map directly to Dictionary0.
         // Baileys: singleByteTokens[3] = "xmlstreamstart" = Dictionary0[0].

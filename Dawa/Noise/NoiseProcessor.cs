@@ -189,8 +189,15 @@ public sealed class NoiseProcessor : IAsyncDisposable
                     decrypted.Length, BitConverter.ToString(decrypted, 0, Math.Min(32, decrypted.Length)));
 
                 var node = BinaryNodeDecoder.Decode(nodeData);
-                _logger.LogInformation("Received node: {Node}", node.ToString());
 
+                // Server sent StreamEnd — graceful close, stop receive loop.
+                if (node.Tag == BinaryNodeDecoder.StreamEndSentinel)
+                {
+                    _logger.LogInformation("Server sent stream-end, closing.");
+                    break;
+                }
+
+                _logger.LogInformation("Received node: {Node}", node.ToString());
                 await HandleNodeAsync(node, ct);
             }
             catch (OperationCanceledException) { break; }
@@ -207,6 +214,11 @@ public sealed class NoiseProcessor : IAsyncDisposable
     {
         switch (node.Tag)
         {
+            case "chat" when node.GetAttr("add") == "@xmlstreamstart":
+                // Multi-device: server embeds pair-device refs directly in the xmlstreamstart frame.
+                // Structure: <chat add="@xmlstreamstart"><container><ref>[102 bytes]</ref>×6</container></chat>
+                await HandleXmlStreamStartAsync(node, ct);
+                break;
             case "iq":
                 await HandleIQAsync(node, ct);
                 break;
@@ -230,6 +242,47 @@ public sealed class NoiseProcessor : IAsyncDisposable
                 _logger.LogDebug("Unhandled node tag: {Tag}", node.Tag);
                 break;
         }
+    }
+
+    private async Task HandleXmlStreamStartAsync(BinaryNode chat, CancellationToken ct)
+    {
+        // In the WhatsApp multi-device protocol, the server packs pair-device ref blobs
+        // directly into the first post-handshake frame as children of the xmlstreamstart node.
+        // Walk the children to find the first binary payload — that is the first QR ref.
+        byte[]? refBytes = null;
+        foreach (var container in chat.Children)
+        {
+            foreach (var child in container.Children)
+            {
+                if (child.Data is { Length: > 0 })
+                {
+                    refBytes = child.Data;
+                    break;
+                }
+            }
+            if (refBytes != null) break;
+        }
+
+        if (refBytes == null)
+        {
+            _logger.LogWarning("xmlstreamstart node contained no ref blobs — cannot generate QR.");
+            return;
+        }
+
+        // The ref blob is raw bytes; base64-encode it to form the ref string.
+        var ref_ = Convert.ToBase64String(refBytes);
+        var qrParts = new[]
+        {
+            ref_,
+            Convert.ToBase64String(_auth.NoiseKeyPublic),
+            Convert.ToBase64String(_auth.SignedIdentityKeyPublic),
+            Convert.ToBase64String(_auth.AdvSecretKey),
+        };
+        var qrString = string.Join(",", qrParts);
+
+        _logger.LogInformation("QR Code ready (from xmlstreamstart, ref={RefLen} bytes).", refBytes.Length);
+        QRCodeGenerated?.Invoke(this, qrString);
+        // Connection stays open — server waits for QR scan (up to ~20s per ref).
     }
 
     private async Task HandleIQAsync(BinaryNode iq, CancellationToken ct)
@@ -472,7 +525,7 @@ public sealed class NoiseProcessor : IAsyncDisposable
             Mcc = "000",
             Mnc = "000",
             OsVersion = "0.1",
-            Device = "Chrome",    // Baileys browser[1] = "Chrome" (Browsers.ubuntu('Chrome'))
+            Device = "Desktop",   // Baileys getUserAgent always uses "Desktop"
             OsBuildNumber = "0.1",
             LocaleLanguageIso6391 = "en",
             LocaleCountryIso31661Alpha2 = "US",
@@ -498,7 +551,7 @@ public sealed class NoiseProcessor : IAsyncDisposable
 
             var deviceProps = new DevicePropsMessage
             {
-                Os = "Macintosh",
+                // Os="Ubuntu", Version={10,15,7}, HistorySyncConfig — all set by default
                 PlatformType = 1, // CHROME
             }.ToByteArray();
 
