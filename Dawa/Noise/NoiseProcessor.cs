@@ -1,3 +1,4 @@
+using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -170,7 +171,11 @@ public sealed class NoiseProcessor : IAsyncDisposable
                 if (frame == null) break;
 
                 var decrypted = DecryptFrame(frame);
-                var node = BinaryNodeDecoder.Decode(decrypted);
+                // Baileys protocol: first byte is a flags byte.
+                // Bit 1 (value 2) = payload is zlib raw-deflate compressed.
+                // Always strip this byte before decoding the binary node.
+                var nodeData = StripFlagsAndDecompress(decrypted);
+                var node = BinaryNodeDecoder.Decode(nodeData);
                 _logger.LogDebug("Received node: {Tag}", node.Tag);
 
                 await HandleNodeAsync(node, ct);
@@ -421,6 +426,25 @@ public sealed class NoiseProcessor : IAsyncDisposable
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────────
+
+    private static byte[] StripFlagsAndDecompress(byte[] decrypted)
+    {
+        if (decrypted.Length == 0) return decrypted;
+        var flags = decrypted[0];
+        var data = decrypted[1..];
+
+        if ((flags & 2) != 0)
+        {
+            // zlib raw deflate compressed (DeflateStream = raw deflate, no zlib header)
+            using var input = new MemoryStream(data);
+            using var deflate = new DeflateStream(input, CompressionMode.Decompress);
+            using var output = new MemoryStream();
+            deflate.CopyTo(output);
+            return output.ToArray();
+        }
+
+        return data;
+    }
 
     // Baileys default version: [2, 3000, 1033846690]
     // buildHash = MD5("2.3000.1033846690")
