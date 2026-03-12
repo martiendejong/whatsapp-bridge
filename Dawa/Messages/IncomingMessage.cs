@@ -26,6 +26,9 @@ public sealed class IncomingMessage
     /// <summary>Unix timestamp (seconds) when the message was sent.</summary>
     public long Timestamp { get; init; }
 
+    /// <summary>The push name (display name) of the sender, if provided.</summary>
+    public string? PushName { get; init; }
+
     /// <summary>UTC timestamp of the message.</summary>
     public DateTimeOffset SentAt => DateTimeOffset.FromUnixTimeSeconds(Timestamp);
 

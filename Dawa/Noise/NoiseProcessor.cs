@@ -7,6 +7,7 @@ using Dawa.Binary;
 using Dawa.Crypto;
 using Dawa.Messages;
 using Dawa.Proto;
+using Dawa.Signal;
 using Dawa.Transport;
 using Microsoft.Extensions.Logging;
 
@@ -39,6 +40,12 @@ public sealed class NoiseProcessor : IAsyncDisposable
     private readonly byte[] _ephemeralPriv;
     private readonly byte[] _ephemeralPub;
 
+    // Signal Protocol session store
+    private readonly SignalKeyStore _signalStore;
+
+    // Pending IQ tracking for request/response correlation
+    private readonly Dictionary<string, TaskCompletionSource<BinaryNode>> _pendingIqs = new();
+
     public event EventHandler<string>? QRCodeGenerated;
     public event EventHandler<AuthState>? Authenticated;
     public event EventHandler<IncomingMessage>? MessageReceived;
@@ -51,6 +58,7 @@ public sealed class NoiseProcessor : IAsyncDisposable
         _logger = logger;
 
         (_ephemeralPriv, _ephemeralPub) = Curve25519Helper.GenerateKeyPair();
+        _signalStore = new SignalKeyStore(options.SessionDirectory);
     }
 
     // ─── Handshake ───────────────────────────────────────────────────────────
@@ -287,6 +295,16 @@ public sealed class NoiseProcessor : IAsyncDisposable
 
     private async Task HandleIQAsync(BinaryNode iq, CancellationToken ct)
     {
+        // Resolve any pending IQ awaiter first
+        var iqId = iq.GetAttr("id") ?? "";
+        var iqType = iq.GetAttr("type") ?? "";
+        if ((iqType == "result" || iqType == "error") && _pendingIqs.TryGetValue(iqId, out var tcs))
+        {
+            _pendingIqs.Remove(iqId);
+            tcs.SetResult(iq);
+            return;
+        }
+
         var type = iq.GetAttr("type");
         if (type == "get")
         {
@@ -482,36 +500,131 @@ public sealed class NoiseProcessor : IAsyncDisposable
 
     private void HandleMessageNode(BinaryNode node)
     {
-        var from = node.GetAttr("from") ?? "";
-        var id = node.GetAttr("id") ?? "";
+        var from        = node.GetAttr("from") ?? "";
+        var id          = node.GetAttr("id") ?? "";
         var participant = node.GetAttr("participant");
-        var pushName = node.GetAttr("notify");
-        var fromMe = node.GetAttr("fromMe") == "true" || node.GetAttr("from") == _auth.Me?.Id;
+        var pushName    = node.GetAttr("notify");
+
+        var myJidBase = _auth.Me?.Id?.Split(':')[0]; // e.g. "31633984381"
+        var fromMe    = from == myJidBase + "@s.whatsapp.net"
+                     || (myJidBase != null && from.StartsWith(myJidBase));
 
         if (!long.TryParse(node.GetAttr("t"), out var timestamp))
             timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
-        // Extract text content — walk the message body
-        string? text = null;
-        var body = node.FindChild("body");
-        if (body?.Text != null)
-            text = body.Text;
-
-        if (string.IsNullOrEmpty(text))
-            return; // Skip non-text messages for now
-
-        var msg = new IncomingMessage
+        // ── Encrypted path: <participants><to jid="..."><enc .../></to></participants> ──
+        var participantsNode = node.FindChild("participants");
+        if (participantsNode != null)
         {
-            Id = id,
-            From = participant ?? from,
-            RemoteJid = from,
-            Participant = participant,
-            Text = text,
-            FromMe = fromMe,
-            Timestamp = timestamp,
-        };
+            foreach (var toNode in participantsNode.GetChildren("to"))
+            {
+                var toJid = toNode.GetAttr("jid") ?? "";
+                if (myJidBase != null && !toJid.StartsWith(myJidBase)) continue;
 
-        MessageReceived?.Invoke(this, msg);
+                var encNode = toNode.FindChild("enc");
+                if (encNode?.Data == null) continue;
+
+                var encType = encNode.GetAttr("type") ?? "msg";
+                try
+                {
+                    var senderJid = participant ?? from;
+                    var plaintext = _signalStore.DecryptMessage(senderJid, encType, encNode.Data, _auth);
+                    var waMsg     = WAMessage.ParseFrom(plaintext);
+                    var text      = waMsg.Conversation ?? waMsg.ExtendedTextMessage?.Text;
+                    if (string.IsNullOrEmpty(text)) continue;
+
+                    MessageReceived?.Invoke(this, new IncomingMessage
+                    {
+                        Id          = id,
+                        From        = senderJid,
+                        RemoteJid   = from,
+                        Participant = participant,
+                        Text        = text,
+                        FromMe      = fromMe,
+                        Timestamp   = timestamp,
+                        PushName    = pushName,
+                    });
+
+                    // ACK
+                    _ = SendAckAsync(id, from, timestamp);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Failed to decrypt message from {Jid}", from);
+                }
+            }
+            return;
+        }
+
+        // ── Direct <enc> (no <participants> wrapper) ──────────────────────────
+        var directEnc = node.FindChild("enc");
+        if (directEnc?.Data != null)
+        {
+            var encType = directEnc.GetAttr("type") ?? "msg";
+            try
+            {
+                var senderJid = participant ?? from;
+                var plaintext = _signalStore.DecryptMessage(senderJid, encType, directEnc.Data, _auth);
+                var waMsg     = WAMessage.ParseFrom(plaintext);
+                var text      = waMsg.Conversation ?? waMsg.ExtendedTextMessage?.Text;
+                if (!string.IsNullOrEmpty(text))
+                {
+                    MessageReceived?.Invoke(this, new IncomingMessage
+                    {
+                        Id          = id,
+                        From        = participant ?? from,
+                        RemoteJid   = from,
+                        Participant = participant,
+                        Text        = text,
+                        FromMe      = fromMe,
+                        Timestamp   = timestamp,
+                        PushName    = pushName,
+                    });
+                    _ = SendAckAsync(id, from, timestamp);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to decrypt direct enc message from {Jid}", from);
+            }
+            return;
+        }
+
+        // ── Fallback: plain text body (legacy) ────────────────────────────────
+        var body      = node.FindChild("body");
+        var plainText = body?.Text;
+        if (string.IsNullOrEmpty(plainText)) return;
+
+        MessageReceived?.Invoke(this, new IncomingMessage
+        {
+            Id          = id,
+            From        = participant ?? from,
+            RemoteJid   = from,
+            Text        = plainText,
+            FromMe      = fromMe,
+            Timestamp   = timestamp,
+            PushName    = pushName,
+        });
+    }
+
+    private async Task SendAckAsync(string msgId, string to, long timestamp)
+    {
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            var ack = new BinaryNode("ack", new Dictionary<string, string>
+            {
+                ["id"]   = msgId,
+                ["to"]   = to,
+                ["type"] = "message",
+                ["t"]    = timestamp.ToString(),
+            });
+            await SendNodeAsync(ack, cts.Token);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to send ACK for message {Id}", msgId);
+        }
     }
 
     private async Task HandleNotificationAsync(BinaryNode notification, CancellationToken ct)
@@ -531,24 +644,307 @@ public sealed class NoiseProcessor : IAsyncDisposable
 
     // ─── Send message ───────────────────────────────────────────────────────
 
-    /// <summary>Sends a text message to a JID.</summary>
+    /// <summary>Sends an encrypted text message to a JID using Signal Protocol.</summary>
     public async Task SendTextMessageAsync(string jid, string text, CancellationToken ct)
     {
-        var msgId = GenerateMessageId();
-        var msgContent = Encoding.UTF8.GetBytes(text);
+        // 1. Normalize JID
+        var normalizedJid = jid.Contains('@') ? jid : $"{jid.TrimStart('+')}@s.whatsapp.net";
+        var phoneNumber   = normalizedJid.Split('@')[0].Split(':')[0];
 
-        var msgNode = new BinaryNode("message", new()
+        // 2. Get device list via USync
+        List<string> deviceJids;
+        try { deviceJids = await GetDeviceListAsync(phoneNumber, ct); }
+        catch (Exception ex)
         {
-            ["id"] = msgId,
+            _logger.LogWarning(ex, "Failed to get device list for {Phone}, using fallback", phoneNumber);
+            deviceJids = [$"{phoneNumber}:0@s.whatsapp.net"];
+        }
+
+        // Also add our own device so we receive a copy of our sent message
+        if (_auth.Me?.Id != null)
+        {
+            var meJid       = _auth.Me.Id.Split('@')[0]; // e.g. "31633984381:20"
+            var meDeviceJid = $"{meJid}@s.whatsapp.net";
+            if (!deviceJids.Contains(meDeviceJid))
+                deviceJids.Add(meDeviceJid);
+        }
+
+        // 3. For each device without a session, fetch pre-key bundle
+        var needBundles = deviceJids.Where(d => !_signalStore.HasSession(d)).ToList();
+        if (needBundles.Count > 0)
+        {
+            try
+            {
+                var bundles = await FetchPreKeyBundlesAsync(needBundles, ct);
+                foreach (var (deviceJid, bundle) in bundles)
+                    _signalStore.InitOutgoingSession(deviceJid, bundle, _auth);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to fetch pre-key bundles");
+            }
+        }
+
+        // 4. Proto-encode the message
+        var msgProto = new WAMessage { Conversation = text }.ToByteArray();
+
+        // 5. Encrypt for each device
+        var msgId   = GenerateMessageId();
+        var toNodes = new List<BinaryNode>();
+        foreach (var deviceJid in deviceJids)
+        {
+            if (!_signalStore.HasSession(deviceJid))
+            {
+                _logger.LogWarning("No session for {Jid} after bundle fetch, skipping", deviceJid);
+                continue;
+            }
+            try
+            {
+                var (encBytes, isPreKey) = _signalStore.EncryptMessage(deviceJid, msgProto, _auth);
+                var encNode = new BinaryNode("enc", new Dictionary<string, string>
+                {
+                    ["v"]    = "2",
+                    ["type"] = isPreKey ? "pkmsg" : "msg",
+                }) { Content = encBytes };
+
+                var toNode = new BinaryNode("to", new Dictionary<string, string>
+                {
+                    ["jid"] = deviceJid,
+                }) { Content = new List<BinaryNode> { encNode } };
+
+                toNodes.Add(toNode);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning("Failed to encrypt for {Jid}: {Error}", deviceJid, ex.Message);
+            }
+        }
+
+        if (toNodes.Count == 0)
+        {
+            _logger.LogError("No devices encrypted successfully for {Jid}", normalizedJid);
+            return;
+        }
+
+        // 6. Build and send message node
+        var participantsNode = new BinaryNode("participants")
+        {
+            Content = toNodes,
+        };
+        var msgNode = new BinaryNode("message", new Dictionary<string, string>
+        {
+            ["id"]   = msgId,
             ["type"] = "text",
-            ["to"] = jid,
-        }, new List<BinaryNode>
-        {
-            new("body", content: text),
-        });
+            ["to"]   = normalizedJid,
+            ["t"]    = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString(),
+        }) { Content = new List<BinaryNode> { participantsNode } };
 
         await SendNodeAsync(msgNode, ct);
-        _logger.LogInformation("Sent message to {Jid}: {Text}", jid, text.Length > 50 ? text[..50] + "…" : text);
+        _logger.LogInformation("Sent encrypted message to {Jid} via {N} devices", normalizedJid, toNodes.Count);
+    }
+
+    // ─── IQ helper ──────────────────────────────────────────────────────────
+
+    private async Task<BinaryNode> SendIQAsync(BinaryNode iq, CancellationToken ct, int timeoutMs = 15000)
+    {
+        var id = iq.GetAttr("id") ?? GenerateMessageId();
+        if (!iq.Attrs.ContainsKey("id")) iq.Attrs["id"] = id;
+
+        var tcs = new TaskCompletionSource<BinaryNode>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _pendingIqs[id] = tcs;
+
+        await SendNodeAsync(iq, ct);
+
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeoutCts.CancelAfter(timeoutMs);
+
+        try
+        {
+            return await tcs.Task.WaitAsync(timeoutCts.Token);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            _pendingIqs.Remove(id);
+            throw new TimeoutException($"IQ {id} timed out after {timeoutMs}ms");
+        }
+    }
+
+    // ─── Fetch pre-key bundles ───────────────────────────────────────────────
+
+    /// <summary>
+    /// Sends an encrypt IQ to fetch pre-key bundles for a list of device JIDs.
+    /// Returns a dictionary keyed by device JID.
+    /// </summary>
+    private async Task<Dictionary<string, PreKeyBundle>> FetchPreKeyBundlesAsync(
+        IEnumerable<string> deviceJids, CancellationToken ct)
+    {
+        var userNodes = deviceJids.Select(d => new BinaryNode("user", new Dictionary<string, string>
+        {
+            ["jid"]    = d,
+            ["reason"] = "identity",
+        })).ToList();
+
+        var keyNode = new BinaryNode("key") { Content = userNodes };
+        var iqId    = GenerateMessageId();
+        var iq = new BinaryNode("iq", new Dictionary<string, string>
+        {
+            ["xmlns"] = "encrypt",
+            ["type"]  = "get",
+            ["to"]    = "s.whatsapp.net",
+            ["id"]    = iqId,
+        }) { Content = new List<BinaryNode> { keyNode } };
+
+        BinaryNode response;
+        try { response = await SendIQAsync(iq, ct); }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "FetchPreKeyBundles IQ failed");
+            return new Dictionary<string, PreKeyBundle>();
+        }
+
+        var result  = new Dictionary<string, PreKeyBundle>();
+        var listNode = response.FindChild("list") ?? response;
+
+        foreach (var userNode in listNode.GetChildren("user"))
+        {
+            var userJid = userNode.GetAttr("jid") ?? "";
+            if (string.IsNullOrEmpty(userJid)) continue;
+
+            try
+            {
+                var bundle = ParsePreKeyBundle(userNode);
+                result[userJid] = bundle;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to parse pre-key bundle for {Jid}", userJid);
+            }
+        }
+
+        return result;
+    }
+
+    private static PreKeyBundle ParsePreKeyBundle(BinaryNode userNode)
+    {
+        var regNode  = userNode.FindChild("registration");
+        var typeNode = userNode.FindChild("type");
+        var idNode   = userNode.FindChild("identity");
+        var skeyNode = userNode.FindChild("skey");
+        var otpkNode = userNode.FindChild("key");
+
+        var regBytes = regNode?.Data ?? [];
+        uint regId = regBytes.Length >= 4
+            ? (uint)((regBytes[0] << 24) | (regBytes[1] << 16) | (regBytes[2] << 8) | regBytes[3])
+            : 0;
+
+        var identityKey = idNode?.Data ?? [];
+
+        byte[] spkPub = [];
+        uint   spkId  = 0;
+        byte[] spkSig = [];
+        if (skeyNode != null)
+        {
+            var skeyIdBytes = skeyNode.FindChild("id")?.Data ?? [];
+            spkId = skeyIdBytes.Length >= 3
+                ? (uint)((skeyIdBytes[0] << 16) | (skeyIdBytes[1] << 8) | skeyIdBytes[2])
+                : 0;
+            spkPub = skeyNode.FindChild("value")?.Data ?? [];
+            spkSig = skeyNode.FindChild("signature")?.Data ?? [];
+        }
+
+        byte[]? otpkPub = null;
+        uint    otpkId  = 0;
+        if (otpkNode != null)
+        {
+            var otpkIdBytes = otpkNode.FindChild("id")?.Data ?? [];
+            otpkId = otpkIdBytes.Length >= 3
+                ? (uint)((otpkIdBytes[0] << 16) | (otpkIdBytes[1] << 8) | otpkIdBytes[2])
+                : 0;
+            otpkPub = otpkNode.FindChild("value")?.Data;
+        }
+
+        return new PreKeyBundle
+        {
+            TheirIdentityPub      = identityKey,
+            TheirSignedPreKeyPub  = spkPub,
+            TheirSignedPreKeyId   = spkId,
+            TheirSignedPreKeySig  = spkSig,
+            TheirOneTimePreKeyPub = otpkPub,
+            TheirOneTimePreKeyId  = otpkId,
+            PeerRegistrationId    = regId,
+        };
+    }
+
+    // ─── Get device list (USync) ─────────────────────────────────────────────
+
+    /// <summary>
+    /// Sends a USync IQ to get all device JIDs for a phone number.
+    /// Returns list of device JIDs like "31633984381:0@s.whatsapp.net".
+    /// </summary>
+    private async Task<List<string>> GetDeviceListAsync(string phoneNumber, CancellationToken ct)
+    {
+        var contact    = $"+{phoneNumber.TrimStart('+')}";
+        var sid        = GenerateMessageId();
+        var iqId       = GenerateMessageId();
+
+        var deviceListNode = new BinaryNode("device-list");
+        var devicesNode    = new BinaryNode("devices", new Dictionary<string, string> { ["version"] = "2" })
+        {
+            Content = new List<BinaryNode> { deviceListNode },
+        };
+        var queryNode = new BinaryNode("query") { Content = new List<BinaryNode> { devicesNode } };
+
+        var contactNode = new BinaryNode("contact") { Content = contact };
+        var userNode    = new BinaryNode("user") { Content = new List<BinaryNode> { contactNode } };
+        var listNode    = new BinaryNode("list") { Content = new List<BinaryNode> { userNode } };
+
+        var usyncNode = new BinaryNode("usync", new Dictionary<string, string>
+        {
+            ["context"] = "message",
+            ["mode"]    = "query",
+            ["last"]    = "true",
+            ["index"]   = "0",
+            ["sid"]     = sid,
+        }) { Content = new List<BinaryNode> { queryNode, listNode } };
+
+        var iq = new BinaryNode("iq", new Dictionary<string, string>
+        {
+            ["to"]    = "s.whatsapp.net",
+            ["type"]  = "get",
+            ["xmlns"] = "usync",
+            ["id"]    = iqId,
+        }) { Content = new List<BinaryNode> { usyncNode } };
+
+        BinaryNode response;
+        try { response = await SendIQAsync(iq, ct); }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "GetDeviceList IQ failed for {Phone}", phoneNumber);
+            return [$"{phoneNumber}:0@s.whatsapp.net"];
+        }
+
+        var deviceJids = new List<string>();
+        WalkForDevices(response, phoneNumber, deviceJids);
+
+        if (deviceJids.Count == 0)
+            deviceJids.Add($"{phoneNumber}:0@s.whatsapp.net");
+
+        return deviceJids;
+    }
+
+    private static void WalkForDevices(BinaryNode node, string phoneNumber, List<string> result)
+    {
+        if (node.Tag == "device")
+        {
+            var jid = node.GetAttr("jid");
+            if (!string.IsNullOrEmpty(jid))
+            {
+                result.Add(jid);
+                return;
+            }
+        }
+        foreach (var child in node.Children)
+            WalkForDevices(child, phoneNumber, result);
     }
 
     // ─── Low-level send/receive ─────────────────────────────────────────────
