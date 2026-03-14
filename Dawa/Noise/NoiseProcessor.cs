@@ -1641,6 +1641,179 @@ public sealed class NoiseProcessor : IAsyncDisposable
         return BitConverter.ToString(bytes).Replace("-", "").ToUpper();
     }
 
+    // ─── App state sync: contact fetching ───────────────────────────────────
+
+    /// <summary>
+    /// Fetches a 32-byte app state key from the server by keyId.
+    /// </summary>
+    private async Task<byte[]> FetchAppStateSyncKeyAsync(byte[] keyId, CancellationToken ct)
+    {
+        var iq = new BinaryNode("iq", new Dictionary<string, string>
+        {
+            ["id"]    = GenerateMessageId(),
+            ["to"]    = "@s.whatsapp.net",
+            ["type"]  = "get",
+            ["xmlns"] = "w:sync:app:state:k",
+        })
+        {
+            Content = new List<BinaryNode>
+            {
+                new BinaryNode("key", null, new List<BinaryNode>
+                {
+                    new BinaryNode("id", null, keyId),
+                }),
+            },
+        };
+
+        var result = await SendIQAsync(iq, ct, timeoutMs: 15000);
+
+        // Navigate result → key → key-data
+        var keyNode     = result.FindChild("key") ?? result;
+        var keyDataNode = keyNode.FindChild("key-data");
+        if (keyDataNode?.Data is { Length: 32 } appKey)
+            return appKey;
+
+        // Fallback: walk children for a 32-byte data blob
+        foreach (var child in result.Children)
+        {
+            if (child.Data is { Length: 32 } d) return d;
+            foreach (var grandchild in child.Children)
+                if (grandchild.Data is { Length: 32 } d2) return d2;
+        }
+
+        throw new InvalidOperationException($"App state sync key response did not contain a 32-byte key (tag={result.Tag})");
+    }
+
+    /// <summary>
+    /// Fetches contacts from WhatsApp via app state sync of the "contact" collection.
+    /// Returns (JID, Name) pairs for all contacts found in the snapshot.
+    /// </summary>
+    public async Task<List<(string Jid, string Name)>> FetchContactsAsync(CancellationToken ct)
+    {
+        // 1. Send app state sync IQ for "contact" collection
+        var iq = new BinaryNode("iq", new Dictionary<string, string>
+        {
+            ["id"]    = GenerateMessageId(),
+            ["to"]    = "@s.whatsapp.net",
+            ["type"]  = "set",
+            ["xmlns"] = "w:app:state:sync",
+        })
+        {
+            Content = new List<BinaryNode>
+            {
+                new BinaryNode("sync", null, new List<BinaryNode>
+                {
+                    new BinaryNode("collection", new Dictionary<string, string>
+                    {
+                        ["name"]            = "contact",
+                        ["version"]         = "0",
+                        ["return_snapshot"] = "true",
+                    }),
+                }),
+            },
+        };
+
+        var result = await SendIQAsync(iq, ct, timeoutMs: 30000);
+
+        // 2. Navigate: result → sync → collection → snapshot
+        var syncNode       = result.FindChild("sync") ?? result;
+        var collectionNode = syncNode.FindChild("collection") ?? syncNode;
+        var snapshotNode   = collectionNode.FindChild("snapshot");
+
+        if (snapshotNode?.Data == null || snapshotNode.Data.Length == 0)
+        {
+            _logger.LogWarning("FetchContactsAsync: no snapshot data in response");
+            return [];
+        }
+
+        // 3. Parse SyncdSnapshot from raw protobuf bytes (synchronous — ProtoReader is a ref struct)
+        var snapshot = Proto.SyncdSnapshot.ParseFrom(snapshotNode.Data);
+        _logger.LogInformation("FetchContactsAsync: snapshot has {Count} records", snapshot.Records.Count);
+
+        // 4. Determine keyId
+        var keyId = snapshot.KeyId.Length > 0
+            ? snapshot.KeyId
+            : snapshot.Records.Count > 0 ? snapshot.Records[0].KeyId : null;
+
+        if (keyId == null || keyId.Length == 0)
+        {
+            _logger.LogWarning("FetchContactsAsync: no keyId found in snapshot");
+            return [];
+        }
+
+        // 5. Fetch the app state key (async, after we're done with ref struct parsing)
+        var appKey = await FetchAppStateSyncKeyAsync(keyId, ct);
+
+        // 6. Derive enc key using HKDF-SHA256
+        var derived = System.Security.Cryptography.HKDF.DeriveKey(
+            System.Security.Cryptography.HashAlgorithmName.SHA256,
+            appKey,
+            outputLength: 64,
+            salt: new byte[32],
+            info: "WhisperAppStateKeys"u8.ToArray());
+        var encKey = derived[..32];
+
+        // 7. Decrypt each record and extract contact info (synchronous decryption)
+        var contacts = new List<(string Jid, string Name)>();
+
+        foreach (var record in snapshot.Records)
+        {
+            if (record.ValueBlob.Length < 17) continue;
+
+            var iv         = record.ValueBlob[..16];
+            var ciphertext = record.ValueBlob[16..];
+
+            // AES-CBC requires ciphertext to be a multiple of 16 bytes
+            if (ciphertext.Length % 16 != 0) continue;
+
+            byte[] decrypted;
+            try
+            {
+                using var aes = System.Security.Cryptography.Aes.Create();
+                aes.Key     = encKey;
+                aes.IV      = iv;
+                aes.Mode    = System.Security.Cryptography.CipherMode.CBC;
+                aes.Padding = System.Security.Cryptography.PaddingMode.None;
+                decrypted   = aes.DecryptCbc(ciphertext, iv);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "FetchContactsAsync: failed to decrypt record, skipping");
+                continue;
+            }
+
+            // Strip trailing zero-padding
+            var end = decrypted.Length;
+            while (end > 0 && decrypted[end - 1] == 0) end--;
+            if (end < decrypted.Length) decrypted = decrypted[..end];
+            if (decrypted.Length == 0) continue;
+
+            Proto.SyncActionData actionData;
+            try { actionData = Proto.SyncActionData.ParseFrom(decrypted); }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "FetchContactsAsync: failed to parse SyncActionData, skipping");
+                continue;
+            }
+
+            if (actionData.Index.Length < 2 || actionData.Index[0] != "contact") continue;
+            if (actionData.Value?.ContactAction == null) continue;
+
+            var jid           = actionData.Index[1];
+            var contactAction = actionData.Value.ContactAction;
+            var name          = !string.IsNullOrEmpty(contactAction.FullName)
+                ? contactAction.FullName
+                : contactAction.FirstName;
+
+            if (string.IsNullOrEmpty(name)) continue;
+
+            contacts.Add((jid, name));
+        }
+
+        _logger.LogInformation("FetchContactsAsync: found {Count} contacts", contacts.Count);
+        return contacts;
+    }
+
     public async ValueTask DisposeAsync()
     {
         _keepAliveCts?.Cancel();

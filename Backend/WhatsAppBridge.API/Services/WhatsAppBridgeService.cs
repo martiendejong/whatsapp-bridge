@@ -1,7 +1,6 @@
 using Dawa;
 using Microsoft.EntityFrameworkCore;
 using System.Collections.Concurrent;
-using System.Text.Json;
 using WhatsAppBridge.API.Controllers;
 using WhatsAppBridge.API.Data;
 using WhatsAppBridge.API.Models;
@@ -26,11 +25,6 @@ public class WhatsAppBridgeService : IAsyncDisposable
     // In-memory message store: key = "{sessionId}:{remoteJid}", value = ordered messages (newest last)
     private readonly ConcurrentDictionary<string, List<WhatsAppMessage>> _messageStore = new();
     private const int MaxMessagesPerChat = 200;
-
-    // Contact store: key = "{sessionId}:{jid}", value = contact info
-    private readonly ConcurrentDictionary<string, ContactEntry> _contactStore = new();
-
-    private record ContactEntry(string Jid, string Name, string PhoneNumber, long LastSeen);
 
     public WhatsAppBridgeService(
         IServiceScopeFactory scopeFactory,
@@ -75,7 +69,6 @@ public class WhatsAppBridgeService : IAsyncDisposable
         };
 
         client.MessageReceived += (_, msg) => StoreMessage(sessionId, msg);
-        LoadContacts(sessionId);
 
         client.Connected += (_, _) =>
         {
@@ -148,7 +141,6 @@ public class WhatsAppBridgeService : IAsyncDisposable
             _ = UpdateSessionAsync(sessionId, s => s.QrCode = qr);
 
         client.MessageReceived += (_, msg) => StoreMessage(sessionId, msg);
-        LoadContacts(sessionId);
 
         client.Connected += (_, _) =>
         {
@@ -192,12 +184,6 @@ public class WhatsAppBridgeService : IAsyncDisposable
     {
         var client = GetConnectedClient(sessionId);
         await client.SendMessageAsync(to, body, CancellationToken.None);
-
-        // Track the recipient as a known contact
-        var jid = to.Contains('@') ? to : $"{to.TrimStart('+')}@s.whatsapp.net";
-        var phone = jid.Split('@')[0].Split(':')[0];
-        TrackContact(sessionId, jid, phone, phone, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
-
         return new { success = true };
     }
 
@@ -229,16 +215,20 @@ public class WhatsAppBridgeService : IAsyncDisposable
     public Task<List<object>?> GetChatsAsync(string sessionId)
         => Task.FromResult<List<object>?>(new List<object>());
 
-    public Task<List<WhatsAppContact>?> GetContactsAsync(string sessionId)
+    public async Task<List<WhatsAppContact>?> GetContactsAsync(string sessionId)
     {
-        var contacts = _contactStore
-            .Where(kv => kv.Key.StartsWith($"{sessionId}:"))
-            .Select(kv => kv.Value)
-            .Where(c => !c.Jid.EndsWith("@g.us")) // skip groups
-            .OrderByDescending(c => c.LastSeen)
-            .Select(c => new WhatsAppContact(c.Jid, c.Name, c.PhoneNumber))
+        if (!_clients.TryGetValue(sessionId, out var client) || !client.IsConnected)
+            return null;
+
+        var contacts = await client.GetContactsAsync(CancellationToken.None);
+        return contacts
+            .Where(c => !c.Jid.EndsWith("@g.us"))
+            .Select(c =>
+            {
+                var phone = c.Jid.Split('@')[0].Split(':')[0];
+                return new WhatsAppContact(c.Jid, c.Name, phone);
+            })
             .ToList();
-        return Task.FromResult<List<WhatsAppContact>?>(contacts);
     }
 
     public Task<object?> CheckNumberStatusAsync(string sessionId, string number)
@@ -264,75 +254,7 @@ public class WhatsAppBridgeService : IAsyncDisposable
                 list.RemoveAt(0); // drop oldest
         }
 
-        // Track sender as a known contact (using push name if available)
-        if (!msg.FromMe && msg.RemoteJid.EndsWith("@s.whatsapp.net"))
-        {
-            var phone = msg.RemoteJid.Split('@')[0].Split(':')[0];
-            var name = !string.IsNullOrEmpty(msg.PushName) ? msg.PushName : phone;
-            TrackContact(sessionId, msg.RemoteJid, name, phone, msg.Timestamp);
-        }
-
         _logger.LogInformation("Stored message [{Id}] from {From} in chat {Chat}", msg.Id, msg.From, msg.RemoteJid);
-    }
-
-    private void TrackContact(string sessionId, string jid, string name, string phone, long lastSeen)
-    {
-        var storeKey = $"{sessionId}:{jid}";
-        _contactStore.AddOrUpdate(storeKey,
-            _ => new ContactEntry(jid, name, phone, lastSeen),
-            (_, existing) => existing with
-            {
-                Name = !string.IsNullOrEmpty(name) && name != phone ? name : existing.Name,
-                LastSeen = Math.Max(existing.LastSeen, lastSeen),
-            });
-        _ = SaveContactsAsync(sessionId);
-    }
-
-    private async Task SaveContactsAsync(string sessionId)
-    {
-        try
-        {
-            var sessionsRoot = _configuration["WhatsApp:SessionsDirectory"]
-                ?? Path.Combine(AppContext.BaseDirectory, "whatsapp-sessions");
-            var path = Path.Combine(sessionsRoot, sessionId, "contacts.json");
-            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-
-            var contacts = _contactStore
-                .Where(kv => kv.Key.StartsWith($"{sessionId}:"))
-                .Select(kv => kv.Value)
-                .ToList();
-
-            var json = JsonSerializer.Serialize(contacts, new JsonSerializerOptions { WriteIndented = true });
-            await File.WriteAllTextAsync(path, json);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to save contacts for session {SessionId}", sessionId);
-        }
-    }
-
-    private void LoadContacts(string sessionId)
-    {
-        try
-        {
-            var sessionsRoot = _configuration["WhatsApp:SessionsDirectory"]
-                ?? Path.Combine(AppContext.BaseDirectory, "whatsapp-sessions");
-            var path = Path.Combine(sessionsRoot, sessionId, "contacts.json");
-            if (!File.Exists(path)) return;
-
-            var json = File.ReadAllText(path);
-            var contacts = JsonSerializer.Deserialize<List<ContactEntry>>(json);
-            if (contacts == null) return;
-
-            foreach (var c in contacts)
-                _contactStore[$"{sessionId}:{c.Jid}"] = c;
-
-            _logger.LogInformation("Loaded {Count} contacts for session {SessionId}", contacts.Count, sessionId);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to load contacts for session {SessionId}", sessionId);
-        }
     }
 
     public bool IsSessionConnected(string sessionId)

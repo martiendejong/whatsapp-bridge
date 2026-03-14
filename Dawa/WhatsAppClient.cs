@@ -174,6 +174,13 @@ public sealed class WhatsAppClient : IAsyncDisposable
         await _noiseProcessor.SendTextMessageAsync(jid, text, cancellationToken);
     }
 
+    public Task<List<(string Jid, string Name)>> GetContactsAsync(CancellationToken ct)
+    {
+        if (_noiseProcessor == null || _state != ConnectionState.Connected)
+            throw new InvalidOperationException("Client is not connected.");
+        return _noiseProcessor.FetchContactsAsync(ct);
+    }
+
     // ─── Disconnection ───────────────────────────────────────────────────────
 
     /// <summary>Disconnects from WhatsApp and cleans up resources.</summary>
