@@ -20,10 +20,18 @@ public sealed class WhisperMessageProto
     {
         var buf = new List<byte>();
         ProtoEncoder.WriteBytes(buf, 1, RatchetKey);
-        ProtoEncoder.WriteUInt32(buf, 2, Counter);
-        ProtoEncoder.WriteUInt32(buf, 3, PreviousCounter);
+        // Always write Counter and PreviousCounter even when 0 — Baileys' protobuf.js
+        // includes them explicitly, and some Signal implementations require their presence.
+        WriteUInt32Always(buf, 2, Counter);
+        WriteUInt32Always(buf, 3, PreviousCounter);
         ProtoEncoder.WriteBytes(buf, 4, Ciphertext);
         return [.. buf];
+    }
+
+    private static void WriteUInt32Always(List<byte> buf, int field, uint value)
+    {
+        ProtoEncoder.WriteTag(buf, field, 0);
+        ProtoEncoder.WriteVarint(buf, value);
     }
 
     public static WhisperMessageProto ParseFrom(byte[] data)

@@ -31,7 +31,7 @@ public sealed class FrameSocket : IAsyncDisposable
 
     public bool IsConnected => _ws?.State == WebSocketState.Open;
 
-    public async Task ConnectAsync(string? url = null, CancellationToken ct = default)
+    public async Task ConnectAsync(string? url = null, byte[]? routingInfo = null, CancellationToken ct = default)
     {
         _ws = new ClientWebSocket();
         _ws.Options.SetRequestHeader("Origin", "https://web.whatsapp.com");
@@ -44,6 +44,14 @@ public sealed class FrameSocket : IAsyncDisposable
         // Sub-protocol is required by WhatsApp's server
         _ws.Options.AddSubProtocol("chat");
         _ws.Options.KeepAliveInterval = TimeSpan.FromSeconds(25);
+
+        // When WhatsApp sends edge_routing, reconnect to the preferred edge server
+        // by including the X-WA-Routing header (Baileys: socket.ts fetchOptions.headers)
+        if (routingInfo != null && routingInfo.Length > 0)
+        {
+            _ws.Options.SetRequestHeader("X-WA-Routing", Convert.ToBase64String(routingInfo));
+            _logger.LogInformation("FrameSocket: Connecting with X-WA-Routing ({Len} bytes).", routingInfo.Length);
+        }
 
         await _ws.ConnectAsync(new Uri(url ?? WA_URL), ct);
         _logger.LogInformation("FrameSocket: WebSocket connected to {Url}", url ?? WA_URL);

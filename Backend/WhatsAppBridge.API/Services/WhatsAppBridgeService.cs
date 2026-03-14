@@ -22,6 +22,10 @@ public class WhatsAppBridgeService : IAsyncDisposable
     // One Dawa client per sessionId
     private readonly ConcurrentDictionary<string, WhatsAppClient> _clients = new();
 
+    // In-memory message store: key = "{sessionId}:{remoteJid}", value = ordered messages (newest last)
+    private readonly ConcurrentDictionary<string, List<WhatsAppMessage>> _messageStore = new();
+    private const int MaxMessagesPerChat = 200;
+
     public WhatsAppBridgeService(
         IServiceScopeFactory scopeFactory,
         IConfiguration configuration,
@@ -63,6 +67,8 @@ public class WhatsAppBridgeService : IAsyncDisposable
             qrTcs.TrySetResult(qr);
             _ = UpdateSessionAsync(sessionId, s => s.QrCode = qr);
         };
+
+        client.MessageReceived += (_, msg) => StoreMessage(sessionId, msg);
 
         client.Connected += (_, _) =>
         {
@@ -134,6 +140,8 @@ public class WhatsAppBridgeService : IAsyncDisposable
         client.QRCodeReceived += (_, qr) =>
             _ = UpdateSessionAsync(sessionId, s => s.QrCode = qr);
 
+        client.MessageReceived += (_, msg) => StoreMessage(sessionId, msg);
+
         client.Connected += (_, _) =>
         {
             _logger.LogInformation("Session {SessionId} restored and connected as {Jid}", sessionId, client.MyJid);
@@ -189,7 +197,20 @@ public class WhatsAppBridgeService : IAsyncDisposable
     // ─── Read operations (not yet implemented in Dawa) ────────────────────────
 
     public Task<List<WhatsAppMessage>?> GetMessagesAsync(string sessionId, string chatId, int limit)
-        => Task.FromResult<List<WhatsAppMessage>?>(new List<WhatsAppMessage>());
+    {
+        // Normalize chatId — accept bare number or full JID
+        var jid = chatId.Contains('@') ? chatId : $"{chatId}@s.whatsapp.net";
+        var key = $"{sessionId}:{jid}";
+
+        if (!_messageStore.TryGetValue(key, out var msgs))
+            return Task.FromResult<List<WhatsAppMessage>?>(new List<WhatsAppMessage>());
+
+        lock (msgs)
+        {
+            var slice = msgs.TakeLast(limit).ToList();
+            return Task.FromResult<List<WhatsAppMessage>?>(slice);
+        }
+    }
 
     public Task<List<object>?> GetChatsAsync(string sessionId)
         => Task.FromResult<List<object>?>(new List<object>());
@@ -201,6 +222,27 @@ public class WhatsAppBridgeService : IAsyncDisposable
         => Task.FromResult<object?>(new { number, isWhatsApp = true });
 
     // ─── Helpers ──────────────────────────────────────────────────────────────
+
+    private void StoreMessage(string sessionId, Dawa.Messages.IncomingMessage msg)
+    {
+        var key = $"{sessionId}:{msg.RemoteJid}";
+        var stored = new WhatsAppMessage(
+            Id: msg.Id,
+            From: msg.FromMe ? "me" : msg.From,
+            To: msg.RemoteJid,
+            Body: msg.Text ?? "",
+            Timestamp: msg.Timestamp);
+
+        var list = _messageStore.GetOrAdd(key, _ => new List<WhatsAppMessage>());
+        lock (list)
+        {
+            list.Add(stored);
+            if (list.Count > MaxMessagesPerChat)
+                list.RemoveAt(0); // drop oldest
+        }
+
+        _logger.LogInformation("Stored message [{Id}] from {From} in chat {Chat}", msg.Id, msg.From, msg.RemoteJid);
+    }
 
     public bool IsSessionConnected(string sessionId)
         => _clients.TryGetValue(sessionId, out var client) && client.IsConnected;

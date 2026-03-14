@@ -16,6 +16,7 @@ public sealed class SignalKeyStore
 {
     private readonly string _directory;
     private readonly Dictionary<string, SignalSession> _sessions = new();
+    private readonly Dictionary<string, string> _lidToPhone = new(); // LID JID → phone JID mapping
 
     private static readonly JsonSerializerOptions _jsonOpts = new()
     {
@@ -24,18 +25,20 @@ public sealed class SignalKeyStore
     };
 
     private string SessionsFilePath => Path.Combine(_directory, "signals.json");
+    private string LidMappingFilePath => Path.Combine(_directory, "lid-mapping.json");
 
     public SignalKeyStore(string directory)
     {
         _directory = directory;
         Directory.CreateDirectory(directory);
         LoadSessions();
+        LoadLidMappings();
     }
 
     // ─── Session management ───────────────────────────────────────────────────
 
     public SignalSession? GetSession(string jid) =>
-        _sessions.TryGetValue(jid, out var s) ? s : null;
+        _sessions.TryGetValue(ResolveJid(jid), out var s) ? s : null;
 
     public void PutSession(string jid, SignalSession session)
     {
@@ -43,7 +46,51 @@ public sealed class SignalKeyStore
         SaveSessions();
     }
 
-    public bool HasSession(string jid) => _sessions.ContainsKey(jid);
+    public bool HasSession(string jid) => _sessions.ContainsKey(ResolveJid(jid));
+
+    // ─── LID ↔ Phone JID mapping ────────────────────────────────────────────
+
+    /// <summary>
+    /// Registers a mapping from a LID JID (e.g. "824767959274@lid") to a phone JID
+    /// (e.g. "31633984381@s.whatsapp.net"). Both formats refer to the same device
+    /// and share the same Signal session.
+    /// </summary>
+    public void RegisterLidMapping(string lidJid, string phoneJid)
+    {
+        _lidToPhone[lidJid] = phoneJid;
+        SaveLidMappings();
+    }
+
+    /// <summary>
+    /// Resolves a JID: if it's a known LID, returns the mapped phone JID.
+    /// Otherwise returns the JID as-is.
+    /// </summary>
+    public string ResolveJid(string jid)
+    {
+        if (jid.Contains("@lid") && _lidToPhone.TryGetValue(jid, out var phoneJid))
+            return phoneJid;
+        return jid;
+    }
+
+    /// <summary>
+    /// For an @lid JID with no explicit mapping, try to find an existing session
+    /// by matching identity keys from the PreKeyWhisperMessage.
+    /// </summary>
+    private string? TryResolveByIdentity(string lidJid, byte[] theirIdentityPub)
+    {
+        foreach (var (existingJid, session) in _sessions)
+        {
+            if (existingJid.Contains("@s.whatsapp.net") &&
+                session.TheirIdentityPublic.Length > 0 &&
+                session.TheirIdentityPublic.SequenceEqual(theirIdentityPub))
+            {
+                // Found matching session — register the mapping
+                RegisterLidMapping(lidJid, existingJid);
+                return existingJid;
+            }
+        }
+        return null;
+    }
 
     // ─── X3DH: Outgoing (initiator) ──────────────────────────────────────────
 
@@ -92,11 +139,44 @@ public sealed class SignalKeyStore
         var rootKey0 = derived[..32];
         // sharedChainKey is derived but not directly used — we immediately do the first ratchet
 
-        // Generate separate ratchet key pair EK2
+        // Generate ratchet key pair (the ephemeralKeyPair in Baileys — goes into WhisperMessage)
         var (ek2Priv, ek2Pub) = Curve25519Helper.GenerateKeyPair();
 
-        // First DH ratchet step using their signed prekey as the initial ratchet public key
-        var (rootKey2, sendChainKey) = HkdfRatchetStep(rootKey0, Curve25519Helper.DH(ek2Priv, theirSignedPreKeyPub));
+        // ONE sending ratchet step: DH(ratchetKey, theirSignedPreKey) + rootKey0
+        // Matches Baileys' calculateSendingRatchet(session, theirSignedPubKey)
+        var ratchetDH = Curve25519Helper.DH(ek2Priv, theirSignedPreKeyPub);
+        var (rootKey2, sendChainKey) = HkdfRatchetStep(rootKey0, ratchetDH);
+
+        // === DEBUG: Log all intermediate X3DH values ===
+        try
+        {
+            var logDir = Path.Combine(AppContext.BaseDirectory, "logs");
+            Directory.CreateDirectory(logDir);
+            File.AppendAllText(Path.Combine(logDir, "signal-x3dh-debug.log"),
+                $"[{DateTime.UtcNow:HH:mm:ss}] InitOutgoingSession for {jid}\n" +
+                $"  bundle.TheirIdentityPub len={bundle.TheirIdentityPub.Length} hex={Convert.ToHexString(bundle.TheirIdentityPub)}\n" +
+                $"  bundle.TheirSignedPreKeyPub len={bundle.TheirSignedPreKeyPub.Length} hex={Convert.ToHexString(bundle.TheirSignedPreKeyPub)}\n" +
+                $"  bundle.TheirSignedPreKeyId={bundle.TheirSignedPreKeyId}\n" +
+                $"  bundle.TheirOneTimePreKeyId={bundle.TheirOneTimePreKeyId}\n" +
+                $"  bundle.TheirOneTimePreKeyPub len={bundle.TheirOneTimePreKeyPub?.Length ?? 0}\n" +
+                $"  bundle.PeerRegistrationId={bundle.PeerRegistrationId}\n" +
+                $"  auth.SignedIdentityKeyPub={Convert.ToHexString(auth.SignedIdentityKeyPublic)}\n" +
+                $"  auth.RegistrationId={auth.RegistrationId}\n" +
+                $"  ek1Pub={Convert.ToHexString(ek1Pub)}\n" +
+                $"  ek2Pub={Convert.ToHexString(ek2Pub)}\n" +
+                $"  theirIdentityPub(stripped)={Convert.ToHexString(theirIdentityPub)}\n" +
+                $"  theirSignedPreKeyPub(stripped)={Convert.ToHexString(theirSignedPreKeyPub)}\n" +
+                $"  DH1={Convert.ToHexString(dh1)}\n" +
+                $"  DH2={Convert.ToHexString(dh2)}\n" +
+                $"  DH3={Convert.ToHexString(dh3)}\n" +
+                $"  DH4={( dh4 != null ? Convert.ToHexString(dh4) : "null")}\n" +
+                $"  masterSecret len={masterSecret.Length} first8={Convert.ToHexString(masterSecret[..8])}\n" +
+                $"  rootKey0={Convert.ToHexString(rootKey0)}\n" +
+                $"  ratchetDH={Convert.ToHexString(ratchetDH)}\n" +
+                $"  rootKey2={Convert.ToHexString(rootKey2)}\n" +
+                $"  sendChainKey={Convert.ToHexString(sendChainKey)}\n\n");
+        }
+        catch { /* best effort */ }
 
         var session = new SignalSession
         {
@@ -110,6 +190,7 @@ public sealed class SignalKeyStore
             TheirCurrentRatchetPublic = bundle.TheirSignedPreKeyPub,
             OurRatchetPrivate        = ek2Priv,
             OurRatchetPublic         = ek2Pub,
+            TheirIdentityPublic      = theirIdentityPub,  // CRITICAL: needed for MAC computation
             BaseKey                  = ek1Pub,
             PreKeyId                 = bundle.TheirOneTimePreKeyId,
             SignedPreKeyId           = bundle.TheirSignedPreKeyId,
@@ -151,6 +232,20 @@ public sealed class SignalKeyStore
             }
         }
 
+        // Debug: log X3DH details
+        try
+        {
+            var logDir = Path.Combine(AppContext.BaseDirectory, "logs");
+            Directory.CreateDirectory(logDir);
+            File.AppendAllText(Path.Combine(logDir, "signal-debug.log"),
+                $"[{DateTime.UtcNow:HH:mm:ss}] InitIncomingSession for {jid}\n" +
+                $"  preKeyId={pkmsg.PreKeyId} signedPreKeyId={pkmsg.SignedPreKeyId}\n" +
+                $"  preKeyFound={dh4 != null} preKeysRemaining={auth.PreKeys.Count}\n" +
+                $"  identityKey len={pkmsg.IdentityKey.Length} baseKey len={pkmsg.BaseKey.Length}\n" +
+                $"  theirIdentity={Convert.ToHexString(theirIdentityPub[..4])}\n\n");
+        }
+        catch { /* best effort */ }
+
         var f = new byte[32];
         Array.Fill(f, (byte)0xFF);
 
@@ -175,7 +270,7 @@ public sealed class SignalKeyStore
             {
                 var protoBytes = pkmsg.Message[1..Math.Max(1, pkmsg.Message.Length - 8)];
                 var innerMsg = WhisperMessageProto.ParseFrom(protoBytes);
-                theirRatchetPub = innerMsg.RatchetKey.Length > 0 ? innerMsg.RatchetKey : StripKeyPrefix(pkmsg.BaseKey);
+                theirRatchetPub = innerMsg.RatchetKey.Length > 0 ? StripKeyPrefix(innerMsg.RatchetKey) : StripKeyPrefix(pkmsg.BaseKey);
             }
             catch
             {
@@ -201,6 +296,7 @@ public sealed class SignalKeyStore
             TheirCurrentRatchetPublic = theirRatchetPub,
             OurRatchetPrivate        = auth.SignedPreKeyPrivate,
             OurRatchetPublic         = auth.SignedPreKeyPublic,
+            TheirIdentityPublic      = theirIdentityPub,
             BaseKey                  = pkmsg.BaseKey,
             PreKeyId                 = pkmsg.PreKeyId,
             SignedPreKeyId           = pkmsg.SignedPreKeyId,
@@ -228,8 +324,8 @@ public sealed class SignalKeyStore
         var (messageKey, nextChainKey) = DeriveMessageKeys(session.SendChainKey);
         session.SendChainKey = nextChainKey;
 
-        // Expand message key: HKDF(messageKey, zero_salt, empty_info, 80)
-        var keyMaterial = DawaHKDF.DeriveKey(messageKey, new byte[32], null, 80);
+        // Expand message key — Signal spec requires info="WhisperMessageKeys"
+        var keyMaterial = DawaHKDF.DeriveKey(messageKey, new byte[32], Encoding.UTF8.GetBytes("WhisperMessageKeys"), 80);
         var encKey = keyMaterial[..32];
         var macKey = keyMaterial[32..64];
         var iv     = keyMaterial[64..80];
@@ -238,19 +334,24 @@ public sealed class SignalKeyStore
         var ciphertext = MessageCipher.AesCbcEncrypt(encKey, iv, plaintext);
 
         // Build WhisperMessageProto
+        // Keys in Signal protobufs MUST include 0x05 prefix (33 bytes) — Baileys convention
         var whisperProto = new WhisperMessageProto
         {
-            RatchetKey      = session.OurRatchetPublic,
+            RatchetKey      = PrefixKey(session.OurRatchetPublic),
             Counter         = session.SendCounter,
             PreviousCounter = session.PrevSendCounter,
             Ciphertext      = ciphertext,
         };
         var protoBytes = whisperProto.ToByteArray();
 
-        // MAC = HMAC-SHA256(macKey, [0x33] || proto_bytes)[0:8]
-        var macInput = new byte[1 + protoBytes.Length];
-        macInput[0] = 0x33;
-        protoBytes.CopyTo(macInput, 1);
+        // MAC = HMAC-SHA256(macKey, senderIdentity_33 || receiverIdentity_33 || 0x33 || proto_bytes)[0:8]
+        var ourIdentity33   = new byte[] { 0x05 }.Concat(auth.SignedIdentityKeyPublic).ToArray();
+        var theirIdentity33 = new byte[] { 0x05 }.Concat(session.TheirIdentityPublic).ToArray();
+        var macInput = new byte[33 + 33 + 1 + protoBytes.Length];
+        ourIdentity33.CopyTo(macInput, 0);
+        theirIdentity33.CopyTo(macInput, 33);
+        macInput[66] = 0x33;
+        protoBytes.CopyTo(macInput, 67);
         var mac = HMACSHA256.HashData(macKey, macInput)[..8];
 
         // whisperBytes = [0x33] + proto_bytes + mac
@@ -267,11 +368,12 @@ public sealed class SignalKeyStore
         if (isPreKey)
         {
             // Wrap in PreKeyWhisperMessageProto
+            // Keys MUST include 0x05 prefix (33 bytes) — recipient's libsignal expects this
             var pkProto = new PreKeyWhisperMessageProto
             {
                 PreKeyId       = session.PreKeyId,
-                BaseKey        = session.BaseKey,
-                IdentityKey    = auth.SignedIdentityKeyPublic,
+                BaseKey        = PrefixKey(session.BaseKey),
+                IdentityKey    = PrefixKey(auth.SignedIdentityKeyPublic),
                 Message        = whisperBytes,
                 RegistrationId = auth.RegistrationId,
                 SignedPreKeyId = session.SignedPreKeyId,
@@ -289,6 +391,41 @@ public sealed class SignalKeyStore
             result = whisperBytes;
         }
 
+        // === DEBUG: Log all encryption details ===
+        try
+        {
+            var logDir = Path.Combine(AppContext.BaseDirectory, "logs");
+            Directory.CreateDirectory(logDir);
+            File.AppendAllText(Path.Combine(logDir, "signal-encrypt-debug.log"),
+                $"[{DateTime.UtcNow:HH:mm:ss}] EncryptMessage for {jid}\n" +
+                $"  sendChainKey(before)={Convert.ToHexString(session.SendChainKey)}\n" +
+                $"  messageKey={Convert.ToHexString(messageKey)}\n" +
+                $"  encKey={Convert.ToHexString(encKey)}\n" +
+                $"  macKey={Convert.ToHexString(macKey)}\n" +
+                $"  iv={Convert.ToHexString(iv)}\n" +
+                $"  plaintext len={plaintext.Length} first16={Convert.ToHexString(plaintext[..Math.Min(16, plaintext.Length)])}\n" +
+                $"  ciphertext len={ciphertext.Length} first16={Convert.ToHexString(ciphertext[..Math.Min(16, ciphertext.Length)])}\n" +
+                $"  ratchetKey(prefixed)={Convert.ToHexString(PrefixKey(session.OurRatchetPublic))}\n" +
+                $"  counter={session.SendCounter - 1} prevCounter={session.PrevSendCounter}\n" +
+                $"  protoBytes len={protoBytes.Length} hex={Convert.ToHexString(protoBytes)}\n" +
+                $"  ourIdentity33={Convert.ToHexString(ourIdentity33)}\n" +
+                $"  theirIdentity33={Convert.ToHexString(theirIdentity33)}\n" +
+                $"  macInput len={macInput.Length} first32={Convert.ToHexString(macInput[..Math.Min(32, macInput.Length)])}\n" +
+                $"  mac={Convert.ToHexString(mac)}\n" +
+                $"  whisperBytes len={whisperBytes.Length} first32={Convert.ToHexString(whisperBytes[..Math.Min(32, whisperBytes.Length)])}\n" +
+                $"  isPreKey={isPreKey}\n" +
+                (isPreKey ? (
+                    $"  preKeyId={session.PreKeyId}\n" +
+                    $"  baseKey(prefixed)={Convert.ToHexString(PrefixKey(session.BaseKey))}\n" +
+                    $"  identityKey(prefixed)={Convert.ToHexString(PrefixKey(auth.SignedIdentityKeyPublic))}\n" +
+                    $"  registrationId={auth.RegistrationId}\n" +
+                    $"  signedPreKeyId={session.SignedPreKeyId}\n" +
+                    $"  result len={result.Length} first32={Convert.ToHexString(result[..Math.Min(32, result.Length)])}\n"
+                ) : "") +
+                "\n");
+        }
+        catch { /* best effort */ }
+
         SaveSessions();
         return (result, isPreKey);
     }
@@ -300,6 +437,9 @@ public sealed class SignalKeyStore
     /// </summary>
     public byte[] DecryptMessage(string jid, string type, byte[] ciphertext, AuthState auth)
     {
+        // Resolve LID JIDs to phone JIDs — they share the same Signal session
+        var resolvedJid = ResolveJid(jid);
+
         if (type == "pkmsg")
         {
             // Parse PreKeyWhisperMessageProto from ciphertext[1:]
@@ -307,15 +447,34 @@ public sealed class SignalKeyStore
                 throw new CryptographicException("PreKeyWhisperMessage too short.");
 
             var pkProto = PreKeyWhisperMessageProto.ParseFrom(ciphertext[1..]);
-            InitIncomingSession(jid, pkProto, auth);
+
+            // If this is an @lid JID with no mapping yet, try to find existing session by identity key
+            if (resolvedJid.Contains("@lid") && !_sessions.ContainsKey(resolvedJid))
+            {
+                var theirIdentity = StripKeyPrefix(pkProto.IdentityKey);
+                var mapped = TryResolveByIdentity(resolvedJid, theirIdentity);
+                if (mapped != null)
+                    resolvedJid = mapped;
+            }
+
+            // Only initialize session on the FIRST pkmsg from this JID.
+            // Subsequent pkmsgs reuse the existing session (sender advances chain counter).
+            if (!_sessions.ContainsKey(resolvedJid))
+                InitIncomingSession(resolvedJid, pkProto, auth);
 
             // The inner message is in pkProto.Message
-            return DecryptWhisperMessage(jid, pkProto.Message, auth);
+            return DecryptWhisperMessage(resolvedJid, pkProto.Message, auth);
         }
         else
         {
             // type == "msg": regular WhisperMessage
-            return DecryptWhisperMessage(jid, ciphertext, auth);
+            // For @lid with no mapping, try existing sessions (won't have identity key here, just try)
+            if (resolvedJid.Contains("@lid") && !_sessions.ContainsKey(resolvedJid))
+            {
+                // Can't resolve without identity key in a regular msg — log and throw
+                throw new InvalidOperationException($"No Signal session for LID {jid} and no mapping found.");
+            }
+            return DecryptWhisperMessage(resolvedJid, ciphertext, auth);
         }
     }
 
@@ -336,7 +495,7 @@ public sealed class SignalKeyStore
             : throw new InvalidOperationException($"No Signal session for {jid}.");
 
         // Check if we need to do a DH ratchet step (their ratchet key changed)
-        var theirRatchetPub = innerMsg.RatchetKey;
+        var theirRatchetPub = StripKeyPrefix(innerMsg.RatchetKey);
         if (!theirRatchetPub.SequenceEqual(session.TheirCurrentRatchetPublic))
         {
             // DH ratchet: advance receive chain with new ratchet key
@@ -362,23 +521,52 @@ public sealed class SignalKeyStore
             session.SendCounter       = 0;
         }
 
+        // Advance chain to match the sender's counter (handles out-of-order / batched messages)
+        var targetCounter = innerMsg.Counter;
+        while (session.ReceiveCounter < targetCounter)
+        {
+            var (_, skip) = DeriveMessageKeys(session.ReceiveChainKey);
+            session.ReceiveChainKey = skip;
+            session.ReceiveCounter++;
+        }
+
         // Derive message key
         var (messageKey, nextChainKey) = DeriveMessageKeys(session.ReceiveChainKey);
         session.ReceiveChainKey = nextChainKey;
 
-        // Expand message key
-        var keyMaterial = DawaHKDF.DeriveKey(messageKey, new byte[32], null, 80);
+        // Expand message key — Signal spec requires info="WhisperMessageKeys"
+        var keyMaterial = DawaHKDF.DeriveKey(messageKey, new byte[32], Encoding.UTF8.GetBytes("WhisperMessageKeys"), 80);
         var encKey = keyMaterial[..32];
         var macKey = keyMaterial[32..64];
         var iv     = keyMaterial[64..80];
 
-        // Verify MAC
-        var macInput = new byte[1 + protoBytes.Length];
-        macInput[0] = 0x33;
-        protoBytes.CopyTo(macInput, 1);
+        // Verify MAC — Signal Protocol requires identity keys in MAC input:
+        // MAC = HMAC-SHA256(macKey, senderIdentityPub_33 || receiverIdentityPub_33 || versionByte || protoBytes)
+        // Identity keys use 33-byte format: 0x05 prefix + 32-byte raw key
+        var senderIdentity33   = new byte[] { 0x05 }.Concat(session.TheirIdentityPublic).ToArray();
+        var receiverIdentity33 = new byte[] { 0x05 }.Concat(auth.SignedIdentityKeyPublic).ToArray();
+        var macInput = new byte[33 + 33 + 1 + protoBytes.Length];
+        senderIdentity33.CopyTo(macInput, 0);
+        receiverIdentity33.CopyTo(macInput, 33);
+        macInput[66] = 0x33;
+        protoBytes.CopyTo(macInput, 67);
         var expectedMac = HMACSHA256.HashData(macKey, macInput)[..8];
         if (!expectedMac.AsSpan().SequenceEqual(receivedMac))
+        {
+            // Debug: log key details to help diagnose
+            var logDir = Path.Combine(AppContext.BaseDirectory, "logs");
+            try { Directory.CreateDirectory(logDir); } catch { /* best effort */ }
+            try { File.AppendAllText(Path.Combine(logDir, "signal-debug.log"),
+                $"[{DateTime.UtcNow:HH:mm:ss}] MAC FAIL for {jid}\n" +
+                $"  ratchetKey raw len={innerMsg.RatchetKey.Length} stripped len={theirRatchetPub.Length}\n" +
+                $"  theirIdentity len={session.TheirIdentityPublic.Length} first={Convert.ToHexString(session.TheirIdentityPublic[..Math.Min(4, session.TheirIdentityPublic.Length)])}\n" +
+                $"  ourIdentity len={auth.SignedIdentityKeyPublic.Length} first={Convert.ToHexString(auth.SignedIdentityKeyPublic[..Math.Min(4, auth.SignedIdentityKeyPublic.Length)])}\n" +
+                $"  macKey={Convert.ToHexString(macKey[..8])}\n" +
+                $"  expected={Convert.ToHexString(expectedMac)} received={Convert.ToHexString(receivedMac)}\n" +
+                $"  whisperFrame[0]=0x{whisperFrame[0]:X2} protoLen={protoBytes.Length}\n\n");
+            } catch { /* best effort logging */ }
             throw new CryptographicException("WhisperMessage MAC verification failed.");
+        }
 
         session.ReceiveCounter++;
 
@@ -430,6 +618,20 @@ public sealed class SignalKeyStore
         return key;
     }
 
+    /// <summary>
+    /// Adds 0x05 KEY_BUNDLE_TYPE prefix to a 32-byte key (Signal convention).
+    /// If already 33 bytes with prefix, returns as-is.
+    /// </summary>
+    public static byte[] PrefixKey(byte[] key)
+    {
+        if (key.Length == 33 && key[0] == 0x05)
+            return key;
+        var prefixed = new byte[33];
+        prefixed[0] = 0x05;
+        key.AsSpan(0, Math.Min(32, key.Length)).CopyTo(prefixed.AsSpan(1));
+        return prefixed;
+    }
+
     // ─── Persistence ──────────────────────────────────────────────────────────
 
     private void LoadSessions()
@@ -462,6 +664,30 @@ public sealed class SignalKeyStore
         }
     }
 
+    private void LoadLidMappings()
+    {
+        try
+        {
+            if (!File.Exists(LidMappingFilePath)) return;
+            var json = File.ReadAllText(LidMappingFilePath);
+            var loaded = JsonSerializer.Deserialize<Dictionary<string, string>>(json, _jsonOpts);
+            if (loaded == null) return;
+            foreach (var (k, v) in loaded)
+                _lidToPhone[k] = v;
+        }
+        catch { /* Ignore corrupt file */ }
+    }
+
+    private void SaveLidMappings()
+    {
+        try
+        {
+            var json = JsonSerializer.Serialize(_lidToPhone, _jsonOpts);
+            File.WriteAllText(LidMappingFilePath, json);
+        }
+        catch { /* Best-effort */ }
+    }
+
     // ─── Helpers ──────────────────────────────────────────────────────────────
 
     private static byte[] Concat(params byte[][] arrays)
@@ -492,6 +718,9 @@ public sealed class SignalSession
     public byte[] TheirCurrentRatchetPublic { get; set; } = [];
     public byte[] OurRatchetPrivate { get; set; } = [];
     public byte[] OurRatchetPublic { get; set; } = [];
+
+    /// <summary>Their identity public key (raw 32 bytes, no 0x05 prefix).</summary>
+    public byte[] TheirIdentityPublic { get; set; } = [];
 
     /// <summary>X3DH ephemeral public key — sent in the PreKeyWhisperMessage header.</summary>
     public byte[] BaseKey { get; set; } = [];

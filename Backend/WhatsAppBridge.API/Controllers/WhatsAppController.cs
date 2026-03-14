@@ -125,6 +125,122 @@ public class WhatsAppController : ControllerBase
         }
     }
 
+    [HttpPost("sessions/{sessionId}/send")]
+    public async Task<IActionResult> SendMessage(string sessionId, [FromBody] SendRequest request)
+    {
+        var userId = GetUserId();
+        var session = await _context.WhatsAppSessions
+            .FirstOrDefaultAsync(s => s.SessionId == sessionId && s.UserId == userId);
+
+        if (session == null)
+            return NotFound(new { error = "Session not found" });
+
+        if (session.Status != "connected")
+            return BadRequest(new { error = $"Session is not connected (status: {session.Status})" });
+
+        try
+        {
+            await _whatsappService.SendMessageAsync(sessionId, request.To, request.Message);
+            return Ok(new { success = true, message = "Message sent" });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    public record SendRequest(string To, string Message);
+
+    /// <summary>
+    /// Test endpoint for sending messages without auth (dev only).
+    /// </summary>
+    [AllowAnonymous]
+    [HttpPost("test-send/{sessionId}")]
+    public async Task<IActionResult> TestSend(string sessionId, [FromBody] SendRequest request)
+    {
+        var session = await _context.WhatsAppSessions
+            .FirstOrDefaultAsync(s => s.SessionId == sessionId);
+
+        if (session == null)
+            return NotFound(new { error = "Session not found" });
+
+        if (session.Status != "connected")
+            return BadRequest(new { error = $"Session is not connected (status: {session.Status})" });
+
+        try
+        {
+            await _whatsappService.SendMessageAsync(sessionId, request.To, request.Message);
+            return Ok(new { success = true, message = "Message sent" });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = ex.Message, stack = ex.StackTrace });
+        }
+    }
+
+    /// <summary>
+    /// Re-pair endpoint: wipes old session data, creates fresh auth state, returns QR code.
+    /// Dev/test only — remove for production.
+    /// </summary>
+    [AllowAnonymous]
+    [HttpPost("test-repair/{sessionId}")]
+    public async Task<IActionResult> TestRepair(string sessionId)
+    {
+        // 1. Disconnect existing client
+        await _whatsappService.DisconnectSessionAsync(sessionId);
+
+        // 2. Wipe session files (creds.json, signals.json) to force fresh pairing
+        var sessionDir = Path.Combine(AppContext.BaseDirectory, "whatsapp-sessions", sessionId);
+        if (Directory.Exists(sessionDir))
+        {
+            foreach (var file in Directory.GetFiles(sessionDir))
+                System.IO.File.Delete(file);
+        }
+
+        // 3. Initialize fresh session — this will produce a QR code
+        var qrCode = await _whatsappService.InitializeSessionAsync(sessionId);
+
+        if (qrCode != null)
+        {
+            return Ok(new { success = true, qrCode, message = "Scan this QR code with WhatsApp. First unlink old device from Linked Devices." });
+        }
+
+        return Ok(new { success = false, message = "QR code not received within timeout. Try GET /api/WhatsApp/test-qr/{sessionId} to poll." });
+    }
+
+    /// <summary>
+    /// Poll for QR code (anonymous, dev only).
+    /// </summary>
+    [AllowAnonymous]
+    [HttpGet("test-qr/{sessionId}")]
+    public async Task<IActionResult> TestGetQr(string sessionId)
+    {
+        var session = await _context.WhatsAppSessions
+            .FirstOrDefaultAsync(s => s.SessionId == sessionId);
+
+        if (session == null)
+            return NotFound(new { error = "Session not found" });
+
+        return Ok(new { qrCode = session.QrCode, status = session.Status });
+    }
+
+    /// <summary>
+    /// Check session connection status (anonymous, dev only).
+    /// </summary>
+    [AllowAnonymous]
+    [HttpGet("test-status/{sessionId}")]
+    public async Task<IActionResult> TestStatus(string sessionId)
+    {
+        var session = await _context.WhatsAppSessions
+            .FirstOrDefaultAsync(s => s.SessionId == sessionId);
+
+        if (session == null)
+            return NotFound(new { error = "Session not found" });
+
+        var connected = _whatsappService.IsSessionConnected(sessionId);
+        return Ok(new { sessionId, status = session.Status, connected, phoneNumber = session.PhoneNumber });
+    }
+
     [HttpDelete("sessions/{sessionId}")]
     public async Task<IActionResult> DeleteSession(string sessionId)
     {

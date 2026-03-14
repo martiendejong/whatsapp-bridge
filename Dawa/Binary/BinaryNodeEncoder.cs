@@ -116,6 +116,21 @@ public static class BinaryNodeEncoder
         {
             var user = value[..atIdx];
             var server = value[(atIdx + 1)..];
+
+            // Check if this is an AD-JID (multi-device) with format "user:device@server"
+            var colonIdx = user.IndexOf(':');
+            if (colonIdx >= 0 && int.TryParse(user[(colonIdx + 1)..], out var deviceId))
+            {
+                var baseUser = user[..colonIdx];
+                // AD_JID format: tag(247) + domainType + device + writeString(user)
+                byte domainType = server == "lid" ? (byte)1 : (byte)0;
+                s.WriteByte(WATags.AdJid);
+                s.WriteByte(domainType);
+                s.WriteByte((byte)deviceId);
+                WriteString(s, baseUser);
+                return;
+            }
+
             s.WriteByte(WATags.JidPair);
             WriteString(s, user);
             WriteString(s, server);

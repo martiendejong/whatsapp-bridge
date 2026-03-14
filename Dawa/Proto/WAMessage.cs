@@ -230,6 +230,17 @@ public sealed class ADVSignedDeviceIdentity
         return msg;
     }
 
+    /// <summary>Encode all fields including accountSignatureKey (for device-identity in outgoing pkmsg).</summary>
+    public byte[] ToByteArray()
+    {
+        var buf = new List<byte>();
+        ProtoEncoder.WriteBytes(buf, 1, Details);
+        if (AccountSignatureKey.Length > 0) ProtoEncoder.WriteBytes(buf, 2, AccountSignatureKey);
+        ProtoEncoder.WriteBytes(buf, 3, AccountSignature);
+        ProtoEncoder.WriteBytes(buf, 4, DeviceSignature);
+        return [.. buf];
+    }
+
     /// <summary>Encode WITHOUT accountSignatureKey (field 2 omitted per Baileys protocol).</summary>
     public byte[] ToByteArrayForReply()
     {
@@ -272,18 +283,40 @@ public sealed class ADVDeviceIdentity
     }
 }
 
-/// <summary>WhatsApp message content proto.</summary>
+/// <summary>
+/// WhatsApp Message proto (field numbers from Baileys WAProto.proto).
+/// Only the fields we need for text message extraction are implemented;
+/// all others are safely skipped.
+/// </summary>
 public sealed class WAMessage
 {
-    public string? Conversation { get; set; }
-    public ExtendedTextMessage? ExtendedTextMessage { get; set; }
+    public string? Conversation { get; set; }                        // field 1
+    public SenderKeyDistributionMessage? SenderKeyDist { get; set; } // field 2
+    public ExtendedTextMessage? ExtendedTextMessage { get; set; }    // field 6
+    public ProtocolMessage? ProtocolMsg { get; set; }                // field 12
+    public DeviceSentMessage? DeviceSentMessage { get; set; }        // field 31
+    public MessageContextInfo? MessageContextInfo { get; set; }      // field 35
+
+    /// <summary>Extracts the text from whatever message type this is.</summary>
+    public string? GetText()
+    {
+        if (!string.IsNullOrEmpty(Conversation))
+            return Conversation;
+        if (ExtendedTextMessage != null && !string.IsNullOrEmpty(ExtendedTextMessage.Text))
+            return ExtendedTextMessage.Text;
+        if (DeviceSentMessage?.Message != null)
+            return DeviceSentMessage.Message.GetText();
+        return null;
+    }
 
     public byte[] ToByteArray()
     {
         var buf = new List<byte>();
         ProtoEncoder.WriteString(buf, 1, Conversation);
         if (ExtendedTextMessage != null)
-            ProtoEncoder.WriteMessage(buf, 2, ExtendedTextMessage.ToByteArray());
+            ProtoEncoder.WriteMessage(buf, 6, ExtendedTextMessage.ToByteArray());
+        if (DeviceSentMessage != null)
+            ProtoEncoder.WriteMessage(buf, 31, DeviceSentMessage.ToByteArray());
         return [.. buf];
     }
 
@@ -296,24 +329,23 @@ public sealed class WAMessage
             var (field, wire) = r.ReadTag();
             switch (field)
             {
-                case 1:
-                    msg.Conversation = r.ReadString();
-                    break;
-                case 2:
-                    msg.ExtendedTextMessage = ExtendedTextMessage.ParseFrom(r.ReadBytes());
-                    break;
-                default:
-                    r.Skip(wire);
-                    break;
+                case 1:  msg.Conversation = r.ReadString(); break;
+                case 2:  msg.SenderKeyDist = SenderKeyDistributionMessage.ParseFrom(r.ReadBytes()); break;
+                case 6:  msg.ExtendedTextMessage = ExtendedTextMessage.ParseFrom(r.ReadBytes()); break;
+                case 12: msg.ProtocolMsg = ProtocolMessage.ParseFrom(r.ReadBytes()); break;
+                case 31: msg.DeviceSentMessage = DeviceSentMessage.ParseFrom(r.ReadBytes()); break;
+                case 35: msg.MessageContextInfo = MessageContextInfo.ParseFrom(r.ReadBytes()); break;
+                default: r.Skip(wire); break;
             }
         }
         return msg;
     }
 }
 
+/// <summary>Field 6 of Message. Contains text with optional link preview etc.</summary>
 public sealed class ExtendedTextMessage
 {
-    public string Text { get; set; } = "";
+    public string Text { get; set; } = "";  // field 1
 
     public byte[] ToByteArray()
     {
@@ -331,6 +363,108 @@ public sealed class ExtendedTextMessage
             var (field, wire) = r.ReadTag();
             if (field == 1) msg.Text = r.ReadString();
             else r.Skip(wire);
+        }
+        return msg;
+    }
+}
+
+/// <summary>Field 31 of Message. Wraps messages sent from this account on another device.</summary>
+public sealed class DeviceSentMessage
+{
+    public string? DestinationJid { get; set; }  // field 1
+    public WAMessage? Message { get; set; }       // field 2
+
+    public byte[] ToByteArray()
+    {
+        var buf = new List<byte>();
+        if (!string.IsNullOrEmpty(DestinationJid))
+            ProtoEncoder.WriteString(buf, 1, DestinationJid);
+        if (Message != null)
+            ProtoEncoder.WriteMessage(buf, 2, Message.ToByteArray());
+        return [.. buf];
+    }
+
+    public static DeviceSentMessage ParseFrom(byte[] data)
+    {
+        var msg = new DeviceSentMessage();
+        var r = ProtoEncoder.CreateReader(data);
+        while (r.HasMore)
+        {
+            var (field, wire) = r.ReadTag();
+            switch (field)
+            {
+                case 1: msg.DestinationJid = r.ReadString(); break;
+                case 2: msg.Message = WAMessage.ParseFrom(r.ReadBytes()); break;
+                default: r.Skip(wire); break;
+            }
+        }
+        return msg;
+    }
+}
+
+/// <summary>Field 2 of Message. Distributes group encryption keys.</summary>
+public sealed class SenderKeyDistributionMessage
+{
+    public string? GroupId { get; set; }          // field 1
+    public byte[] AxolotlSenderKeyData { get; set; } = []; // field 2
+
+    public static SenderKeyDistributionMessage ParseFrom(byte[] data)
+    {
+        var msg = new SenderKeyDistributionMessage();
+        var r = ProtoEncoder.CreateReader(data);
+        while (r.HasMore)
+        {
+            var (field, wire) = r.ReadTag();
+            switch (field)
+            {
+                case 1: msg.GroupId = r.ReadString(); break;
+                case 2: msg.AxolotlSenderKeyData = r.ReadBytes(); break;
+                default: r.Skip(wire); break;
+            }
+        }
+        return msg;
+    }
+}
+
+/// <summary>Field 12 of Message. Protocol-level messages (message revocation, history sync, etc.)</summary>
+public sealed class ProtocolMessage
+{
+    public int Type { get; set; }  // field 5: type enum
+
+    public static ProtocolMessage ParseFrom(byte[] data)
+    {
+        var msg = new ProtocolMessage();
+        var r = ProtoEncoder.CreateReader(data);
+        while (r.HasMore)
+        {
+            var (field, wire) = r.ReadTag();
+            switch (field)
+            {
+                case 5: msg.Type = r.ReadInt32(); break;
+                default: r.Skip(wire); break;
+            }
+        }
+        return msg;
+    }
+}
+
+/// <summary>Field 35 of Message. Contains device list metadata.</summary>
+public sealed class MessageContextInfo
+{
+    public byte[] DeviceListMetadata { get; set; } = [];  // field 1
+
+    public static MessageContextInfo ParseFrom(byte[] data)
+    {
+        var msg = new MessageContextInfo();
+        var r = ProtoEncoder.CreateReader(data);
+        while (r.HasMore)
+        {
+            var (field, wire) = r.ReadTag();
+            switch (field)
+            {
+                case 1: msg.DeviceListMetadata = r.ReadBytes(); break;
+                default: r.Skip(wire); break;
+            }
         }
         return msg;
     }

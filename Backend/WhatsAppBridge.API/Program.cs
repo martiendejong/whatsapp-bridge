@@ -116,17 +116,25 @@ using (var scope = app.Services.CreateScope())
     db.Database.EnsureCreated();
 }
 
-// Restore connected WhatsApp sessions on startup
+// Restore WhatsApp sessions on startup — includes "disconnected" sessions that have saved credentials
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
     var whatsappService = app.Services.GetRequiredService<WhatsAppBridgeService>();
-    var connectedSessions = db.WhatsAppSessions
-        .Where(s => s.Status == "connected")
+    var sessionsRoot = app.Configuration["WhatsApp:SessionsDirectory"]
+        ?? Path.Combine(AppContext.BaseDirectory, "whatsapp-sessions");
+
+    // Restore any session that has a saved creds.json, regardless of last-known DB status
+    var allSessions = db.WhatsAppSessions
+        .Where(s => s.Status == "connected" || s.Status == "disconnected")
         .Select(s => s.SessionId)
         .ToList();
-    foreach (var sessionId in connectedSessions)
-        await whatsappService.RestoreSessionAsync(sessionId);
+    foreach (var sessionId in allSessions)
+    {
+        var credsPath = Path.Combine(sessionsRoot, sessionId, "creds.json");
+        if (File.Exists(credsPath))
+            await whatsappService.RestoreSessionAsync(sessionId);
+    }
 }
 
 app.Run();

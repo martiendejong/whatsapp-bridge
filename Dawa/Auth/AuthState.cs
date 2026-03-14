@@ -53,6 +53,13 @@ public sealed class AuthState
     [JsonPropertyName("lastAccountSyncTimestamp")]
     public long LastAccountSyncTimestamp { get; set; }
 
+    /// <summary>
+    /// ADVSignedDeviceIdentity protobuf bytes (set during QR pairing).
+    /// Used for device-identity node when sending pkmsg.
+    /// </summary>
+    [JsonPropertyName("account")]
+    public byte[]? Account { get; set; }
+
     /// <summary>True if this is a fresh (unauthenticated) state.</summary>
     [JsonIgnore]
     public bool IsFresh => Me == null;

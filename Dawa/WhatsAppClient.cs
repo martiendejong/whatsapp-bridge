@@ -35,6 +35,9 @@ public sealed class WhatsAppClient : IAsyncDisposable
     private CancellationTokenSource? _cts;
     private TaskCompletionSource<bool>? _connectedTcs;
 
+    // Routing info received from WhatsApp edge_routing — used as X-WA-Routing on next connect
+    private byte[]? _pendingRoutingInfo;
+
     // ─── Events ─────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -105,7 +108,7 @@ public sealed class WhatsAppClient : IAsyncDisposable
 
             _frameSocket = new FrameSocket(_logger);
             SetState(ConnectionState.Handshaking);
-            await _frameSocket.ConnectAsync(ct: _cts.Token);
+            await _frameSocket.ConnectAsync(routingInfo: _pendingRoutingInfo, ct: _cts.Token);
 
             _noiseProcessor = new NoiseProcessor(_frameSocket, _authState, _options, _logger);
             _noiseProcessor.QRCodeGenerated += (_, qr) =>
@@ -226,7 +229,17 @@ public sealed class WhatsAppClient : IAsyncDisposable
 
         if (shouldReconnect && _options.AutoReconnect && !ct.IsCancellationRequested)
         {
-            _logger.LogInformation("Reconnecting in {Delay}…", _options.ReconnectDelay);
+            // Capture any routing info for the next connection before clearing the processor
+            var routingInfo = _noiseProcessor?.PendingRoutingInfo;
+            if (routingInfo != null)
+            {
+                _pendingRoutingInfo = routingInfo;
+                _logger.LogInformation("Reconnecting with edge routing info ({Len} bytes).", routingInfo.Length);
+            }
+            else
+            {
+                _logger.LogInformation("Reconnecting in {Delay}…", _options.ReconnectDelay);
+            }
             await Task.Delay(_options.ReconnectDelay, CancellationToken.None);
             try { await ConnectAsync(CancellationToken.None); }
             catch (Exception ex) { _logger.LogError(ex, "Reconnect failed."); }
