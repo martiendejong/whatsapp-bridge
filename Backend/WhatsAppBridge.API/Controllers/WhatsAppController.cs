@@ -315,6 +315,46 @@ public class WhatsAppController : ControllerBase
         return Ok(new { sessionId, status = session.Status, connected, phoneNumber = session.PhoneNumber });
     }
 
+    /// <summary>Test contacts fetch (anonymous, dev only).</summary>
+    [AllowAnonymous]
+    [HttpGet("test-contacts/{sessionId}")]
+    public async Task<IActionResult> TestContacts(string sessionId)
+    {
+        try
+        {
+            var contacts = await _whatsappService.GetContactsAsync(sessionId);
+            return Ok(new { count = contacts?.Count ?? 0, contacts });
+        }
+        catch (Exception ex)
+        {
+            return Ok(new { error = ex.Message });
+        }
+    }
+
+    /// <summary>Test chats fetch (anonymous, dev only).</summary>
+    [AllowAnonymous]
+    [HttpGet("test-chats/{sessionId}")]
+    public async Task<IActionResult> TestChats(string sessionId)
+    {
+        try
+        {
+            var chats = await _whatsappService.GetChatsAsync(sessionId);
+            return Ok(new { count = chats?.Count ?? 0, chats });
+        }
+        catch (Exception ex)
+        {
+            return Ok(new { error = ex.Message });
+        }
+    }
+
+    /// <summary>Debug: show internal cache state (anonymous, dev only).</summary>
+    [AllowAnonymous]
+    [HttpGet("test-debug/{sessionId}")]
+    public IActionResult TestDebug(string sessionId)
+    {
+        return Ok(_whatsappService.GetSessionDebugInfo(sessionId));
+    }
+
     [HttpDelete("sessions/{sessionId}")]
     public async Task<IActionResult> DeleteSession(string sessionId)
     {

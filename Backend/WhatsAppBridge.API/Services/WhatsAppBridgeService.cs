@@ -299,6 +299,18 @@ public class WhatsAppBridgeService : IAsyncDisposable
     public bool IsSessionConnected(string sessionId)
         => _clients.TryGetValue(sessionId, out var client) && client.IsConnected;
 
+    public object GetSessionDebugInfo(string sessionId)
+    {
+        if (!_clients.TryGetValue(sessionId, out var client))
+            return new { error = "session not in _clients" };
+        return new
+        {
+            isConnected = client.IsConnected,
+            myJid = client.MyJid,
+            cacheDebugInfo = client.GetCacheDebugInfo(),
+        };
+    }
+
     private WhatsAppClient GetConnectedClient(string sessionId)
     {
         if (!_clients.TryGetValue(sessionId, out var client))

@@ -195,6 +195,13 @@ public sealed class WhatsAppClient : IAsyncDisposable
         return _noiseProcessor.FetchProfilePictureAsync(jid, ct);
     }
 
+    /// <summary>Returns internal cache state for debugging — thread metadata, LID map, push names.</summary>
+    public object GetCacheDebugInfo()
+    {
+        if (_noiseProcessor == null) return new { error = "not connected" };
+        return _noiseProcessor.GetCacheDebugInfo();
+    }
+
     public Task SubscribePresenceAsync(string jid, CancellationToken ct)
     {
         if (_noiseProcessor == null || _state != ConnectionState.Connected)
