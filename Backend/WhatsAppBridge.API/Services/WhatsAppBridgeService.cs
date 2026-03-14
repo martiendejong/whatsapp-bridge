@@ -71,7 +71,9 @@ public class WhatsAppBridgeService : IAsyncDisposable
             _ = UpdateSessionAsync(sessionId, s => s.QrCode = qr);
         };
 
-        client.MessageReceived += (_, msg) => StoreMessage(sessionId, msg);
+        client.MessageReceived        += (_, msg) => StoreMessage(sessionId, msg);
+        client.HistoryMessageReceived += (_, msg) => StoreMessage(sessionId, msg, isHistory: true);
+        client.HistorySyncCompleted   += (_, n)   => { _logger.LogInformation("HistorySync: persisting {N} msgs for {Sid}", n, sessionId); PersistMessages(sessionId); };
 
         client.Connected += (_, _) =>
         {
@@ -146,7 +148,9 @@ public class WhatsAppBridgeService : IAsyncDisposable
         client.QRCodeReceived += (_, qr) =>
             _ = UpdateSessionAsync(sessionId, s => s.QrCode = qr);
 
-        client.MessageReceived += (_, msg) => StoreMessage(sessionId, msg);
+        client.MessageReceived        += (_, msg) => StoreMessage(sessionId, msg);
+        client.HistoryMessageReceived += (_, msg) => StoreMessage(sessionId, msg, isHistory: true);
+        client.HistorySyncCompleted   += (_, n)   => { _logger.LogInformation("HistorySync: persisting {N} msgs for {Sid}", n, sessionId); PersistMessages(sessionId); };
 
         client.Connected += (_, _) =>
         {
@@ -418,7 +422,7 @@ public class WhatsAppBridgeService : IAsyncDisposable
         catch (Exception ex) { _logger.LogWarning(ex, "Failed to persist message store for {SessionId}", sessionId); }
     }
 
-    private void StoreMessage(string sessionId, Dawa.Messages.IncomingMessage msg)
+    private void StoreMessage(string sessionId, Dawa.Messages.IncomingMessage msg, bool isHistory = false)
     {
         var key = $"{sessionId}:{msg.RemoteJid}";
         var stored = new WhatsAppMessage(
@@ -433,15 +437,30 @@ public class WhatsAppBridgeService : IAsyncDisposable
         {
             // Deduplicate by message ID
             if (list.Any(m => m.Id == stored.Id)) return;
-            list.Add(stored);
+
+            if (isHistory)
+            {
+                // Insert in chronological order (history messages may arrive out of order)
+                var idx = list.BinarySearch(stored, Comparer<WhatsAppMessage>.Create((a, b) => a.Timestamp.CompareTo(b.Timestamp)));
+                list.Insert(idx < 0 ? ~idx : idx, stored);
+            }
+            else
+            {
+                list.Add(stored);
+            }
+
+            // Cap total messages per chat (keep most recent)
             if (list.Count > MaxMessagesPerChat)
-                list.RemoveAt(0); // drop oldest
+                list.RemoveAt(0);
         }
 
-        _logger.LogInformation("Stored message [{Id}] from {From} in chat {Chat}", msg.Id, msg.From, msg.RemoteJid);
+        if (isHistory)
+            _logger.LogDebug("History message [{Id}] from {From} in chat {Chat} @ {Ts}", msg.Id, msg.From, msg.RemoteJid, msg.Timestamp);
+        else
+            _logger.LogInformation("Stored message [{Id}] from {From} in chat {Chat}", msg.Id, msg.From, msg.RemoteJid);
 
-        // Persist to disk after each new message (bounded store → small file)
-        PersistMessages(sessionId);
+        // Persist to disk (throttle for history: only persist in batch via caller)
+        if (!isHistory) PersistMessages(sessionId);
     }
 
     public bool IsSessionConnected(string sessionId)

@@ -60,7 +60,10 @@ public sealed class NoiseProcessor : IAsyncDisposable
     public event EventHandler<string>? QRCodeGenerated;
     public event EventHandler<AuthState>? Authenticated;
     public event EventHandler<IncomingMessage>? MessageReceived;
-    public event EventHandler<HistorySyncBatch>? HistorySyncReceived;
+    /// <summary>Fired for each message loaded from history sync (past messages).</summary>
+    public event EventHandler<IncomingMessage>? HistoryMessageReceived;
+    /// <summary>Fired once after a history-sync blob has been fully processed (use to flush persisted store).</summary>
+    public event EventHandler<int>? HistorySyncCompleted;
 
     public NoiseProcessor(FrameSocket socket, AuthState auth, WhatsAppClientOptions options, ILogger logger)
     {
@@ -844,6 +847,15 @@ public sealed class NoiseProcessor : IAsyncDisposable
                 {
                     _ = HandleHistorySyncAsync(waMsg.HistorySyncNotification!, id, from, timestamp, CancellationToken.None);
                     return; // ACK is sent inside HandleHistorySyncAsync
+                }
+
+                // ── History sync notification ─────────────────────────────────
+                if (waMsg.ProtocolMsg?.Type == Proto.ProtocolMessage.TYPE_HISTORY_SYNC_NOTIFICATION
+                    && waMsg.ProtocolMsg.HistorySyncNotification != null)
+                {
+                    _ = Task.Run(() => ProcessHistorySyncAsync(waMsg.ProtocolMsg.HistorySyncNotification, CancellationToken.None));
+                    _ = SendAckAsync(id, from, timestamp);
+                    return;
                 }
 
                 if (!string.IsNullOrEmpty(text))
@@ -2708,7 +2720,7 @@ public sealed class NoiseProcessor : IAsyncDisposable
     /// <summary>
     /// Handles a HistorySyncNotification message from the phone.
     /// Downloads the encrypted blob from WhatsApp CDN, decrypts it, parses the
-    /// HistorySync protobuf, and fires HistorySyncReceived + MessageReceived for each message.
+    /// HistorySync protobuf, and fires HistoryMessageReceived for each message and HistorySyncCompleted at the end.
     /// </summary>
     private async Task HandleHistorySyncAsync(
         Dawa.Proto.HistorySyncNotification notification,
@@ -2716,7 +2728,7 @@ public sealed class NoiseProcessor : IAsyncDisposable
     {
         _logger.LogInformation(
             "HistorySync: type={Type} chunkOrder={Chunk} directPath={Path} fileLen={Len}",
-            notification.SyncTypeName, notification.ChunkOrder, notification.DirectPath, notification.FileLength);
+            notification.SyncType, notification.Progress, notification.DirectPath, notification.FileLength);
 
         try
         {
@@ -2800,7 +2812,7 @@ public sealed class NoiseProcessor : IAsyncDisposable
             Dawa.Proto.HistorySync historySync;
             try
             {
-                historySync = Dawa.Proto.HistorySync.ParseFrom(protoBytes);
+                historySync = Dawa.Proto.HistorySync.Decode(protoBytes);
                 _logger.LogInformation("HistorySync: parsed {ConvCount} conversations, {NameCount} push names",
                     historySync.Conversations.Count, historySync.PushNames.Count);
             }
@@ -2818,19 +2830,21 @@ public sealed class NoiseProcessor : IAsyncDisposable
                     _pushNames.TryAdd(pn.Id, pn.PushName);
             }
 
-            // ── 6. Fire MessageReceived for each message in each conversation ──
+            // ── 6. Fire HistoryMessageReceived for each message ───────────────────
             var totalMessages = 0;
             foreach (var conv in historySync.Conversations)
             {
                 var chatJid = conv.Id;
                 if (string.IsNullOrEmpty(chatJid)) continue;
 
-                foreach (var wmi in conv.Messages)
+                foreach (var hm in conv.Messages)
                 {
+                    var wmi = hm.Message;
+                    if (wmi == null) continue;
                     var key = wmi.Key;
                     if (key == null) continue;
 
-                    var text = wmi.Message?.GetText();
+                    var text = wmi.MessageBody?.EffectiveText;
                     if (string.IsNullOrEmpty(text)) continue;
 
                     var msgFromMe = key.FromMe;
@@ -2838,7 +2852,7 @@ public sealed class NoiseProcessor : IAsyncDisposable
                         ? (_auth.Me?.Id ?? chatJid)
                         : (!string.IsNullOrEmpty(key.Participant) ? key.Participant : chatJid);
 
-                    MessageReceived?.Invoke(this, new IncomingMessage
+                    HistoryMessageReceived?.Invoke(this, new IncomingMessage
                     {
                         Id          = key.Id,
                         From        = msgFrom,
@@ -2846,7 +2860,7 @@ public sealed class NoiseProcessor : IAsyncDisposable
                         Participant = key.Participant.Length > 0 ? key.Participant : null,
                         Text        = text,
                         FromMe      = msgFromMe,
-                        Timestamp   = (long)wmi.MessageTimestamp,
+                        Timestamp   = (long)wmi.Timestamp,
                         PushName    = wmi.PushName,
                     });
                     totalMessages++;
@@ -2855,20 +2869,18 @@ public sealed class NoiseProcessor : IAsyncDisposable
                 // Update thread metadata with latest message timestamp
                 if (conv.Messages.Count > 0)
                 {
-                    var latest = conv.Messages.Max(m => (long)m.MessageTimestamp);
+                    var latest = conv.Messages
+                        .Where(m => m.Message != null)
+                        .Max(m => (long)m.Message!.Timestamp);
                     _threadMetadata.TryAdd(chatJid, latest);
                 }
             }
 
-            _logger.LogInformation("HistorySync: fired {Total} MessageReceived events across {Convs} conversations",
+            _logger.LogInformation("HistorySync: fired {Total} HistoryMessageReceived events across {Convs} conversations",
                 totalMessages, historySync.Conversations.Count);
 
-            // Fire the batch event so callers can persist the full sync
-            HistorySyncReceived?.Invoke(this, new HistorySyncBatch(
-                SyncType: notification.SyncTypeName,
-                ChunkOrder: notification.ChunkOrder,
-                ConversationCount: historySync.Conversations.Count,
-                MessageCount: totalMessages));
+            // Signal completion so callers can persist the full sync
+            HistorySyncCompleted?.Invoke(this, totalMessages);
 
             SaveCacheToDisk();
         }
@@ -3036,13 +3048,152 @@ public sealed class NoiseProcessor : IAsyncDisposable
         _keepAliveCts?.Dispose();
         await ValueTask.CompletedTask;
     }
+
+    // ─── History sync ────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Downloads, decrypts, decompresses and parses a WhatsApp history sync blob,
+    /// then fires <see cref="HistoryMessageReceived"/> for every past message.
+    /// Called automatically when the server sends a HISTORY_SYNC_NOTIFICATION.
+    /// </summary>
+    private async Task ProcessHistorySyncAsync(Proto.HistorySyncNotification notif, CancellationToken ct)
+    {
+        try
+        {
+            var syncTypeName = notif.SyncType switch
+            {
+                Proto.HistorySyncNotification.INITIAL_BOOTSTRAP => "INITIAL_BOOTSTRAP",
+                Proto.HistorySyncNotification.RECENT            => "RECENT",
+                Proto.HistorySyncNotification.FULL              => "FULL",
+                Proto.HistorySyncNotification.PUSH_NAME         => "PUSH_NAME",
+                Proto.HistorySyncNotification.ON_DEMAND         => "ON_DEMAND",
+                _                                               => notif.SyncType.ToString(),
+            };
+            _logger.LogInformation("HistorySync: received {Type} notification, directPath={Path}",
+                syncTypeName, notif.DirectPath);
+
+            if (notif.MediaKey == null || notif.MediaKey.Length == 0 || string.IsNullOrEmpty(notif.DirectPath))
+            {
+                _logger.LogWarning("HistorySync: missing mediaKey or directPath — skipping");
+                return;
+            }
+
+            // 1. Download blob from CDN
+            var downloadUrl = $"https://mmg.whatsapp.net{notif.DirectPath}";
+            _logger.LogInformation("HistorySync: downloading from {Url}", downloadUrl);
+
+            byte[] encBlob;
+            using var resp = await _http.GetAsync(downloadUrl, ct);
+            resp.EnsureSuccessStatusCode();
+            encBlob = await resp.Content.ReadAsByteArrayAsync(ct);
+            _logger.LogInformation("HistorySync: downloaded {Bytes} encrypted bytes", encBlob.Length);
+
+            // 2. Decrypt: AES-CBC with keys derived from mediaKey via HKDF "WhatsApp History Keys"
+            byte[] compressed;
+            try
+            {
+                compressed = Crypto.MediaCrypto.Decrypt(encBlob, notif.MediaKey, "md-msg-hist");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "HistorySync: decryption failed");
+                return;
+            }
+            _logger.LogInformation("HistorySync: decrypted to {Bytes} compressed bytes", compressed.Length);
+
+            // 3. Decompress: zlib deflate (raw inflate, skip 2-byte zlib header)
+            byte[] protoBytes;
+            try
+            {
+                protoBytes = ZlibInflate(compressed);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "HistorySync: decompression failed");
+                return;
+            }
+            _logger.LogInformation("HistorySync: decompressed to {Bytes} proto bytes", protoBytes.Length);
+
+            // 4. Proto decode
+            Proto.HistorySync sync;
+            try
+            {
+                sync = Proto.HistorySync.Decode(protoBytes);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "HistorySync: proto decode failed");
+                return;
+            }
+
+            // 5. Build pushname lookup
+            var pushNames = sync.PushNames.ToDictionary(p => p.Id, p => p.PushName);
+
+            // 6. Emit all messages
+            var myJidBase = _auth.Me?.Id?.Split(':')[0].Split('@')[0];
+            var totalMsgs = 0;
+            foreach (var conversation in sync.Conversations)
+            {
+                var chatJid = conversation.Id;
+                foreach (var histMsg in conversation.Messages)
+                {
+                    var wmi = histMsg.Message;
+                    if (wmi?.Key == null) continue;
+
+                    var text = wmi.MessageBody?.EffectiveText ?? "";
+                    if (string.IsNullOrEmpty(text)) continue;
+
+                    var remoteJid  = wmi.Key.RemoteJid ?? chatJid;
+                    var fromMe     = wmi.Key.FromMe;
+                    var senderJid  = fromMe
+                        ? (myJidBase != null ? $"{myJidBase}@s.whatsapp.net" : remoteJid)
+                        : (wmi.Key.Participant.Length > 0 ? wmi.Key.Participant : remoteJid);
+
+                    pushNames.TryGetValue(senderJid.Split('@')[0], out var senderName);
+
+                    var msg = new Messages.IncomingMessage
+                    {
+                        Id          = wmi.Key.Id,
+                        From        = senderJid,
+                        RemoteJid   = remoteJid,
+                        Participant = wmi.Key.Participant.Length > 0 ? wmi.Key.Participant : null,
+                        Text        = text,
+                        FromMe      = fromMe,
+                        Timestamp   = (long)wmi.Timestamp,
+                        PushName    = wmi.PushName.Length > 0 ? wmi.PushName : senderName,
+                    };
+
+                    HistoryMessageReceived?.Invoke(this, msg);
+                    totalMsgs++;
+                }
+            }
+
+            _logger.LogInformation("HistorySync: emitted {Count} messages from {Convs} conversations ({Type})",
+                totalMsgs, sync.Conversations.Count, syncTypeName);
+
+            HistorySyncCompleted?.Invoke(this, totalMsgs);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "HistorySync: unhandled error");
+        }
+    }
+
+    /// <summary>Decompresses zlib-deflated data (strips 2-byte zlib header + 4-byte adler32 trailer).</summary>
+    private static byte[] ZlibInflate(byte[] data)
+    {
+        // zlib stream: 2-byte header + deflate data + 4-byte adler32
+        // System.IO.Compression.DeflateStream reads raw deflate (no header).
+        using var input  = new System.IO.MemoryStream(data, 2, data.Length - 2);
+        using var deflate = new System.IO.Compression.DeflateStream(input, System.IO.Compression.CompressionMode.Decompress);
+        using var output = new System.IO.MemoryStream();
+        deflate.CopyTo(output);
+        return output.ToArray();
+    }
 }
 
 public record GroupParticipant(string Jid, string LidJid, string Type);
 public record GroupMetadata(string Jid, string Subject, string Creator, long CreationTimestamp, List<GroupParticipant> Participants);
-
-/// <summary>Fired when a HistorySync blob has been fully downloaded, decrypted, and processed.</summary>
-public record HistorySyncBatch(string SyncType, uint ChunkOrder, int ConversationCount, int MessageCount);
 
 // PresenceInfo record — lives in Dawa.Noise namespace
 public record PresenceInfo(string Jid, string Status, DateTime LastSeen);

@@ -349,7 +349,7 @@ public sealed class WAMessage
                 case 15: msg.DocumentMessage = DocumentMessage.ParseFrom(r.ReadBytes()); break;
                 case 31: msg.DeviceSentMessage = DeviceSentMessage.ParseFrom(r.ReadBytes()); break;
                 case 35: msg.MessageContextInfo = MessageContextInfo.ParseFrom(r.ReadBytes()); break;
-                case 46: msg.HistorySyncNotification = HistorySyncNotification.ParseFrom(r.ReadBytes()); break;
+                case 46: msg.HistorySyncNotification = HistorySyncNotification.Decode(r.ReadBytes()); break;
                 case 85: msg.ReactionMessage = ReactionMessage.ParseFrom(r.ReadBytes()); break;
                 default: r.Skip(wire); break;
             }
@@ -628,6 +628,10 @@ public sealed class SenderKeyDistributionMessage
 public sealed class ProtocolMessage
 {
     public int Type { get; set; }  // field 5: type enum
+    // field 6: historySyncNotification (populated when Type == TYPE_HISTORY_SYNC_NOTIFICATION)
+    public Dawa.Proto.HistorySyncNotification? HistorySyncNotification { get; set; }
+
+    public const int TYPE_HISTORY_SYNC_NOTIFICATION = 5;
 
     public static ProtocolMessage ParseFrom(byte[] data)
     {
@@ -639,137 +643,10 @@ public sealed class ProtocolMessage
             switch (field)
             {
                 case 5: msg.Type = r.ReadInt32(); break;
-                default: r.Skip(wire); break;
-            }
-        }
-        return msg;
-    }
-}
-
-/// <summary>
-/// Field 46 of Message. Sent by the phone to companion devices when history needs to be synced.
-/// Contains CDN credentials to download an encrypted HistorySync protobuf blob.
-/// Field numbers verified against Baileys WAProto.d.ts.
-/// </summary>
-public sealed class HistorySyncNotification
-{
-    public byte[] FileSha256    { get; set; } = [];  // field 1
-    public ulong  FileLength    { get; set; }         // field 2
-    public byte[] MediaKey      { get; set; } = [];  // field 3
-    public byte[] FileEncSha256 { get; set; } = [];  // field 4
-    public string DirectPath    { get; set; } = "";  // field 6  (CDN path)
-    public int    SyncType      { get; set; }         // field 7  (enum: 0=INITIAL_BOOTSTRAP, 2=FULL, 3=RECENT, 6=ON_DEMAND)
-    public uint   ChunkOrder    { get; set; }         // field 8
-    public string? OriginalMessageId { get; set; }   // field 9
-
-    public static HistorySyncNotification ParseFrom(byte[] data)
-    {
-        var msg = new HistorySyncNotification();
-        var r = ProtoEncoder.CreateReader(data);
-        while (r.HasMore)
-        {
-            var (field, wire) = r.ReadTag();
-            switch (field)
-            {
-                case 1: msg.FileSha256    = r.ReadBytes(); break;
-                case 2: msg.FileLength    = r.ReadUInt64(); break;
-                case 3: msg.MediaKey      = r.ReadBytes(); break;
-                case 4: msg.FileEncSha256 = r.ReadBytes(); break;
-                case 6: msg.DirectPath   = r.ReadString(); break;
-                case 7: msg.SyncType     = r.ReadInt32(); break;
-                case 8: msg.ChunkOrder   = r.ReadUInt32(); break;
-                case 9: msg.OriginalMessageId = r.ReadString(); break;
-                default: r.Skip(wire); break;
-            }
-        }
-        return msg;
-    }
-
-    public string SyncTypeName => SyncType switch
-    {
-        0 => "INITIAL_BOOTSTRAP",
-        1 => "INITIAL_STATUS_V3",
-        2 => "FULL",
-        3 => "RECENT",
-        4 => "PUSH",
-        5 => "NON_BLOCKING_DATA",
-        6 => "ON_DEMAND",
-        _ => $"UNKNOWN({SyncType})",
-    };
-}
-
-/// <summary>
-/// Top-level HistorySync protobuf. The encrypted blob downloaded via HistorySyncNotification
-/// decodes to this message. Contains one or more conversations with their messages.
-/// </summary>
-public sealed class HistorySync
-{
-    public int SyncType { get; set; }                              // field 1
-    public List<HistorySyncConversation> Conversations { get; set; } = new(); // field 2 (repeated)
-    public List<HistorySyncPushName> PushNames { get; set; } = new(); // field 5 (repeated)
-
-    public static HistorySync ParseFrom(byte[] data)
-    {
-        var msg = new HistorySync();
-        var r = ProtoEncoder.CreateReader(data);
-        while (r.HasMore)
-        {
-            var (field, wire) = r.ReadTag();
-            switch (field)
-            {
-                case 1: msg.SyncType = r.ReadInt32(); break;
-                case 2: msg.Conversations.Add(HistorySyncConversation.ParseFrom(r.ReadBytes())); break;
-                case 5: msg.PushNames.Add(HistorySyncPushName.ParseFrom(r.ReadBytes())); break;
-                default: r.Skip(wire); break;
-            }
-        }
-        return msg;
-    }
-}
-
-/// <summary>Push name mapping from HistorySync field 5.</summary>
-public sealed class HistorySyncPushName
-{
-    public string Id       { get; set; } = "";  // field 1 - JID
-    public string PushName { get; set; } = "";  // field 3
-
-    public static HistorySyncPushName ParseFrom(byte[] data)
-    {
-        var msg = new HistorySyncPushName();
-        var r = ProtoEncoder.CreateReader(data);
-        while (r.HasMore)
-        {
-            var (field, wire) = r.ReadTag();
-            switch (field)
-            {
-                case 1: msg.Id = r.ReadString(); break;
-                case 3: msg.PushName = r.ReadString(); break;
-                default: r.Skip(wire); break;
-            }
-        }
-        return msg;
-    }
-}
-
-/// <summary>A single chat thread inside HistorySync.</summary>
-public sealed class HistorySyncConversation
-{
-    public string Id { get; set; } = "";                          // field 1 - chat JID
-    public List<WebMessageInfo> Messages { get; set; } = new();  // field 2 (repeated)
-    public string Name { get; set; } = "";                        // field 11
-
-    public static HistorySyncConversation ParseFrom(byte[] data)
-    {
-        var msg = new HistorySyncConversation();
-        var r = ProtoEncoder.CreateReader(data);
-        while (r.HasMore)
-        {
-            var (field, wire) = r.ReadTag();
-            switch (field)
-            {
-                case 1:  msg.Id = r.ReadString(); break;
-                case 2:  msg.Messages.Add(WebMessageInfo.ParseFrom(r.ReadBytes())); break;
-                case 11: msg.Name = r.ReadString(); break;
+                case 6:
+                    var notifBytes = r.ReadBytes();
+                    msg.HistorySyncNotification = Dawa.Proto.HistorySyncNotification.Decode(notifBytes);
+                    break;
                 default: r.Skip(wire); break;
             }
         }

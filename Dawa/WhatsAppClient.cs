@@ -52,14 +52,17 @@ public sealed class WhatsAppClient : IAsyncDisposable
     /// <summary>Fired when a new message is received.</summary>
     public event EventHandler<IncomingMessage>? MessageReceived;
 
+    /// <summary>Fired for each historical message loaded from WhatsApp history sync on connect.</summary>
+    public event EventHandler<IncomingMessage>? HistoryMessageReceived;
+
+    /// <summary>Fired once after each history sync blob is fully processed. Arg = number of messages emitted.</summary>
+    public event EventHandler<int>? HistorySyncCompleted;
+
     /// <summary>Fired once the session is fully authenticated.</summary>
     public event EventHandler? Connected;
 
     /// <summary>Fired when the connection is lost.</summary>
     public event EventHandler? Disconnected;
-
-    /// <summary>Fired when a HistorySync blob is received, decrypted, and processed.</summary>
-    public event EventHandler<HistorySyncBatch>? HistorySyncReceived;
 
     // ─── Properties ─────────────────────────────────────────────────────────
 
@@ -127,8 +130,9 @@ public sealed class WhatsAppClient : IAsyncDisposable
                 _connectedTcs?.TrySetResult(true);
                 Connected?.Invoke(this, EventArgs.Empty);
             };
-            _noiseProcessor.MessageReceived += (_, msg) => MessageReceived?.Invoke(this, msg);
-            _noiseProcessor.HistorySyncReceived += (_, batch) => HistorySyncReceived?.Invoke(this, batch);
+            _noiseProcessor.MessageReceived        += (_, msg) => MessageReceived?.Invoke(this, msg);
+            _noiseProcessor.HistoryMessageReceived += (_, msg) => HistoryMessageReceived?.Invoke(this, msg);
+            _noiseProcessor.HistorySyncCompleted   += (_, n)   => HistorySyncCompleted?.Invoke(this, n);
 
             await _noiseProcessor.PerformHandshakeAsync(_cts.Token);
 
