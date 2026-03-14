@@ -181,6 +181,40 @@ public sealed class WhatsAppClient : IAsyncDisposable
         return _noiseProcessor.FetchContactsAsync(ct);
     }
 
+    public Task<List<(string Jid, string Name, bool Archived, bool Pinned)>> GetChatsAsync(CancellationToken ct)
+    {
+        if (_noiseProcessor == null || _state != ConnectionState.Connected)
+            throw new InvalidOperationException("Client is not connected.");
+        return _noiseProcessor.FetchChatsAsync(ct);
+    }
+
+    public Task<string?> GetProfilePictureAsync(string jid, CancellationToken ct)
+    {
+        if (_noiseProcessor == null || _state != ConnectionState.Connected)
+            throw new InvalidOperationException("Client is not connected.");
+        return _noiseProcessor.FetchProfilePictureAsync(jid, ct);
+    }
+
+    public Task SubscribePresenceAsync(string jid, CancellationToken ct)
+    {
+        if (_noiseProcessor == null || _state != ConnectionState.Connected)
+            throw new InvalidOperationException("Client is not connected.");
+        return _noiseProcessor.SubscribePresenceAsync(jid, ct);
+    }
+
+    public Dawa.Noise.PresenceInfo? GetPresence(string jid)
+    {
+        if (_noiseProcessor == null) return null;
+        return _noiseProcessor.GetPresence(jid);
+    }
+
+    public Task SendReadReceiptAsync(string jid, string messageId, long timestamp, CancellationToken ct)
+    {
+        if (_noiseProcessor == null || _state != ConnectionState.Connected)
+            throw new InvalidOperationException("Client is not connected.");
+        return _noiseProcessor.SendReadReceiptAsync(jid, messageId, timestamp, ct);
+    }
+
     // ─── Disconnection ───────────────────────────────────────────────────────
 
     /// <summary>Disconnects from WhatsApp and cleans up resources.</summary>

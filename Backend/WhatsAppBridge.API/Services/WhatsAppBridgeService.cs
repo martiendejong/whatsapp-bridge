@@ -212,8 +212,47 @@ public class WhatsAppBridgeService : IAsyncDisposable
         }
     }
 
-    public Task<List<object>?> GetChatsAsync(string sessionId)
-        => Task.FromResult<List<object>?>(new List<object>());
+    public async Task<List<object>?> GetChatsAsync(string sessionId)
+    {
+        if (!_clients.TryGetValue(sessionId, out var client) || !client.IsConnected)
+            return null;
+        var chats = await client.GetChatsAsync(CancellationToken.None);
+        return chats.Select(c => (object)new {
+            jid      = c.Jid,
+            name     = c.Name,
+            phone    = c.Jid.Split('@')[0].Split(':')[0],
+            archived = c.Archived,
+            pinned   = c.Pinned,
+        }).ToList();
+    }
+
+    public async Task<string?> GetProfilePictureAsync(string sessionId, string jid)
+    {
+        if (!_clients.TryGetValue(sessionId, out var client) || !client.IsConnected)
+            return null;
+        return await client.GetProfilePictureAsync(jid, CancellationToken.None);
+    }
+
+    public async Task SubscribePresenceAsync(string sessionId, string jid)
+    {
+        if (_clients.TryGetValue(sessionId, out var client) && client.IsConnected)
+            await client.SubscribePresenceAsync(jid, CancellationToken.None);
+    }
+
+    public object? GetPresence(string sessionId, string jid)
+    {
+        if (!_clients.TryGetValue(sessionId, out var client) || !client.IsConnected)
+            return null;
+        var p = client.GetPresence(jid);
+        if (p == null) return new { jid, status = "unknown" };
+        return new { jid = p.Jid, status = p.Status, lastSeen = p.LastSeen };
+    }
+
+    public async Task SendReadReceiptAsync(string sessionId, string jid, string messageId, long timestamp)
+    {
+        var client = GetConnectedClient(sessionId);
+        await client.SendReadReceiptAsync(jid, messageId, timestamp, CancellationToken.None);
+    }
 
     public async Task<List<WhatsAppContact>?> GetContactsAsync(string sessionId)
     {

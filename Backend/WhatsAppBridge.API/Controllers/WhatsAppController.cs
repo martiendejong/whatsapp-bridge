@@ -165,6 +165,66 @@ public class WhatsAppController : ControllerBase
         return Ok(contacts ?? new List<WhatsAppContact>());
     }
 
+    [HttpGet("sessions/{sessionId}/chats")]
+    public async Task<IActionResult> GetChats(string sessionId)
+    {
+        var userId = GetUserId();
+        var session = await _context.WhatsAppSessions
+            .FirstOrDefaultAsync(s => s.SessionId == sessionId && s.UserId == userId);
+        if (session == null) return NotFound();
+        var chats = await _whatsappService.GetChatsAsync(sessionId);
+        return Ok(chats ?? new List<object>());
+    }
+
+    [HttpGet("sessions/{sessionId}/profile-pic/{jid}")]
+    public async Task<IActionResult> GetProfilePic(string sessionId, string jid)
+    {
+        var userId = GetUserId();
+        var session = await _context.WhatsAppSessions
+            .FirstOrDefaultAsync(s => s.SessionId == sessionId && s.UserId == userId);
+        if (session == null) return NotFound();
+        var url = await _whatsappService.GetProfilePictureAsync(sessionId, jid);
+        if (url == null) return NotFound(new { error = "No profile picture found" });
+        return Ok(new { url });
+    }
+
+    [HttpPost("sessions/{sessionId}/presence/subscribe")]
+    public async Task<IActionResult> SubscribePresence(string sessionId, [FromBody] JidRequest request)
+    {
+        var userId = GetUserId();
+        var session = await _context.WhatsAppSessions
+            .FirstOrDefaultAsync(s => s.SessionId == sessionId && s.UserId == userId);
+        if (session == null) return NotFound();
+        await _whatsappService.SubscribePresenceAsync(sessionId, request.Jid);
+        return Ok(new { subscribed = true });
+    }
+
+    [HttpGet("sessions/{sessionId}/presence/{jid}")]
+    public async Task<IActionResult> GetPresence(string sessionId, string jid)
+    {
+        var userId = GetUserId();
+        var session = await _context.WhatsAppSessions
+            .FirstOrDefaultAsync(s => s.SessionId == sessionId && s.UserId == userId);
+        if (session == null) return NotFound();
+        var presence = _whatsappService.GetPresence(sessionId, jid);
+        return Ok(presence);
+    }
+
+    [HttpPost("sessions/{sessionId}/read-receipt")]
+    public async Task<IActionResult> SendReadReceipt(string sessionId, [FromBody] ReadReceiptRequest request)
+    {
+        var userId = GetUserId();
+        var session = await _context.WhatsAppSessions
+            .FirstOrDefaultAsync(s => s.SessionId == sessionId && s.UserId == userId);
+        if (session == null) return NotFound();
+        if (session.Status != "connected") return BadRequest(new { error = "Session not connected" });
+        await _whatsappService.SendReadReceiptAsync(sessionId, request.Jid, request.MessageId, request.Timestamp);
+        return Ok(new { success = true });
+    }
+
+    public record JidRequest(string Jid);
+    public record ReadReceiptRequest(string Jid, string MessageId, long Timestamp);
+
     /// <summary>
     /// Test endpoint for sending messages without auth (dev only).
     /// </summary>

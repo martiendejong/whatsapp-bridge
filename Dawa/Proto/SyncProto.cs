@@ -115,10 +115,13 @@ public sealed class SyncActionData
 // SyncActionValue
 // field 1 = timestamp (int64, skip)
 // field 3 = contactAction (SyncActionContactAction)
+// field 5 = archiveAction (SyncActionChatAction — field 1 = archived bool)
+// field 6 = pinAction     (inner message — field 1 = pinned bool)
 // (many other field types we don't need — skip all)
 public sealed class SyncActionValue
 {
     public SyncActionContactAction? ContactAction { get; set; }
+    public SyncActionChatAction? ChatAction { get; set; }
 
     public static SyncActionValue ParseFrom(byte[] data)
     {
@@ -127,8 +130,12 @@ public sealed class SyncActionValue
         while (r.HasMore)
         {
             var (field, wt) = r.ReadTag();
-            if (field == 3) msg.ContactAction = SyncActionContactAction.ParseFrom(r.ReadBytes());
-            else r.Skip(wt);
+            switch (field)
+            {
+                case 3: msg.ContactAction = SyncActionContactAction.ParseFrom(r.ReadBytes()); break;
+                case 5: msg.ChatAction    = SyncActionChatAction.ParseFrom(r.ReadBytes()); break;
+                default: r.Skip(wt); break;
+            }
         }
         return msg;
     }
@@ -153,6 +160,33 @@ public sealed class SyncActionContactAction
             {
                 case 1: msg.FullName  = r.ReadString(); break;
                 case 2: msg.FirstName = r.ReadString(); break;
+                default: r.Skip(wt); break;
+            }
+        }
+        return msg;
+    }
+}
+
+// SyncActionChatAction — parsed from chat entries in regular_low / regular collections
+// field 1 = archived (bool)
+// field 5 = pinAction (inner message, field 1 = bool)
+// field 6 = muteAction (inner message, field 1 = epoch ms)
+public sealed class SyncActionChatAction
+{
+    public bool Archived { get; set; }
+    public bool Pinned { get; set; }
+    public bool Muted { get; set; }
+
+    public static SyncActionChatAction ParseFrom(byte[] data)
+    {
+        var msg = new SyncActionChatAction();
+        var r = new ProtoReader(data);
+        while (r.HasMore)
+        {
+            var (field, wt) = r.ReadTag();
+            switch (field)
+            {
+                case 1: msg.Archived = r.ReadBool(); break;
                 default: r.Skip(wt); break;
             }
         }

@@ -254,6 +254,9 @@ public sealed class NoiseProcessor : IAsyncDisposable
             case "notification":
                 await HandleNotificationAsync(node, ct);
                 break;
+            case "presence":
+                HandlePresenceNode(node);
+                break;
             case "success":
                 if (!_sessionAuthenticated)
                 {
@@ -1814,6 +1817,211 @@ public sealed class NoiseProcessor : IAsyncDisposable
         return contacts;
     }
 
+    // ─── Presence ──────────────────────────────────────────────────────────
+
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, PresenceInfo> _presenceCache = new();
+
+    private void HandlePresenceNode(BinaryNode node)
+    {
+        var jid    = node.GetAttr("from") ?? "";
+        var type   = node.GetAttr("type") ?? "available";
+        var status = type == "unavailable" ? "unavailable" : "available";
+
+        var composing = node.FindChild("composing");
+        var recording = node.FindChild("recording");
+        if (composing != null) status = "composing";
+        if (recording != null) status = "recording";
+
+        _presenceCache[jid] = new PresenceInfo(jid, status, DateTime.UtcNow);
+        _logger.LogDebug("Presence: {Jid} → {Status}", jid, status);
+    }
+
+    public async Task SubscribePresenceAsync(string jid, CancellationToken ct)
+    {
+        var normalizedJid = jid.Contains('@') ? jid : $"{jid.TrimStart('+')}@s.whatsapp.net";
+        var node = new BinaryNode("presence", new Dictionary<string, string>
+        {
+            ["type"] = "subscribe",
+            ["to"]   = normalizedJid,
+        });
+        await SendNodeAsync(node, ct);
+    }
+
+    public PresenceInfo? GetPresence(string jid)
+        => _presenceCache.TryGetValue(jid, out var p) ? p : null;
+
+    // ─── Profile picture ────────────────────────────────────────────────────
+
+    public async Task<string?> FetchProfilePictureAsync(string jid, CancellationToken ct)
+    {
+        var normalizedJid = jid.Contains('@') ? jid : $"{jid.TrimStart('+')}@s.whatsapp.net";
+        var iq = new BinaryNode("iq", new Dictionary<string, string>
+        {
+            ["to"]    = normalizedJid,
+            ["type"]  = "get",
+            ["xmlns"] = "w:profile:pic",
+            ["id"]    = GenerateMessageId(),
+        })
+        {
+            Content = new List<BinaryNode>
+            {
+                new BinaryNode("picture", new Dictionary<string, string> { ["type"] = "image" })
+            }
+        };
+
+        try
+        {
+            var result = await SendIQAsync(iq, ct, timeoutMs: 10000);
+            var picNode = result.FindChild("picture");
+            return picNode?.GetAttr("url");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to fetch profile picture for {Jid}", jid);
+            return null;
+        }
+    }
+
+    // ─── Read receipts ──────────────────────────────────────────────────────
+
+    public async Task SendReadReceiptAsync(string jid, string messageId, long timestamp, CancellationToken ct)
+    {
+        var normalizedJid = jid.Contains('@') ? jid : $"{jid.TrimStart('+')}@s.whatsapp.net";
+        var receipt = new BinaryNode("receipt", new Dictionary<string, string>
+        {
+            ["id"]   = messageId,
+            ["to"]   = normalizedJid,
+            ["type"] = "read",
+            ["t"]    = timestamp.ToString(),
+        });
+        await SendNodeAsync(receipt, ct);
+        _logger.LogInformation("Sent read receipt for message {MsgId} to {Jid}", messageId, normalizedJid);
+    }
+
+    // ─── Chats (regular_low / regular app state sync) ───────────────────────
+
+    public async Task<List<(string Jid, string Name, bool Archived, bool Pinned)>> FetchChatsAsync(CancellationToken ct)
+    {
+        // Try regular_low first, fall back to regular
+        foreach (var collectionName in new[] { "regular_low", "regular" })
+        {
+            var iq = new BinaryNode("iq", new Dictionary<string, string>
+            {
+                ["id"]    = GenerateMessageId(),
+                ["to"]    = "@s.whatsapp.net",
+                ["type"]  = "set",
+                ["xmlns"] = "w:app:state:sync",
+            })
+            {
+                Content = new List<BinaryNode>
+                {
+                    new BinaryNode("sync", null, new List<BinaryNode>
+                    {
+                        new BinaryNode("collection", new Dictionary<string, string>
+                        {
+                            ["name"]            = collectionName,
+                            ["version"]         = "0",
+                            ["return_snapshot"] = "true",
+                        }),
+                    }),
+                },
+            };
+
+            BinaryNode result;
+            try { result = await SendIQAsync(iq, ct, timeoutMs: 30000); }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "FetchChatsAsync: IQ failed for collection {Name}", collectionName);
+                continue;
+            }
+
+            var syncNode       = result.FindChild("sync") ?? result;
+            var collectionNode = syncNode.FindChild("collection") ?? syncNode;
+            var snapshotNode   = collectionNode.FindChild("snapshot");
+
+            if (snapshotNode?.Data == null || snapshotNode.Data.Length == 0)
+            {
+                _logger.LogWarning("FetchChatsAsync: no snapshot in {Name}", collectionName);
+                continue;
+            }
+
+            var snapshot = Proto.SyncdSnapshot.ParseFrom(snapshotNode.Data);
+            _logger.LogInformation("FetchChatsAsync: {Name} snapshot has {Count} records", collectionName, snapshot.Records.Count);
+
+            if (snapshot.Records.Count == 0) continue;
+
+            var keyId = snapshot.KeyId.Length > 0
+                ? snapshot.KeyId
+                : snapshot.Records.Count > 0 ? snapshot.Records[0].KeyId : null;
+
+            if (keyId == null || keyId.Length == 0)
+            {
+                _logger.LogWarning("FetchChatsAsync: no keyId in {Name}", collectionName);
+                continue;
+            }
+
+            var appKey = await FetchAppStateSyncKeyAsync(keyId, ct);
+
+            var derived = System.Security.Cryptography.HKDF.DeriveKey(
+                System.Security.Cryptography.HashAlgorithmName.SHA256,
+                appKey,
+                outputLength: 64,
+                salt: new byte[32],
+                info: "WhisperAppStateKeys"u8.ToArray());
+            var encKey = derived[..32];
+
+            var chats = new List<(string Jid, string Name, bool Archived, bool Pinned)>();
+
+            foreach (var record in snapshot.Records)
+            {
+                if (record.ValueBlob.Length < 17) continue;
+
+                var iv         = record.ValueBlob[..16];
+                var ciphertext = record.ValueBlob[16..];
+                if (ciphertext.Length % 16 != 0) continue;
+
+                byte[] decrypted;
+                try
+                {
+                    using var aes = System.Security.Cryptography.Aes.Create();
+                    aes.Key     = encKey;
+                    aes.IV      = iv;
+                    aes.Mode    = System.Security.Cryptography.CipherMode.CBC;
+                    aes.Padding = System.Security.Cryptography.PaddingMode.None;
+                    decrypted   = aes.DecryptCbc(ciphertext, iv);
+                }
+                catch { continue; }
+
+                var end = decrypted.Length;
+                while (end > 0 && decrypted[end - 1] == 0) end--;
+                if (end < decrypted.Length) decrypted = decrypted[..end];
+                if (decrypted.Length == 0) continue;
+
+                Proto.SyncActionData actionData;
+                try { actionData = Proto.SyncActionData.ParseFrom(decrypted); }
+                catch { continue; }
+
+                // Chat entries: Index[0] == "chat", Index[1] == JID
+                if (actionData.Index.Length < 2 || actionData.Index[0] != "chat") continue;
+
+                var chatJid  = actionData.Index[1];
+                var archived = actionData.Value?.ChatAction?.Archived ?? false;
+                // Derive a human-readable name from the JID (phone number part)
+                var name     = chatJid.Split('@')[0].Split(':')[0];
+
+                chats.Add((chatJid, name, archived, false));
+            }
+
+            if (chats.Count > 0)
+            {
+                _logger.LogInformation("FetchChatsAsync: found {Count} chats in {Name}", chats.Count, collectionName);
+                return chats;
+            }
+        }
+
+        return [];
+    }
+
     public async ValueTask DisposeAsync()
     {
         _keepAliveCts?.Cancel();
@@ -1821,3 +2029,6 @@ public sealed class NoiseProcessor : IAsyncDisposable
         await ValueTask.CompletedTask;
     }
 }
+
+// PresenceInfo record — lives in Dawa.Noise namespace
+public record PresenceInfo(string Jid, string Status, DateTime LastSeen);
