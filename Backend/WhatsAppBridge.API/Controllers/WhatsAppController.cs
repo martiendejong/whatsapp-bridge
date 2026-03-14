@@ -331,6 +331,62 @@ public class WhatsAppController : ControllerBase
         }
     }
 
+    [HttpGet("sessions/{sessionId}/groups")]
+    public async Task<IActionResult> GetGroups(string sessionId)
+    {
+        var userId = GetUserId();
+        var session = await _context.WhatsAppSessions
+            .FirstOrDefaultAsync(s => s.SessionId == sessionId && s.UserId == userId);
+        if (session == null) return NotFound();
+        var groups = await _whatsappService.GetGroupsAsync(sessionId);
+        return Ok(groups ?? new List<object>());
+    }
+
+    [HttpGet("sessions/{sessionId}/groups/{groupJid}")]
+    public async Task<IActionResult> GetGroupMembers(string sessionId, string groupJid)
+    {
+        var userId = GetUserId();
+        var session = await _context.WhatsAppSessions
+            .FirstOrDefaultAsync(s => s.SessionId == sessionId && s.UserId == userId);
+        if (session == null) return NotFound();
+        var meta = await _whatsappService.GetGroupMembersAsync(sessionId, groupJid);
+        if (meta == null) return NotFound(new { error = "Group not found or not connected" });
+        return Ok(meta);
+    }
+
+    /// <summary>Test groups fetch (anonymous, dev only).</summary>
+    [AllowAnonymous]
+    [HttpGet("test-groups/{sessionId}")]
+    public async Task<IActionResult> TestGroups(string sessionId)
+    {
+        try
+        {
+            var groups = await _whatsappService.GetGroupsAsync(sessionId);
+            return Ok(new { count = groups?.Count ?? 0, groups });
+        }
+        catch (Exception ex)
+        {
+            return Ok(new { error = ex.Message });
+        }
+    }
+
+    /// <summary>Test group members fetch (anonymous, dev only).</summary>
+    [AllowAnonymous]
+    [HttpGet("test-group/{sessionId}/{groupJid}")]
+    public async Task<IActionResult> TestGroupMembers(string sessionId, string groupJid)
+    {
+        try
+        {
+            var meta = await _whatsappService.GetGroupMembersAsync(sessionId, groupJid);
+            if (meta == null) return Ok(new { error = "Group not found or metadata unavailable" });
+            return Ok(meta);
+        }
+        catch (Exception ex)
+        {
+            return Ok(new { error = ex.Message });
+        }
+    }
+
     /// <summary>Test chats fetch (anonymous, dev only).</summary>
     [AllowAnonymous]
     [HttpGet("test-chats/{sessionId}")]

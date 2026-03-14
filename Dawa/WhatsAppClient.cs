@@ -222,6 +222,19 @@ public sealed class WhatsAppClient : IAsyncDisposable
         return _noiseProcessor.SendReadReceiptAsync(jid, messageId, timestamp, ct);
     }
 
+    public List<string> GetGroupJids()
+    {
+        if (_noiseProcessor == null) return new List<string>();
+        return _noiseProcessor.GetGroupJids();
+    }
+
+    public Task<Dawa.Noise.GroupMetadata?> FetchGroupMetadataAsync(string groupJid, CancellationToken ct)
+    {
+        if (_noiseProcessor == null || _state != ConnectionState.Connected)
+            throw new InvalidOperationException("Client is not connected.");
+        return _noiseProcessor.FetchGroupMetadataAsync(groupJid, ct);
+    }
+
     // ─── Disconnection ───────────────────────────────────────────────────────
 
     /// <summary>Disconnects from WhatsApp and cleans up resources.</summary>

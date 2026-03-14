@@ -2165,6 +2165,84 @@ public sealed class NoiseProcessor : IAsyncDisposable
         serverSyncVersions = _serverSyncVersions.ToDictionary(kv => kv.Key, kv => kv.Value),
     };
 
+    // ─── Groups ──────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Returns the list of group JIDs from thread_metadata (those ending in @g.us).
+    /// </summary>
+    public List<string> GetGroupJids()
+        => _threadMetadata.Keys.Where(j => j.EndsWith("@g.us")).ToList();
+
+    /// <summary>
+    /// Fetches group metadata (name, participants) for a specific group JID.
+    /// Sends an IQ to the group's server and parses the response.
+    /// </summary>
+    public async Task<GroupMetadata?> FetchGroupMetadataAsync(string groupJid, CancellationToken ct)
+    {
+        if (!groupJid.EndsWith("@g.us"))
+            throw new ArgumentException("Not a group JID", nameof(groupJid));
+
+        var iq = new BinaryNode("iq", new Dictionary<string, string>
+        {
+            ["to"]    = groupJid,
+            ["type"]  = "get",
+            ["xmlns"] = "w:g2",
+            ["id"]    = GenerateMessageId(),
+        })
+        {
+            Content = new List<BinaryNode>
+            {
+                new BinaryNode("query", new Dictionary<string, string> { ["request"] = "interactive" }),
+            },
+        };
+
+        BinaryNode result;
+        try { result = await SendIQAsync(iq, ct, timeoutMs: 15000); }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "FetchGroupMetadataAsync: IQ failed for {Group}", groupJid);
+            return null;
+        }
+
+        // Response: <iq type="result"><group id="..." subject="..." creator="..." creation="...">
+        //               <participant type="admin" jid="..."/><participant jid="..."/>...</group></iq>
+        var groupNode = FindDeep(result, "group");
+        if (groupNode == null)
+        {
+            _logger.LogWarning("FetchGroupMetadataAsync: no <group> node in response for {Group}", groupJid);
+            return null;
+        }
+
+        var subject  = groupNode.GetAttr("subject") ?? "";
+        var creator  = groupNode.GetAttr("creator") ?? "";
+        var creation = groupNode.GetAttr("creation") ?? "0";
+        long.TryParse(creation, out var creationTs);
+
+        var participants = groupNode.GetChildren("participant").Select(p => new GroupParticipant(
+            Jid:  p.GetAttr("jid") ?? "",
+            Type: p.GetAttr("type") ?? "member"
+        )).Where(p => !string.IsNullOrEmpty(p.Jid)).ToList();
+
+        return new GroupMetadata(
+            Jid: groupJid,
+            Subject: subject,
+            Creator: creator,
+            CreationTimestamp: creationTs,
+            Participants: participants
+        );
+    }
+
+    private static BinaryNode? FindDeep(BinaryNode node, string tag)
+    {
+        if (node.Tag == tag) return node;
+        foreach (var child in node.Children)
+        {
+            var found = FindDeep(child, tag);
+            if (found != null) return found;
+        }
+        return null;
+    }
+
     public async ValueTask DisposeAsync()
     {
         _keepAliveCts?.Cancel();
@@ -2172,6 +2250,9 @@ public sealed class NoiseProcessor : IAsyncDisposable
         await ValueTask.CompletedTask;
     }
 }
+
+public record GroupParticipant(string Jid, string Type);
+public record GroupMetadata(string Jid, string Subject, string Creator, long CreationTimestamp, List<GroupParticipant> Participants);
 
 // PresenceInfo record — lives in Dawa.Noise namespace
 public record PresenceInfo(string Jid, string Status, DateTime LastSeen);

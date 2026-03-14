@@ -270,6 +270,68 @@ public class WhatsAppBridgeService : IAsyncDisposable
             .ToList();
     }
 
+    public async Task<List<object>?> GetGroupsAsync(string sessionId)
+    {
+        if (!_clients.TryGetValue(sessionId, out var client) || !client.IsConnected)
+            return null;
+
+        var groupJids = client.GetGroupJids();
+        var result = new List<object>();
+
+        foreach (var gid in groupJids)
+        {
+            try
+            {
+                var meta = await client.FetchGroupMetadataAsync(gid, CancellationToken.None);
+                if (meta != null)
+                {
+                    result.Add(new
+                    {
+                        jid          = meta.Jid,
+                        subject      = meta.Subject,
+                        creator      = meta.Creator,
+                        createdAt    = meta.CreationTimestamp,
+                        memberCount  = meta.Participants.Count,
+                    });
+                }
+                else
+                {
+                    result.Add(new { jid = gid, subject = (string?)null, error = "metadata_unavailable" });
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "GetGroupsAsync: failed to fetch metadata for {Gid}", gid);
+                result.Add(new { jid = gid, subject = (string?)null, error = ex.Message });
+            }
+        }
+
+        return result;
+    }
+
+    public async Task<object?> GetGroupMembersAsync(string sessionId, string groupJid)
+    {
+        if (!_clients.TryGetValue(sessionId, out var client) || !client.IsConnected)
+            return null;
+
+        var meta = await client.FetchGroupMetadataAsync(groupJid, CancellationToken.None);
+        if (meta == null) return null;
+
+        return new
+        {
+            jid         = meta.Jid,
+            subject     = meta.Subject,
+            creator     = meta.Creator,
+            createdAt   = meta.CreationTimestamp,
+            memberCount = meta.Participants.Count,
+            members     = meta.Participants.Select(p => new
+            {
+                jid  = p.Jid,
+                type = p.Type,
+            }).ToList(),
+        };
+    }
+
     public Task<object?> CheckNumberStatusAsync(string sessionId, string number)
         => Task.FromResult<object?>(new { number, isWhatsApp = true });
 
