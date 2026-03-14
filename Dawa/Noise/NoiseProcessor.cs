@@ -817,8 +817,8 @@ public sealed class NoiseProcessor : IAsyncDisposable
                 }
                 catch (Exception parseEx)
                 {
-                    // Peer/device messages may not be standard WAMessage format
-                    _logger.LogDebug(parseEx, "Could not parse decrypted message as WAMessage from {Jid} ({Len} bytes, first={First})",
+                    // Peer/device messages may not be standard WAMessage format — log at Warning so we can diagnose
+                    _logger.LogWarning(parseEx, "Could not parse decrypted message as WAMessage from {Jid} ({Len} bytes, first={First})",
                         from, plaintext.Length, Convert.ToHexString(plaintext[..Math.Min(16, plaintext.Length)]));
                     _ = SendAckAsync(id, from, timestamp);
                     return;
@@ -2165,6 +2165,94 @@ public sealed class NoiseProcessor : IAsyncDisposable
         serverSyncVersions = _serverSyncVersions.ToDictionary(kv => kv.Key, kv => kv.Value),
     };
 
+    // ─── Message history ─────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Attempts to fetch message history for a JID using a w:msg sync IQ.
+    /// Returns an empty list if the server does not respond (companion devices may not support this).
+    /// Note: in-memory message cache is used as primary source; this IQ is a best-effort supplement.
+    /// </summary>
+    public async Task<List<IncomingMessage>> FetchMessageHistoryAsync(string jid, int count, CancellationToken ct)
+    {
+        // Normalize JID
+        var normalizedJid = jid.Contains('@') ? jid : $"{jid}@s.whatsapp.net";
+
+        var iq = new BinaryNode("iq", new Dictionary<string, string>
+        {
+            ["to"]    = "s.whatsapp.net",
+            ["type"]  = "set",
+            ["xmlns"] = "w:msg",
+            ["id"]    = GenerateMessageId(),
+        })
+        {
+            Content = new List<BinaryNode>
+            {
+                new BinaryNode("sync")
+                {
+                    Content = new List<BinaryNode>
+                    {
+                        new BinaryNode("conversation", new Dictionary<string, string>
+                        {
+                            ["jid"]   = normalizedJid,
+                            ["t"]     = "0",
+                            ["count"] = count.ToString(),
+                        }),
+                    },
+                },
+            },
+        };
+
+        try
+        {
+            _logger.LogInformation("FetchMessageHistoryAsync: sending w:msg sync IQ for {Jid}", normalizedJid);
+            var result = await SendIQAsync(iq, ct, timeoutMs: 20000);
+            _logger.LogInformation("FetchMessageHistoryAsync: w:msg result tag={Tag}", result.Tag);
+
+            // Parse any message nodes in the result
+            var messages = new List<IncomingMessage>();
+            var msgNodes = new List<BinaryNode>();
+            CollectNodes(result, "message", msgNodes);
+            foreach (var msgNode in msgNodes)
+            {
+                var text = msgNode.FindChild("body")?.Content as string
+                    ?? msgNode.GetAttr("body");
+                if (string.IsNullOrEmpty(text)) continue;
+
+                var from = msgNode.GetAttr("from") ?? "";
+                long.TryParse(msgNode.GetAttr("t"), out var ts);
+                var fromMe = from == _auth.Me?.Id?.Split(':')[0] + "@s.whatsapp.net";
+                messages.Add(new IncomingMessage
+                {
+                    Id        = msgNode.GetAttr("id") ?? "",
+                    From      = from,
+                    RemoteJid = normalizedJid,
+                    Text      = text,
+                    FromMe    = fromMe,
+                    Timestamp = ts,
+                });
+            }
+
+            return messages;
+        }
+        catch (TimeoutException)
+        {
+            _logger.LogInformation("FetchMessageHistoryAsync: w:msg IQ timed out (companion devices may not support history sync via IQ)");
+            return new List<IncomingMessage>();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "FetchMessageHistoryAsync: w:msg IQ failed for {Jid}", normalizedJid);
+            return new List<IncomingMessage>();
+        }
+    }
+
+    private static void CollectNodes(BinaryNode node, string tag, List<BinaryNode> result)
+    {
+        if (node.Tag == tag) result.Add(node);
+        foreach (var child in node.Children)
+            CollectNodes(child, tag, result);
+    }
+
     // ─── Groups ──────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -2218,10 +2306,33 @@ public sealed class NoiseProcessor : IAsyncDisposable
         var creation = groupNode.GetAttr("creation") ?? "0";
         long.TryParse(creation, out var creationTs);
 
-        var participants = groupNode.GetChildren("participant").Select(p => new GroupParticipant(
-            Jid:  p.GetAttr("jid") ?? "",
-            Type: p.GetAttr("type") ?? "member"
-        )).Where(p => !string.IsNullOrEmpty(p.Jid)).ToList();
+        // Participants — group IQ includes phone_number attribute for LID→phone resolution
+        var cacheUpdated = false;
+        var participants = groupNode.GetChildren("participant").Select(p =>
+        {
+            var lidJid   = p.GetAttr("jid") ?? "";
+            var phoneJid = p.GetAttr("phone_number");   // e.g. "254708713947@s.whatsapp.net"
+            var pType    = p.GetAttr("type") ?? "member";
+
+            // Populate LID→phone cache from the group response
+            if (!string.IsNullOrEmpty(lidJid) && !string.IsNullOrEmpty(phoneJid)
+                && !_lidToPhone.ContainsKey(lidJid))
+            {
+                _lidToPhone[lidJid] = phoneJid;
+                cacheUpdated = true;
+            }
+
+            // Resolve display JID to phone number JID where possible
+            var displayJid = (!string.IsNullOrEmpty(phoneJid)) ? phoneJid : lidJid;
+
+            return new GroupParticipant(
+                Jid:      displayJid,
+                LidJid:   lidJid,
+                Type:     pType
+            );
+        }).Where(p => !string.IsNullOrEmpty(p.Jid)).ToList();
+
+        if (cacheUpdated) SaveCacheToDisk();
 
         return new GroupMetadata(
             Jid: groupJid,
@@ -2251,7 +2362,7 @@ public sealed class NoiseProcessor : IAsyncDisposable
     }
 }
 
-public record GroupParticipant(string Jid, string Type);
+public record GroupParticipant(string Jid, string LidJid, string Type);
 public record GroupMetadata(string Jid, string Subject, string Creator, long CreationTimestamp, List<GroupParticipant> Participants);
 
 // PresenceInfo record — lives in Dawa.Noise namespace

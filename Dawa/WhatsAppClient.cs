@@ -222,6 +222,13 @@ public sealed class WhatsAppClient : IAsyncDisposable
         return _noiseProcessor.SendReadReceiptAsync(jid, messageId, timestamp, ct);
     }
 
+    public Task<List<Dawa.Messages.IncomingMessage>> FetchMessageHistoryAsync(string jid, int count, CancellationToken ct)
+    {
+        if (_noiseProcessor == null || _state != ConnectionState.Connected)
+            return Task.FromResult(new List<Dawa.Messages.IncomingMessage>());
+        return _noiseProcessor.FetchMessageHistoryAsync(jid, count, ct);
+    }
+
     public List<string> GetGroupJids()
     {
         if (_noiseProcessor == null) return new List<string>();

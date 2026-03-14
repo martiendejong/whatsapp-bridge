@@ -331,6 +331,17 @@ public class WhatsAppController : ControllerBase
         }
     }
 
+    [HttpGet("sessions/{sessionId}/messages/{chatId}")]
+    public async Task<IActionResult> GetMessages(string sessionId, string chatId, [FromQuery] int limit = 50)
+    {
+        var userId = GetUserId();
+        var session = await _context.WhatsAppSessions
+            .FirstOrDefaultAsync(s => s.SessionId == sessionId && s.UserId == userId);
+        if (session == null) return NotFound();
+        var messages = await _whatsappService.GetMessagesAsync(sessionId, chatId, limit);
+        return Ok(messages ?? new List<WhatsAppMessage>());
+    }
+
     [HttpGet("sessions/{sessionId}/groups")]
     public async Task<IActionResult> GetGroups(string sessionId)
     {
@@ -352,6 +363,22 @@ public class WhatsAppController : ControllerBase
         var meta = await _whatsappService.GetGroupMembersAsync(sessionId, groupJid);
         if (meta == null) return NotFound(new { error = "Group not found or not connected" });
         return Ok(meta);
+    }
+
+    /// <summary>Test messages fetch (anonymous, dev only).</summary>
+    [AllowAnonymous]
+    [HttpGet("test-messages/{sessionId}/{chatId}")]
+    public async Task<IActionResult> TestMessages(string sessionId, string chatId, [FromQuery] int limit = 50)
+    {
+        try
+        {
+            var messages = await _whatsappService.GetMessagesAsync(sessionId, chatId, limit);
+            return Ok(new { count = messages?.Count ?? 0, messages });
+        }
+        catch (Exception ex)
+        {
+            return Ok(new { error = ex.Message });
+        }
     }
 
     /// <summary>Test groups fetch (anonymous, dev only).</summary>

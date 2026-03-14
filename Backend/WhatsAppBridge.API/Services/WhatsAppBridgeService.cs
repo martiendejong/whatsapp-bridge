@@ -57,6 +57,9 @@ public class WhatsAppBridgeService : IAsyncDisposable
         var client = WhatsAppClient.Create(sessionDir, _loggerFactory);
         _clients[sessionId] = client;
 
+        // Load persisted messages from previous sessions
+        LoadPersistedMessages(sessionId);
+
         // Wire events — these fire from background threads
         var qrTcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
         var everConnected = false;
@@ -137,6 +140,9 @@ public class WhatsAppBridgeService : IAsyncDisposable
         var client = WhatsAppClient.Create(sessionDir, _loggerFactory);
         _clients[sessionId] = client;
 
+        // Load persisted messages from previous sessions
+        LoadPersistedMessages(sessionId);
+
         client.QRCodeReceived += (_, qr) =>
             _ = UpdateSessionAsync(sessionId, s => s.QrCode = qr);
 
@@ -207,8 +213,7 @@ public class WhatsAppBridgeService : IAsyncDisposable
 
         lock (msgs)
         {
-            var slice = msgs.TakeLast(limit).ToList();
-            return Task.FromResult<List<WhatsAppMessage>?>(slice);
+            return Task.FromResult<List<WhatsAppMessage>?>(msgs.TakeLast(limit).ToList());
         }
     }
 
@@ -326,8 +331,9 @@ public class WhatsAppBridgeService : IAsyncDisposable
             memberCount = meta.Participants.Count,
             members     = meta.Participants.Select(p => new
             {
-                jid  = p.Jid,
-                type = p.Type,
+                jid    = p.Jid,
+                lidJid = string.IsNullOrEmpty(p.LidJid) ? null : p.LidJid,
+                type   = p.Type,
             }).ToList(),
         };
     }
@@ -336,6 +342,49 @@ public class WhatsAppBridgeService : IAsyncDisposable
         => Task.FromResult<object?>(new { number, isWhatsApp = true });
 
     // ─── Helpers ──────────────────────────────────────────────────────────────
+
+    private string GetMessageStorePath(string sessionId)
+    {
+        var sessionsRoot = _configuration["WhatsApp:SessionsDirectory"]
+            ?? Path.Combine(AppContext.BaseDirectory, "whatsapp-sessions");
+        return Path.Combine(sessionsRoot, sessionId, "message-store.json");
+    }
+
+    private void LoadPersistedMessages(string sessionId)
+    {
+        try
+        {
+            var path = GetMessageStorePath(sessionId);
+            if (!File.Exists(path)) return;
+            var json = File.ReadAllText(path);
+            var dict = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, List<WhatsAppMessage>>>(json);
+            if (dict == null) return;
+            foreach (var kv in dict)
+                _messageStore[$"{sessionId}:{kv.Key}"] = kv.Value;
+            _logger.LogInformation("Loaded {Count} chats from message store for session {SessionId}",
+                dict.Count, sessionId);
+        }
+        catch (Exception ex) { _logger.LogWarning(ex, "Failed to load message store for {SessionId}", sessionId); }
+    }
+
+    private void PersistMessages(string sessionId)
+    {
+        try
+        {
+            var prefix = $"{sessionId}:";
+            var dict = new Dictionary<string, List<WhatsAppMessage>>();
+            foreach (var kv in _messageStore)
+            {
+                if (!kv.Key.StartsWith(prefix)) continue;
+                var jid = kv.Key.Substring(prefix.Length);
+                lock (kv.Value) { dict[jid] = kv.Value.ToList(); }
+            }
+            var path = GetMessageStorePath(sessionId);
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllText(path, System.Text.Json.JsonSerializer.Serialize(dict));
+        }
+        catch (Exception ex) { _logger.LogWarning(ex, "Failed to persist message store for {SessionId}", sessionId); }
+    }
 
     private void StoreMessage(string sessionId, Dawa.Messages.IncomingMessage msg)
     {
@@ -350,12 +399,17 @@ public class WhatsAppBridgeService : IAsyncDisposable
         var list = _messageStore.GetOrAdd(key, _ => new List<WhatsAppMessage>());
         lock (list)
         {
+            // Deduplicate by message ID
+            if (list.Any(m => m.Id == stored.Id)) return;
             list.Add(stored);
             if (list.Count > MaxMessagesPerChat)
                 list.RemoveAt(0); // drop oldest
         }
 
         _logger.LogInformation("Stored message [{Id}] from {From} in chat {Chat}", msg.Id, msg.From, msg.RemoteJid);
+
+        // Persist to disk after each new message (bounded store → small file)
+        PersistMessages(sessionId);
     }
 
     public bool IsSessionConnected(string sessionId)
