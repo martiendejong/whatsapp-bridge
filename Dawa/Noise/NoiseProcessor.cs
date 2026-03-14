@@ -54,6 +54,9 @@ public sealed class NoiseProcessor : IAsyncDisposable
     // We do NOT break the receive loop — only a stream:error or socket close causes a reconnect.
     public byte[]? PendingRoutingInfo { get; private set; }
 
+    // Shared HttpClient for CDN media uploads
+    private static readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(60) };
+
     public event EventHandler<string>? QRCodeGenerated;
     public event EventHandler<AuthState>? Authenticated;
     public event EventHandler<IncomingMessage>? MessageReceived;
@@ -1129,14 +1132,15 @@ public sealed class NoiseProcessor : IAsyncDisposable
                     }
                 }
             }
+        }
 
-            // If this notification has an ID that matches a pending IQ, resolve it so callers unblock.
-            if (!string.IsNullOrEmpty(id) && _pendingIqs.TryGetValue(id, out var tcs))
-            {
-                _pendingIqs.Remove(id);
-                _logger.LogInformation("Resolved pending IQ {Id} via server_sync notification", id);
-                tcs.TrySetResult(notification);
-            }
+        // Generic: if any notification has an ID matching a pending IQ, resolve it.
+        // WhatsApp sometimes sends IQ responses as notifications (e.g. w:app:state:sync, potentially w:m).
+        if (!string.IsNullOrEmpty(id) && _pendingIqs.TryGetValue(id, out var pendingTcs))
+        {
+            _pendingIqs.Remove(id);
+            _logger.LogInformation("Resolved pending IQ {Id} via {Type} notification", id, type);
+            pendingTcs.TrySetResult(notification);
         }
     }
 
@@ -1293,6 +1297,432 @@ public sealed class NoiseProcessor : IAsyncDisposable
         await SendNodeAsync(msgNode, ct);
         _logger.LogInformation("Sent encrypted message to {Jid} via {RecipientCount}+{SenderCount} devices",
             normalizedJid, recipientDeviceJids.Count, senderDeviceJids.Count);
+    }
+
+    /// <summary>
+    /// Sends an emoji reaction to a specific message.
+    /// </summary>
+    /// <param name="targetJid">The chat JID (e.g. "31612345678@s.whatsapp.net") containing the target message.</param>
+    /// <param name="targetMessageId">The ID of the message to react to.</param>
+    /// <param name="targetFromMe">Whether the target message was sent by us.</param>
+    /// <param name="emoji">The reaction emoji, e.g. "👍". Pass "" to remove an existing reaction.</param>
+    public async Task SendReactionAsync(string targetJid, string targetMessageId, bool targetFromMe, string emoji, CancellationToken ct)
+    {
+        var normalizedJid = targetJid.Contains('@') ? targetJid : $"{targetJid.TrimStart('+')}@s.whatsapp.net";
+        var phoneNumber   = normalizedJid.Split('@')[0].Split(':')[0];
+
+        // Get recipient device list
+        List<string> recipientDeviceJids;
+        try { recipientDeviceJids = await GetDeviceListAsync(phoneNumber, ct); }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to get device list for {Phone}, using fallback", phoneNumber);
+            recipientDeviceJids = [$"{phoneNumber}:0@s.whatsapp.net"];
+        }
+
+        // Get sender's own devices for multi-device sync
+        var senderDeviceJids = new List<string>();
+        var myJid = _auth.Me?.Id;
+        if (myJid != null)
+        {
+            var myPhone = myJid.Split('@')[0].Split(':')[0];
+            try
+            {
+                var myDevices = await GetDeviceListAsync(myPhone, ct);
+                foreach (var d in myDevices)
+                {
+                    if (d == myJid) continue;
+                    senderDeviceJids.Add(d);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to get sender device list for reaction, skipping multi-device sync");
+            }
+        }
+
+        var allDeviceJids = new List<string>(recipientDeviceJids);
+        allDeviceJids.AddRange(senderDeviceJids);
+
+        // Fetch pre-key bundles for devices without sessions
+        var needBundles = allDeviceJids.Where(d => !_signalStore.HasSession(d)).ToList();
+        if (needBundles.Count > 0)
+        {
+            try
+            {
+                var bundles = await FetchPreKeyBundlesAsync(needBundles, ct);
+                foreach (var (deviceJid, bundle) in bundles)
+                {
+                    try { _signalStore.InitOutgoingSession(deviceJid, bundle, _auth); }
+                    catch (Exception ex2) { _logger.LogWarning(ex2, "Failed to init session for {Jid}", deviceJid); }
+                }
+            }
+            catch (Exception ex) { _logger.LogWarning(ex, "Failed to fetch pre-key bundles for reaction"); }
+        }
+
+        // Build reaction proto
+        var reactionProto = new WAMessage
+        {
+            ReactionMessage = new Dawa.Proto.ReactionMessage
+            {
+                Key = new Dawa.Proto.MessageKey
+                {
+                    RemoteJid = normalizedJid,
+                    FromMe    = targetFromMe,
+                    Id        = targetMessageId,
+                },
+                Text              = emoji,
+                SenderTimestampMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            }
+        };
+
+        var recipientProto = PadMessage(reactionProto.ToByteArrayWithReaction());
+
+        // For own devices, same payload (reactions are not wrapped in DeviceSentMessage)
+        byte[]? senderProto = senderDeviceJids.Count > 0 ? recipientProto : null;
+
+        var msgId    = GenerateMessageId();
+        var hasPkMsg = false;
+        var toNodes  = new List<BinaryNode>();
+
+        foreach (var deviceJid in recipientDeviceJids)
+        {
+            var node = EncryptForDevice(deviceJid, recipientProto, ref hasPkMsg);
+            if (node != null) toNodes.Add(node);
+        }
+        foreach (var deviceJid in senderDeviceJids)
+        {
+            var node = EncryptForDevice(deviceJid, senderProto!, ref hasPkMsg);
+            if (node != null) toNodes.Add(node);
+        }
+
+        if (toNodes.Count == 0)
+        {
+            _logger.LogError("No devices encrypted successfully for reaction to {Jid}", normalizedJid);
+            return;
+        }
+
+        var participantsNode = new BinaryNode("participants") { Content = toNodes };
+        var contentNodes     = new List<BinaryNode> { participantsNode };
+
+        if (hasPkMsg && _auth.Account != null)
+        {
+            var accountProto       = ADVSignedDeviceIdentity.ParseFrom(_auth.Account);
+            var deviceIdentityBytes = accountProto.ToByteArray();
+            contentNodes.Add(new BinaryNode("device-identity") { Content = deviceIdentityBytes });
+        }
+
+        var msgNode = new BinaryNode("message", new Dictionary<string, string>
+        {
+            ["id"]   = msgId,
+            ["type"] = "reaction",
+            ["to"]   = normalizedJid,
+        }) { Content = contentNodes };
+
+        await SendNodeAsync(msgNode, ct);
+        _logger.LogInformation("Sent reaction '{Emoji}' to message {MsgId} in {Jid}", emoji, targetMessageId, normalizedJid);
+    }
+
+    /// <summary>
+    /// Sends a media message (image, audio, or document) to a JID.
+    /// <paramref name="mediaType"/> must be "image", "audio", or "document".
+    /// <paramref name="fileBytes"/> is the raw (unencrypted) file bytes.
+    /// <paramref name="mimeType"/> e.g. "image/jpeg", "audio/ogg; codecs=opus", "application/pdf".
+    /// <paramref name="caption"/> optional text (images only).
+    /// <paramref name="fileName"/> optional file name (documents).
+    /// </summary>
+    public async Task SendMediaAsync(string jid, byte[] fileBytes, string mediaType, string mimeType,
+        string caption, string fileName, CancellationToken ct)
+    {
+        var normalizedJid = jid.Contains('@') ? jid : $"{jid.TrimStart('+')}@s.whatsapp.net";
+        var phoneNumber   = normalizedJid.Split('@')[0].Split(':')[0];
+
+        // 1. Encrypt the media
+        var enc = Dawa.Crypto.MediaCrypto.Encrypt(fileBytes, mediaType);
+        _logger.LogInformation("Media encrypted: {Bytes} → {EncBytes} bytes for {Type}", fileBytes.Length, enc.EncryptedBytes.Length, mediaType);
+
+        // 2. Get upload URL from WhatsApp server via w:m IQ (Baileys pattern)
+        var encSha256B64 = Convert.ToBase64String(enc.FileEncSha256);
+        var (mediaUrl, directPath, uploadAuth) = await RequestMediaUploadUrlAsync(mediaType, enc.EncryptedBytes.Length, encSha256B64, ct);
+        _logger.LogInformation("Media upload URL: {Url} directPath={DP}", mediaUrl, directPath);
+
+        // 3. Upload encrypted bytes to CDN (raw binary, application/octet-stream).
+        // The content is encrypted so the actual MIME type is irrelevant; CDN accepts octet-stream.
+        // URL already contains ?auth=...&token=... from RequestMediaUploadUrlAsync.
+        var rawContent = new ByteArrayContent(enc.EncryptedBytes);
+        rawContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
+
+        using var uploadRequest = new HttpRequestMessage(HttpMethod.Post, mediaUrl)
+        {
+            Content = rawContent,
+        };
+        uploadRequest.Headers.TryAddWithoutValidation("Origin", "https://web.whatsapp.com");
+        uploadRequest.Headers.TryAddWithoutValidation("Referer", "https://web.whatsapp.com/");
+
+        // Diagnostic: write full URL + encrypted bytes to disk so we can reproduce the upload via curl
+        try {
+            var diagDir = @"C:\inetpub\whatsappbridge-api\logs";
+            System.IO.File.WriteAllText(System.IO.Path.Combine(diagDir, "cdn-upload-debug.txt"),
+                $"URL: {mediaUrl}\nEncBytes: {enc.EncryptedBytes.Length}\nContentType: application/octet-stream\nToken: {encSha256B64.Replace('+','-').Replace('/','_').TrimEnd('=')}\nPlain b64: {encSha256B64}\n");
+            System.IO.File.WriteAllBytes(System.IO.Path.Combine(diagDir, "cdn-upload-bytes.bin"), enc.EncryptedBytes);
+        } catch { }
+        _logger.LogInformation("Uploading {Bytes} bytes ({Mime}) to CDN: {Url}", enc.EncryptedBytes.Length, mimeType, mediaUrl);
+        var uploadResp = await _http.SendAsync(uploadRequest, ct);
+        var respBody = await uploadResp.Content.ReadAsStringAsync(ct);
+        _logger.LogInformation("CDN upload response: {Status} body={Body}", uploadResp.StatusCode, respBody);
+
+        // Diagnostic: capture CDN response to disk for offline analysis
+        try {
+            var diagDir = @"C:\inetpub\whatsappbridge-api\logs";
+            var respHeaders = string.Join("\n", uploadResp.Headers.Select(h => $"{h.Key}: {string.Join(", ", h.Value)}"))
+                            + "\n" + string.Join("\n", uploadResp.Content.Headers.Select(h => $"{h.Key}: {string.Join(", ", h.Value)}"));
+            System.IO.File.WriteAllText(System.IO.Path.Combine(diagDir, "cdn-upload-response.txt"),
+                $"Status: {(int)uploadResp.StatusCode} {uploadResp.StatusCode}\nTimestamp: {DateTime.UtcNow:u}\n--- Response Headers ---\n{respHeaders}\n--- Response Body ---\n{respBody}\n");
+        } catch { }
+
+        if (!uploadResp.IsSuccessStatusCode)
+            throw new InvalidOperationException($"CDN upload failed: {uploadResp.StatusCode} - {respBody[..Math.Min(200, respBody.Length)]}");
+
+        // Parse CDN JSON response for final url + directPath
+        var cdnJson = respBody;
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(cdnJson);
+            var root = doc.RootElement;
+            if (root.TryGetProperty("url", out var urlProp) && urlProp.GetString() is { Length: > 0 } finalUrl)
+                mediaUrl = finalUrl;
+            if (root.TryGetProperty("direct_path", out var dpProp) && dpProp.GetString() is { Length: > 0 } finalDp)
+                directPath = finalDp;
+        }
+        catch (Exception ex) { _logger.LogWarning(ex, "Failed to parse CDN response JSON"); }
+        _logger.LogInformation("Media uploaded: url={Url} directPath={DP}", mediaUrl, directPath);
+
+        // 4. Build media proto node
+        WAMessage mediaMsg;
+        switch (mediaType)
+        {
+            case "image":
+                mediaMsg = new WAMessage
+                {
+                    ImageMessage = new Dawa.Proto.ImageMessage
+                    {
+                        Url              = mediaUrl,
+                        DirectPath       = directPath,
+                        MimeType         = mimeType,
+                        Caption          = caption,
+                        FileSha256       = enc.FileSha256,
+                        FileEncSha256    = enc.FileEncSha256,
+                        FileLength       = (ulong)enc.FileLength,
+                        MediaKey         = enc.MediaKey,
+                        MediaKeyTimestamp = enc.MediaKeyTimestamp,
+                    }
+                };
+                break;
+            case "audio":
+                mediaMsg = new WAMessage
+                {
+                    AudioMessage = new Dawa.Proto.AudioMessage
+                    {
+                        Url              = mediaUrl,
+                        DirectPath       = directPath,
+                        MimeType         = mimeType,
+                        FileSha256       = enc.FileSha256,
+                        FileEncSha256    = enc.FileEncSha256,
+                        FileLength       = (ulong)enc.FileLength,
+                        MediaKey         = enc.MediaKey,
+                        MediaKeyTimestamp = enc.MediaKeyTimestamp,
+                        Ptt              = mimeType.Contains("ogg"),
+                    }
+                };
+                break;
+            default: // document
+                mediaMsg = new WAMessage
+                {
+                    DocumentMessage = new Dawa.Proto.DocumentMessage
+                    {
+                        Url              = mediaUrl,
+                        DirectPath       = directPath,
+                        MimeType         = mimeType,
+                        Title            = string.IsNullOrEmpty(caption) ? fileName : caption,
+                        FileName         = fileName,
+                        FileSha256       = enc.FileSha256,
+                        FileEncSha256    = enc.FileEncSha256,
+                        FileLength       = (ulong)enc.FileLength,
+                        MediaKey         = enc.MediaKey,
+                        MediaKeyTimestamp = enc.MediaKeyTimestamp,
+                    }
+                };
+                break;
+        }
+
+        // 5. Get device lists (same as text/reaction)
+        List<string> recipientDeviceJids;
+        try { recipientDeviceJids = await GetDeviceListAsync(phoneNumber, ct); }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to get device list for {Phone}, using fallback", phoneNumber);
+            recipientDeviceJids = [$"{phoneNumber}:0@s.whatsapp.net"];
+        }
+
+        var senderDeviceJids = new List<string>();
+        var myJid = _auth.Me?.Id;
+        if (myJid != null)
+        {
+            var myPhone = myJid.Split('@')[0].Split(':')[0];
+            try
+            {
+                var myDevices = await GetDeviceListAsync(myPhone, ct);
+                foreach (var d in myDevices)
+                {
+                    if (d == myJid) continue;
+                    senderDeviceJids.Add(d);
+                }
+            }
+            catch (Exception ex) { _logger.LogWarning(ex, "Failed to get sender device list for media"); }
+        }
+
+        var allDeviceJids = new List<string>(recipientDeviceJids);
+        allDeviceJids.AddRange(senderDeviceJids);
+
+        var needBundles = allDeviceJids.Where(d => !_signalStore.HasSession(d)).ToList();
+        if (needBundles.Count > 0)
+        {
+            try
+            {
+                var bundles = await FetchPreKeyBundlesAsync(needBundles, ct);
+                foreach (var (deviceJid, bundle) in bundles)
+                {
+                    try { _signalStore.InitOutgoingSession(deviceJid, bundle, _auth); }
+                    catch (Exception ex2) { _logger.LogWarning(ex2, "Failed to init session for {Jid}", deviceJid); }
+                }
+            }
+            catch (Exception ex) { _logger.LogWarning(ex, "Failed to fetch pre-key bundles for media"); }
+        }
+
+        // 6. Encrypt for each device
+        var recipientProto = PadMessage(mediaMsg.ToByteArrayWithMedia());
+        byte[]? senderProto = null;
+        if (senderDeviceJids.Count > 0)
+        {
+            var deviceSentMsg = new WAMessage
+            {
+                DeviceSentMessage = new Dawa.Proto.DeviceSentMessage
+                {
+                    DestinationJid = normalizedJid,
+                    Message        = mediaMsg,
+                }
+            };
+            senderProto = PadMessage(deviceSentMsg.ToByteArray());
+        }
+
+        var msgId    = GenerateMessageId();
+        var hasPkMsg = false;
+        var toNodes  = new List<BinaryNode>();
+
+        foreach (var deviceJid in recipientDeviceJids)
+        {
+            var node = EncryptForDevice(deviceJid, recipientProto, ref hasPkMsg);
+            if (node != null) toNodes.Add(node);
+        }
+        if (senderProto != null)
+        {
+            foreach (var deviceJid in senderDeviceJids)
+            {
+                var node = EncryptForDevice(deviceJid, senderProto, ref hasPkMsg);
+                if (node != null) toNodes.Add(node);
+            }
+        }
+
+        if (toNodes.Count == 0)
+        {
+            _logger.LogError("No devices encrypted for media to {Jid}", normalizedJid);
+            return;
+        }
+
+        // 7. Build and send message node
+        var participantsNode = new BinaryNode("participants") { Content = toNodes };
+        var contentNodes     = new List<BinaryNode> { participantsNode };
+
+        if (hasPkMsg && _auth.Account != null)
+        {
+            var accountProto        = ADVSignedDeviceIdentity.ParseFrom(_auth.Account);
+            contentNodes.Add(new BinaryNode("device-identity") { Content = accountProto.ToByteArray() });
+        }
+
+        var msgNode = new BinaryNode("message", new Dictionary<string, string>
+        {
+            ["id"]   = msgId,
+            ["type"] = "media",
+            ["to"]   = normalizedJid,
+        }) { Content = contentNodes };
+
+        await SendNodeAsync(msgNode, ct);
+        _logger.LogInformation("Sent {Type} media to {Jid} ({Bytes} bytes)", mediaType, normalizedJid, fileBytes.Length);
+    }
+
+    /// <summary>
+    /// Requests a media upload URL from WhatsApp.
+    /// Tries the Baileys w:m IQ (type=set, media_conn) first.
+    /// Falls back to direct mmg.whatsapp.net upload URL if the IQ times out
+    /// (the server silently ignores w:m IQs for companion device sessions).
+    /// Returns (uploadUrl, directPath, authToken).
+    /// </summary>
+    private async Task<(string Url, string DirectPath, string Auth)> RequestMediaUploadUrlAsync(
+        string mediaType, long encryptedSize, string fileEncSha256B64, CancellationToken ct)
+    {
+        // --- Attempt 1: Baileys exact pattern (type=set, inner <media_conn/>, to=s.whatsapp.net) ---
+        try
+        {
+            var mediaConnNode = new BinaryNode("media_conn", new Dictionary<string, string>());
+            var iq = new BinaryNode("iq", new Dictionary<string, string>
+            {
+                ["id"]    = GenerateMessageId(),
+                ["to"]    = "s.whatsapp.net",   // no @, encodes as dict token — matches Baileys S_WHATSAPP_NET
+                ["xmlns"] = "w:m",
+                ["type"]  = "set",
+            }) { Content = new List<BinaryNode> { mediaConnNode } };
+
+            _logger.LogInformation("Requesting media_conn via w:m set IQ (Baileys pattern)");
+            var result = await SendIQAsync(iq, ct, timeoutMs: 8000);
+
+            // Response: <iq type="result"><media_conn auth="..." ttl="..." ...><host hostname="mmg.whatsapp.net" .../></media_conn></iq>
+            var mcNode = result.FindChild("media_conn") ?? FindDeep(result, "media_conn");
+            if (mcNode != null)
+            {
+                var auth       = mcNode.GetAttr("auth") ?? "";
+                // Pick first host that has an <upload/> child; fall back to first host
+                var uploadHost = mcNode.Children.FirstOrDefault(h => h.Tag == "host" && h.Children.Any(c => c.Tag == "upload"))
+                                 ?? mcNode.Children.FirstOrDefault(h => h.Tag == "host");
+                var hostName   = uploadHost?.GetAttr("hostname") ?? "mmg.whatsapp.net";
+                // Token: base64url (RFC 4648) — Baileys uses: replace +→- /→_ strip =, then encodeURIComponent.
+                // Result is already URL-safe so encodeURIComponent is a no-op for these chars.
+                var tokenB64   = Uri.EscapeDataString(fileEncSha256B64.Replace('+', '-').Replace('/', '_').TrimEnd('='));
+                // Baileys URL: https://{host}/mms/{type}/{token}?auth={auth}&token={token}
+                // The token appears both in the URL PATH and as a query param.
+                var uploadUrl  = $"https://{hostName}/mms/{mediaType}/{tokenB64}?auth={Uri.EscapeDataString(auth)}&token={tokenB64}";
+                _logger.LogInformation("Got media_conn auth, upload to {Host}", hostName);
+                return (uploadUrl, "", auth);
+            }
+
+            // IQ returned something but no media_conn child — log and fall through
+            _logger.LogWarning("w:m IQ result had no media_conn child, falling back to direct upload");
+        }
+        catch (TimeoutException)
+        {
+            _logger.LogWarning("w:m IQ timed out (server ignores companion device w:m IQs) — using direct mmg upload");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "w:m IQ failed — using direct mmg upload");
+        }
+
+        // --- Fallback: direct upload to mmg.whatsapp.net without auth token ---
+        // Some companion device implementations upload directly using the encrypted hash as token.
+        // URL format used by open-source WA clients when no media_conn auth is available.
+        var hashB64Url = Uri.EscapeDataString(fileEncSha256B64.Replace('+', '-').Replace('/', '_').TrimEnd('='));
+        var directUploadUrl = $"https://mmg.whatsapp.net/mms/{mediaType}/{hashB64Url}?hash={hashB64Url}&type={mediaType}&v=4";
+        _logger.LogInformation("Using direct mmg upload URL for {Type}", mediaType);
+        return (directUploadUrl, "", "");
     }
 
     /// <summary>Pads a proto-encoded message with random PKCS7-style padding (Baileys: writeRandomPadMax16).</summary>

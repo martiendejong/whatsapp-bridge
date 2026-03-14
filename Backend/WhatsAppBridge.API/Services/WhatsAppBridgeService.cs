@@ -193,11 +193,19 @@ public class WhatsAppBridgeService : IAsyncDisposable
         return new { success = true };
     }
 
-    public Task<object?> SendMediaAsync(string sessionId, string to, string mediaUrl, string? caption)
+    public async Task<object?> SendReactionAsync(string sessionId, string to, string messageId, bool fromMe, string emoji)
     {
-        // Media sending not yet implemented in Dawa
-        throw new WhatsAppServiceException(WhatsAppError.MessageFailed(
-            "Media sending is not yet supported by the Dawa client."));
+        var client = GetConnectedClient(sessionId);
+        await client.SendReactionAsync(to, messageId, fromMe, emoji, CancellationToken.None);
+        return new { success = true };
+    }
+
+    public async Task<object?> SendMediaAsync(string sessionId, string to, string mediaType,
+        string mimeType, byte[] fileBytes, string caption, string fileName)
+    {
+        var client = GetConnectedClient(sessionId);
+        await client.SendMediaAsync(to, fileBytes, mediaType, mimeType, caption, fileName);
+        return new { success = true };
     }
 
     // ─── Read operations (not yet implemented in Dawa) ────────────────────────

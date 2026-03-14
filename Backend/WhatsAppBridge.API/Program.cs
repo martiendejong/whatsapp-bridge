@@ -124,9 +124,9 @@ using (var scope = app.Services.CreateScope())
     var sessionsRoot = app.Configuration["WhatsApp:SessionsDirectory"]
         ?? Path.Combine(AppContext.BaseDirectory, "whatsapp-sessions");
 
-    // Restore any session that has a saved creds.json, regardless of last-known DB status
+    // Restore any session that has a saved creds.json, regardless of last-known DB status.
+    // Do NOT filter by status — "failed" sessions have creds and can still reconnect.
     var allSessions = db.WhatsAppSessions
-        .Where(s => s.Status == "connected" || s.Status == "disconnected")
         .Select(s => s.SessionId)
         .ToList();
     foreach (var sessionId in allSessions)
