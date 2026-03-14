@@ -41,6 +41,8 @@ export const whatsapp = {
   testSession: (sessionId: string) => api.post(`/api/whatsapp/sessions/${sessionId}/test`),
   sendMessage: (sessionId: string, to: string, message: string) =>
     api.post(`/api/whatsapp/sessions/${sessionId}/send`, { To: to, Message: message }),
+  getContacts: (sessionId: string) =>
+    api.get(`/api/whatsapp/sessions/${sessionId}/contacts`),
 };
 
 export default api;

@@ -151,6 +151,20 @@ public class WhatsAppController : ControllerBase
 
     public record SendRequest(string To, string Message);
 
+    [HttpGet("sessions/{sessionId}/contacts")]
+    public async Task<IActionResult> GetContacts(string sessionId)
+    {
+        var userId = GetUserId();
+        var session = await _context.WhatsAppSessions
+            .FirstOrDefaultAsync(s => s.SessionId == sessionId && s.UserId == userId);
+
+        if (session == null)
+            return NotFound(new { error = "Session not found" });
+
+        var contacts = await _whatsappService.GetContactsAsync(sessionId);
+        return Ok(contacts ?? new List<WhatsAppContact>());
+    }
+
     /// <summary>
     /// Test endpoint for sending messages without auth (dev only).
     /// </summary>

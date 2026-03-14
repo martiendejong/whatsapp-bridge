@@ -10,6 +10,17 @@ interface SendForm {
   result: { success: boolean; message: string } | null;
 }
 
+interface Contact {
+  jid: string;
+  name: string;
+  phoneNumber: string;
+}
+
+interface ContactsPanel {
+  loading: boolean;
+  contacts: Contact[];
+}
+
 export default function WhatsAppSessions() {
   const [sessions, setSessions] = useState<WhatsAppSession[]>([]);
   const [loading, setLoading] = useState(true);
@@ -20,6 +31,7 @@ export default function WhatsAppSessions() {
   const [testingId, setTestingId] = useState<number | null>(null);
   const [testResults, setTestResults] = useState<{ [key: number]: { success: boolean; message: string; details?: any } }>({});
   const [sendForms, setSendForms] = useState<{ [key: string]: SendForm }>({});
+  const [contactPanels, setContactPanels] = useState<{ [key: string]: ContactsPanel }>({});
 
   useEffect(() => {
     loadSessions();
@@ -174,6 +186,24 @@ export default function WhatsAppSessions() {
     }
   };
 
+  const toggleContacts = async (sessionId: string) => {
+    if (contactPanels[sessionId]) {
+      setContactPanels((prev) => {
+        const updated = { ...prev };
+        delete updated[sessionId];
+        return updated;
+      });
+      return;
+    }
+    setContactPanels((prev) => ({ ...prev, [sessionId]: { loading: true, contacts: [] } }));
+    try {
+      const response = await whatsapp.getContacts(sessionId);
+      setContactPanels((prev) => ({ ...prev, [sessionId]: { loading: false, contacts: response.data } }));
+    } catch {
+      setContactPanels((prev) => ({ ...prev, [sessionId]: { loading: false, contacts: [] } }));
+    }
+  };
+
   if (loading) {
     return <div className="container">Loading...</div>;
   }
@@ -256,6 +286,13 @@ export default function WhatsAppSessions() {
                         style={{ marginRight: '8px' }}
                       >
                         {sendForms[session.sessionId] ? 'Cancel Send' : 'Send Message'}
+                      </button>
+                      <button
+                        className="btn btn-secondary"
+                        onClick={() => toggleContacts(session.sessionId)}
+                        style={{ marginRight: '8px' }}
+                      >
+                        {contactPanels[session.sessionId] ? 'Hide Contacts' : 'Contacts'}
                       </button>
                       <button className="btn btn-danger" onClick={() => handleDeleteSession(session.sessionId)}>
                         Disconnect
@@ -377,6 +414,43 @@ export default function WhatsAppSessions() {
                               {sendForms[session.sessionId].result!.success ? '✓ ' : '✗ '}
                               {sendForms[session.sessionId].result!.message}
                             </div>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                  {contactPanels[session.sessionId] && (
+                    <tr key={`${session.id}-contacts`}>
+                      <td colSpan={6} style={{ padding: '8px 16px' }}>
+                        <div style={{ padding: '16px', borderRadius: '4px', background: '#f8fafc', border: '1px solid #e2e8f0' }}>
+                          <h4 style={{ marginBottom: '12px', color: '#374151' }}>
+                            Contacts ({contactPanels[session.sessionId].contacts.length})
+                          </h4>
+                          {contactPanels[session.sessionId].loading ? (
+                            <p style={{ color: '#6b7280' }}>Loading...</p>
+                          ) : contactPanels[session.sessionId].contacts.length === 0 ? (
+                            <p style={{ color: '#6b7280', fontSize: '14px' }}>
+                              No contacts yet. Contacts are tracked automatically as you send and receive messages.
+                            </p>
+                          ) : (
+                            <table style={{ width: '100%', fontSize: '14px' }}>
+                              <thead>
+                                <tr>
+                                  <th style={{ textAlign: 'left', padding: '6px 8px', color: '#6b7280', fontWeight: 500 }}>Name</th>
+                                  <th style={{ textAlign: 'left', padding: '6px 8px', color: '#6b7280', fontWeight: 500 }}>Phone</th>
+                                  <th style={{ textAlign: 'left', padding: '6px 8px', color: '#6b7280', fontWeight: 500 }}>JID</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {contactPanels[session.sessionId].contacts.map((c) => (
+                                  <tr key={c.jid} style={{ borderTop: '1px solid #f1f5f9' }}>
+                                    <td style={{ padding: '6px 8px' }}>{c.name}</td>
+                                    <td style={{ padding: '6px 8px' }}>{c.phoneNumber}</td>
+                                    <td style={{ padding: '6px 8px', color: '#9ca3af', fontFamily: 'monospace' }}>{c.jid}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
                           )}
                         </div>
                       </td>
