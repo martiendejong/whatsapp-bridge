@@ -214,6 +214,30 @@ public class WhatsAppBridgeService : IAsyncDisposable
 
     // ─── Read operations (not yet implemented in Dawa) ────────────────────────
 
+    public async Task<List<WhatsAppMessage>> FetchAndStoreChatHistoryAsync(string sessionId, string chatId, int count)
+    {
+        var jid = chatId.Contains('@') ? chatId : $"{chatId}@s.whatsapp.net";
+        if (!_clients.TryGetValue(sessionId, out var client) || !client.IsConnected)
+            return new List<WhatsAppMessage>();
+
+        // Fire the peerDataOperationRequestMessage (ON_DEMAND history sync request).
+        // The phone will push a HISTORY_SYNC_NOTIFICATION asynchronously — could be seconds or minutes.
+        // We don't block on it here; our session-level HistorySyncCompleted handler persists it when it arrives.
+        _ = Task.Run(async () =>
+        {
+            try { await client.RequestOnDemandHistorySyncAsync(jid, count, CancellationToken.None); }
+            catch (Exception ex) { _logger.LogWarning(ex, "OnDemand history sync fire-and-forget error for {Jid}", jid); }
+        });
+
+        // Return whatever we already have in the store (may be empty if this is the first request)
+        var key = $"{sessionId}:{jid}";
+        if (_messageStore.TryGetValue(key, out var stored))
+        {
+            lock (stored) { return stored.ToList(); }
+        }
+        return new List<WhatsAppMessage>();
+    }
+
     public Task<List<WhatsAppMessage>?> GetMessagesAsync(string sessionId, string chatId, int limit)
     {
         // Normalize chatId — accept bare number or full JID

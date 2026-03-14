@@ -301,6 +301,8 @@ public sealed class WAMessage
     public MessageContextInfo? MessageContextInfo { get; set; }         // field 35
     public HistorySyncNotification? HistorySyncNotification { get; set; } // field 46
     public ReactionMessage? ReactionMessage { get; set; }               // field 85
+    public PeerDataOperationRequestMessage?  PeerDataOperation { get; set; } // field 145
+    public PeerDataOperationResponseMessage? PeerDataResponse  { get; set; } // field 146
 
     /// <summary>Extracts the text from whatever message type this is.</summary>
     public string? GetText()
@@ -349,12 +351,22 @@ public sealed class WAMessage
                 case 15: msg.DocumentMessage = DocumentMessage.ParseFrom(r.ReadBytes()); break;
                 case 31: msg.DeviceSentMessage = DeviceSentMessage.ParseFrom(r.ReadBytes()); break;
                 case 35: msg.MessageContextInfo = MessageContextInfo.ParseFrom(r.ReadBytes()); break;
-                case 46: msg.HistorySyncNotification = HistorySyncNotification.Decode(r.ReadBytes()); break;
-                case 85: msg.ReactionMessage = ReactionMessage.ParseFrom(r.ReadBytes()); break;
+                case 46:  msg.HistorySyncNotification = HistorySyncNotification.Decode(r.ReadBytes()); break;
+                case 85:  msg.ReactionMessage = ReactionMessage.ParseFrom(r.ReadBytes()); break;
+                case 145: msg.PeerDataOperation = null; r.Skip(wire); break; // outgoing only — skip
+                case 146: msg.PeerDataResponse = PeerDataOperationResponseMessage.Decode(r.ReadBytes()); break;
                 default: r.Skip(wire); break;
             }
         }
         return msg;
+    }
+
+    public byte[] ToByteArrayWithPeerDataOperation()
+    {
+        var buf = new List<byte>();
+        if (PeerDataOperation != null)
+            ProtoEncoder.WriteMessage(buf, 145, PeerDataOperation.ToByteArray());
+        return [.. buf];
     }
 
     public byte[] ToByteArrayWithReaction()
@@ -769,6 +781,98 @@ public sealed class ReactionMessage
         if (!string.IsNullOrEmpty(Text)) ProtoEncoder.WriteString(buf, 2, Text);
         if (SenderTimestampMs != 0) ProtoEncoder.WriteUInt64(buf, 4, (ulong)SenderTimestampMs);
         return [.. buf];
+    }
+}
+
+/// <summary>
+/// Field 145 of WAMessage.
+/// Sent to our own JID to request the phone push an ON_DEMAND history sync blob
+/// for a specific chat via HISTORY_SYNC_NOTIFICATION (syncType 5).
+/// </summary>
+public sealed class PeerDataOperationRequestMessage
+{
+    public const int TYPE_HISTORY_SYNC_ON_DEMAND = 7;  // PeerDataOperationRequestType enum
+
+    public int    RequestType      { get; set; } = TYPE_HISTORY_SYNC_ON_DEMAND;  // field 1
+    public string ChatJid          { get; set; } = "";  // historySyncOnDemandRequest.chatJid (field 6 → sub-field 1)
+    public string OldestMsgId      { get; set; } = "";  // historySyncOnDemandRequest.oldestMsgId (field 6 → sub-field 2)
+    public bool   OldestMsgFromMe  { get; set; }        // historySyncOnDemandRequest.oldestMsgFromMe (field 6 → sub-field 3)
+    public int    OnDemandMsgCount { get; set; } = 50;  // historySyncOnDemandRequest.onDemandMsgCount (field 6 → sub-field 4)
+
+    public byte[] ToByteArray()
+    {
+        var buf = new List<byte>();
+        // field 1: peerDataOperationRequestType
+        ProtoEncoder.WriteInt32(buf, 1, RequestType);
+
+        // field 6: historySyncOnDemandRequest (embedded message)
+        var req = new List<byte>();
+        ProtoEncoder.WriteString(req, 1, ChatJid);
+        if (!string.IsNullOrEmpty(OldestMsgId)) ProtoEncoder.WriteString(req, 2, OldestMsgId);
+        if (OldestMsgFromMe)                    ProtoEncoder.WriteBool(req, 3, true);
+        ProtoEncoder.WriteInt32Always(req, 4, OnDemandMsgCount);  // always emit count even if 0
+        ProtoEncoder.WriteMessage(buf, 6, [.. req]);
+
+        return [.. buf];
+    }
+}
+
+/// <summary>
+/// Field 146 of WAMessage — response sent by the phone to a PeerDataOperationRequestMessage.
+/// For ON_DEMAND history, historySyncOnDemandRequestResult.historyData contains
+/// an inline compressed+encrypted history blob (same format as CDN download).
+/// </summary>
+public sealed class PeerDataOperationResponseMessage
+{
+    /// <summary>List of results, one per request item.</summary>
+    public List<PeerDataOperationResult> Results { get; set; } = [];
+
+    public static PeerDataOperationResponseMessage Decode(byte[] data)
+    {
+        var obj = new PeerDataOperationResponseMessage();
+        var r   = ProtoEncoder.CreateReader(data);
+        while (r.HasMore)
+        {
+            var (field, wt) = r.ReadTag();
+            if (field == 1) obj.Results.Add(PeerDataOperationResult.Decode(r.ReadBytes()));
+            else r.Skip(wt);
+        }
+        return obj;
+    }
+}
+
+public sealed class PeerDataOperationResult
+{
+    public int    ResultType  { get; set; }   // field 1: 0=OK, 1=UNSUPPORTED, 2=NOT_FOUND
+    public byte[] HistoryData { get; set; } = []; // field 6 → historySyncOnDemandRequestResult.historyData (sub-field 1)
+
+    public static PeerDataOperationResult Decode(byte[] data)
+    {
+        var obj = new PeerDataOperationResult();
+        var r   = ProtoEncoder.CreateReader(data);
+        while (r.HasMore)
+        {
+            var (field, wt) = r.ReadTag();
+            switch (field)
+            {
+                case 1: obj.ResultType  = r.ReadInt32(); break;
+                case 6: obj.HistoryData = ReadHistoryData(r.ReadBytes()); break;
+                default: r.Skip(wt); break;
+            }
+        }
+        return obj;
+    }
+
+    private static byte[] ReadHistoryData(byte[] resultBytes)
+    {
+        var r = ProtoEncoder.CreateReader(resultBytes);
+        while (r.HasMore)
+        {
+            var (f, wt) = r.ReadTag();
+            if (f == 1) return r.ReadBytes();
+            r.Skip(wt);
+        }
+        return [];
     }
 }
 

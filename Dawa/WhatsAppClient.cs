@@ -237,6 +237,19 @@ public sealed class WhatsAppClient : IAsyncDisposable
         return _noiseProcessor.FetchMessageHistoryAsync(jid, count, ct);
     }
 
+    /// <summary>
+    /// Requests an on-demand history sync from the phone (sends a peerDataOperationRequestMessage
+    /// to our own JID). The phone responds by pushing a HISTORY_SYNC_NOTIFICATION of type ON_DEMAND
+    /// which the receive loop picks up and fires HistoryMessageReceived for each message.
+    /// Returns the messages from that chat that arrived during the push notification (or empty on timeout).
+    /// </summary>
+    public Task<List<Dawa.Messages.IncomingMessage>> RequestOnDemandHistorySyncAsync(string chatJid, int count, CancellationToken ct)
+    {
+        if (_noiseProcessor == null || _state != ConnectionState.Connected)
+            return Task.FromResult(new List<Dawa.Messages.IncomingMessage>());
+        return _noiseProcessor.RequestOnDemandHistorySyncAsync(chatJid, count, ct);
+    }
+
     public List<string> GetGroupJids()
     {
         if (_noiseProcessor == null) return new List<string>();
