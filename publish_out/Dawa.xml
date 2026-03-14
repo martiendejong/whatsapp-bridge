@@ -1,0 +1,888 @@
+<?xml version="1.0"?>
+<doc>
+    <assembly>
+        <name>Dawa</name>
+    </assembly>
+    <members>
+        <member name="T:Dawa.Auth.AuthState">
+            <summary>
+            Persisted authentication credentials for a WhatsApp session.
+            Equivalent to Baileys' AuthState/Creds object.
+            </summary>
+        </member>
+        <member name="P:Dawa.Auth.AuthState.Account">
+            <summary>
+            ADVSignedDeviceIdentity protobuf bytes (set during QR pairing).
+            Used for device-identity node when sending pkmsg.
+            </summary>
+        </member>
+        <member name="P:Dawa.Auth.AuthState.IsFresh">
+            <summary>True if this is a fresh (unauthenticated) state.</summary>
+        </member>
+        <member name="M:Dawa.Auth.AuthState.CreateNew">
+            <summary>Generates a brand-new auth state (before any pairing).</summary>
+        </member>
+        <member name="T:Dawa.Auth.SessionStore">
+            <summary>
+            Persists AuthState to a JSON file in the session directory.
+            </summary>
+        </member>
+        <member name="M:Dawa.Auth.SessionStore.LoadAsync(System.Threading.CancellationToken)">
+            <summary>Loads a saved session, or creates a fresh AuthState if none exists.</summary>
+        </member>
+        <member name="M:Dawa.Auth.SessionStore.SaveAsync(Dawa.Auth.AuthState,System.Threading.CancellationToken)">
+            <summary>Saves the current auth state to disk.</summary>
+        </member>
+        <member name="M:Dawa.Auth.SessionStore.Delete">
+            <summary>Deletes the session (forces re-authentication).</summary>
+        </member>
+        <member name="T:Dawa.Binary.BinaryNode">
+            <summary>
+            WhatsApp binary node — the base unit of the WhatsApp XML-like binary protocol.
+            Equivalent to Baileys' BinaryNode type.
+            </summary>
+        </member>
+        <member name="P:Dawa.Binary.BinaryNode.Tag">
+            <summary>The tag name (e.g. "message", "iq", "presence").</summary>
+        </member>
+        <member name="P:Dawa.Binary.BinaryNode.Attrs">
+            <summary>Attributes as key-value pairs.</summary>
+        </member>
+        <member name="P:Dawa.Binary.BinaryNode.Content">
+            <summary>Child nodes, raw byte data, or null.</summary>
+        </member>
+        <member name="P:Dawa.Binary.BinaryNode.Children">
+            <summary>Returns child nodes if Content is a list, else empty.</summary>
+        </member>
+        <member name="P:Dawa.Binary.BinaryNode.Data">
+            <summary>Returns raw byte content if Content is byte[], else null.</summary>
+        </member>
+        <member name="P:Dawa.Binary.BinaryNode.Text">
+            <summary>Returns string content if Content is string, else null.</summary>
+        </member>
+        <member name="M:Dawa.Binary.BinaryNode.GetAttr(System.String)">
+            <summary>Gets an attribute value or null.</summary>
+        </member>
+        <member name="M:Dawa.Binary.BinaryNode.FindChild(System.String)">
+            <summary>Recursively finds the first child with the given tag.</summary>
+        </member>
+        <member name="M:Dawa.Binary.BinaryNode.GetChildren(System.String)">
+            <summary>All children with the given tag.</summary>
+        </member>
+        <member name="T:Dawa.Binary.BinaryNodeDecoder">
+            <summary>
+            Decodes WhatsApp binary-encoded nodes from byte arrays.
+            </summary>
+        </member>
+        <member name="T:Dawa.Binary.BinaryReader">
+            <summary>Simple forward-only reader over a byte array.</summary>
+        </member>
+        <member name="T:Dawa.Binary.BinaryNodeEncoder">
+            <summary>
+            Encodes BinaryNode trees to WhatsApp's binary format.
+            </summary>
+        </member>
+        <member name="T:Dawa.Binary.WATags">
+            <summary>
+            WhatsApp binary encoding constants and dictionaries.
+            Sourced from @whiskeysockets/baileys SINGLE_BYTE_TOKENS and DOUBLE_BYTE_TOKENS.
+            </summary>
+        </member>
+        <member name="M:Dawa.Binary.WATags.TryGetSingleByteToken(System.String,System.Byte@)">
+            <summary>
+            Try to encode <paramref name="value"/> as a single-byte token (byte value 1–235).
+            Returns true and the byte to write.
+            </summary>
+        </member>
+        <member name="M:Dawa.Binary.WATags.TryGetDoubleByteToken(System.String,System.Byte@,System.Byte@)">
+            <summary>
+            Try to encode <paramref name="value"/> as a double-byte token (DictionaryBase + dictIndex, tokenIndex).
+            Returns true and the two bytes to write.
+            </summary>
+        </member>
+        <member name="M:Dawa.Binary.WATags.GetSingleByteToken(System.Int32)">
+            <summary>Decode a single-byte token. Returns null if <paramref name="b"/> is out of range.</summary>
+        </member>
+        <member name="M:Dawa.Binary.WATags.GetToken(System.Int32,System.Int32)">
+            <summary>Decode a double-byte token. Returns null if indices are out of range.</summary>
+        </member>
+        <member name="T:Dawa.Crypto.AesGcmHelper">
+            <summary>AES-256-GCM authenticated encryption helper.</summary>
+        </member>
+        <member name="M:Dawa.Crypto.AesGcmHelper.Encrypt(System.Byte[],System.Byte[],System.Byte[],System.Byte[])">
+            <summary>
+            Encrypts plaintext with AES-256-GCM.
+            Returns: nonce(12) + ciphertext + tag(16) — unless you supply an explicit nonce.
+            </summary>
+        </member>
+        <member name="M:Dawa.Crypto.AesGcmHelper.EncryptWithCounter(System.Byte[],System.UInt64,System.Byte[],System.Byte[])">
+            <summary>
+            Encrypts with an explicit counter-based nonce (Noise protocol transport).
+            Returns ciphertext + tag(16).
+            </summary>
+        </member>
+        <member name="M:Dawa.Crypto.AesGcmHelper.DecryptWithCounter(System.Byte[],System.UInt64,System.Byte[],System.Byte[])">
+            <summary>
+            Decrypts ciphertext+tag (no nonce prefix) with counter-based nonce.
+            </summary>
+        </member>
+        <member name="M:Dawa.Crypto.AesGcmHelper.DecryptWithNoncePrefix(System.Byte[],System.Byte[],System.Byte[])">
+            <summary>
+            Decrypts with an explicit nonce supplied in the first 12 bytes of the buffer.
+            </summary>
+        </member>
+        <member name="M:Dawa.Crypto.AesGcmHelper.EncryptRaw(System.Byte[],System.Byte[],System.Byte[],System.Byte[])">
+            <summary>
+            Encrypt using raw nonce byte array.
+            Returns ciphertext + tag(16).
+            </summary>
+        </member>
+        <member name="M:Dawa.Crypto.AesGcmHelper.DecryptRaw(System.Byte[],System.Byte[],System.Byte[],System.Byte[])">
+            <summary>
+            Decrypt using raw nonce byte array. Input is ciphertext+tag.
+            </summary>
+        </member>
+        <member name="T:Dawa.Crypto.Curve25519Helper">
+            <summary>
+            Curve25519 key generation and ECDH shared secret computation via BouncyCastle.
+            </summary>
+        </member>
+        <member name="M:Dawa.Crypto.Curve25519Helper.GenerateKeyPair">
+            <summary>Generates a new random Curve25519 key pair.</summary>
+        </member>
+        <member name="M:Dawa.Crypto.Curve25519Helper.DH(System.Byte[],System.Byte[])">
+            <summary>Computes the Curve25519 ECDH shared secret.</summary>
+        </member>
+        <member name="T:Dawa.Crypto.DawaHKDF">
+            <summary>HMAC-based Key Derivation Function (RFC 5869).</summary>
+        </member>
+        <member name="M:Dawa.Crypto.DawaHKDF.DeriveKey(System.Byte[],System.Byte[],System.Byte[],System.Int32)">
+            <summary>
+            Derives one or more keys from input key material using HKDF-SHA256.
+            </summary>
+        </member>
+        <member name="M:Dawa.Crypto.DawaHKDF.DeriveKeys(System.Byte[],System.Byte[])">
+            <summary>Derives exactly two 32-byte keys (common in Noise protocol).</summary>
+        </member>
+        <member name="T:Dawa.Crypto.MediaEncryptResult">
+            <summary>
+            WhatsApp media encryption — derives keys from a random media key using HKDF,
+            then encrypts with AES-CBC and appends a 10-byte HMAC-SHA256 MAC.
+            </summary>
+        </member>
+        <member name="M:Dawa.Crypto.MediaCrypto.Encrypt(System.Byte[],System.String)">
+            <summary>
+            Encrypts <paramref name="plaintext"/> for WhatsApp media upload.
+            <paramref name="mediaType"/> is one of: "image", "video", "audio", "document".
+            </summary>
+        </member>
+        <member name="M:Dawa.Crypto.MediaCrypto.Decrypt(System.Byte[],System.Byte[],System.String)">
+            <summary>
+            Decrypts a WhatsApp CDN blob (enc || 10-byte mac) back to plaintext.
+            Used for downloading media and history sync blobs.
+            <paramref name="mediaType"/> e.g. "image", "md-msg-hist".
+            </summary>
+        </member>
+        <member name="T:Dawa.Crypto.XEdDSA">
+            <summary>
+            XEdDSA signing (Signal/WhatsApp protocol).
+            Uses a raw Curve25519 private key directly as an Ed25519 scalar —
+            no SHA-512 key-expansion like standard Ed25519.
+            Reference: https://signal.org/docs/specifications/xeddsa/
+            Matches curve25519-js curve25519_sign() behaviour used by Baileys.
+            </summary>
+        </member>
+        <member name="M:Dawa.Crypto.XEdDSA.Verify(System.Byte[],System.Byte[],System.Byte[])">
+            <summary>
+            Verifies an XEdDSA signature.
+            <paramref name="curve25519PublicKey"/> is the 32-byte Curve25519 (Montgomery x) public key.
+            </summary>
+        </member>
+        <member name="M:Dawa.Crypto.XEdDSA.Sign(System.Byte[],System.Byte[])">
+            <summary>
+            Signs <paramref name="message"/> using XEdDSA with the given 32-byte
+            Curve25519 private key. Returns a 64-byte signature (R ‖ s).
+            </summary>
+        </member>
+        <member name="M:Dawa.Crypto.XEdDSA.Fp(System.Numerics.BigInteger)">
+            <summary>Reduce a to [0, p).</summary>
+        </member>
+        <member name="M:Dawa.Crypto.XEdDSA.FpInv(System.Numerics.BigInteger)">
+            <summary>Modular inverse via Fermat: a^(p-2) mod p.</summary>
+        </member>
+        <member name="M:Dawa.Crypto.XEdDSA.FpSqrt(System.Numerics.BigInteger)">
+            <summary>Square root mod p (p ≡ 5 mod 8).</summary>
+        </member>
+        <member name="M:Dawa.Crypto.XEdDSA.Fl(System.Numerics.BigInteger)">
+            <summary>Reduce a to [0, l) (scalar field).</summary>
+        </member>
+        <member name="M:Dawa.Crypto.XEdDSA.LoadLE(System.Byte[])">
+            <summary>Load a little-endian unsigned 32-byte array as BigInteger.</summary>
+        </member>
+        <member name="M:Dawa.Crypto.XEdDSA.LoadLE64(System.Byte[])">
+            <summary>Load a little-endian unsigned 64-byte array as BigInteger.</summary>
+        </member>
+        <member name="M:Dawa.Crypto.XEdDSA.ToLE32(System.Numerics.BigInteger)">
+            <summary>Store BigInteger as 32-byte little-endian array.</summary>
+        </member>
+        <member name="T:Dawa.Extensions.ServiceCollectionExtensions">
+            <summary>
+            Extension methods for registering Dawa with Microsoft DI (ASP.NET Core, etc.).
+            </summary>
+        </member>
+        <member name="M:Dawa.Extensions.ServiceCollectionExtensions.AddWhatsApp(Microsoft.Extensions.DependencyInjection.IServiceCollection,System.Action{Dawa.WhatsAppClientOptions})">
+             <summary>
+             Registers <see cref="T:Dawa.WhatsAppClient"/> as a singleton service.
+            
+             Usage in Program.cs:
+             <code>
+             builder.Services.AddWhatsApp(options =>
+             {
+                 options.SessionDirectory = "./whatsapp-session";
+                 options.AutoReconnect = true;
+             });
+             </code>
+            
+             Then inject IWhatsAppService or WhatsAppClient into your controllers.
+             </summary>
+        </member>
+        <member name="T:Dawa.Messages.IncomingMessage">
+            <summary>
+            Represents a received WhatsApp message.
+            </summary>
+        </member>
+        <member name="P:Dawa.Messages.IncomingMessage.Id">
+            <summary>Unique message ID assigned by WhatsApp.</summary>
+        </member>
+        <member name="P:Dawa.Messages.IncomingMessage.From">
+            <summary>Sender JID (e.g. "31612345678@s.whatsapp.net").</summary>
+        </member>
+        <member name="P:Dawa.Messages.IncomingMessage.RemoteJid">
+            <summary>The conversation/chat JID.</summary>
+        </member>
+        <member name="P:Dawa.Messages.IncomingMessage.Participant">
+            <summary>For group messages: the participant who sent the message.</summary>
+        </member>
+        <member name="P:Dawa.Messages.IncomingMessage.Text">
+            <summary>Text content of the message, if it's a text message.</summary>
+        </member>
+        <member name="P:Dawa.Messages.IncomingMessage.FromMe">
+            <summary>True if this message was sent by ourselves.</summary>
+        </member>
+        <member name="P:Dawa.Messages.IncomingMessage.Timestamp">
+            <summary>Unix timestamp (seconds) when the message was sent.</summary>
+        </member>
+        <member name="P:Dawa.Messages.IncomingMessage.PushName">
+            <summary>The push name (display name) of the sender, if provided.</summary>
+        </member>
+        <member name="P:Dawa.Messages.IncomingMessage.SentAt">
+            <summary>UTC timestamp of the message.</summary>
+        </member>
+        <member name="T:Dawa.Models.JID">
+            <summary>
+            WhatsApp JID (Jabber ID) — uniquely identifies a user, group, or server.
+            </summary>
+        </member>
+        <member name="M:Dawa.Models.JID.FromPhone(System.String)">
+            <summary>Creates a user JID from a phone number (digits only, include country code).</summary>
+        </member>
+        <member name="M:Dawa.Models.JID.Parse(System.String)">
+            <summary>Parses a JID string like "1234567890@s.whatsapp.net".</summary>
+        </member>
+        <member name="T:Dawa.Noise.NoiseProcessor">
+            <summary>
+            Handles the WhatsApp Noise XX handshake and post-handshake encrypted transport.
+            After the handshake completes, all frames are encrypted/decrypted with AES-GCM
+            using keys derived from the Noise session.
+            </summary>
+        </member>
+        <member name="E:Dawa.Noise.NoiseProcessor.HistoryMessageReceived">
+            <summary>Fired for each message loaded from history sync (past messages).</summary>
+        </member>
+        <member name="E:Dawa.Noise.NoiseProcessor.HistorySyncCompleted">
+            <summary>Fired once after a history-sync blob has been fully processed (use to flush persisted store).</summary>
+        </member>
+        <member name="M:Dawa.Noise.NoiseProcessor.PerformHandshakeAsync(System.Threading.CancellationToken)">
+            <summary>
+            Performs the complete Noise XX handshake with the WhatsApp server.
+            </summary>
+        </member>
+        <member name="M:Dawa.Noise.NoiseProcessor.ReceiveLoopAsync(System.Threading.CancellationToken)">
+            <summary>
+            Continuously reads and processes incoming frames. Call this on a background task.
+            </summary>
+        </member>
+        <member name="M:Dawa.Noise.NoiseProcessor.HandleIbAsync(Dawa.Binary.BinaryNode,System.Threading.CancellationToken)">
+            <summary>
+            Handles informational broadcast (ib) nodes from WhatsApp.
+            The most important one is dirty type="account_sync" — WhatsApp withholds
+            message delivery until the client sends a "clean" IQ to acknowledge the sync.
+            </summary>
+        </member>
+        <member name="M:Dawa.Noise.NoiseProcessor.SendActiveAsync(System.Threading.CancellationToken)">
+            <summary>
+            Sends the passive→active switch IQ (xmlns="passive", tag="active").
+            This is the critical call Baileys makes after auth to tell WhatsApp to start
+            delivering queued messages to this companion device. Without it, WhatsApp keeps
+            the session in passive mode and never pushes any message/dirty/notification nodes.
+            </summary>
+        </member>
+        <member name="M:Dawa.Noise.NoiseProcessor.SendPresenceAsync(System.Threading.CancellationToken)">
+            <summary>
+            Sends a presence update to tell WhatsApp this device is online and ready to receive messages.
+            Without this, WhatsApp may not deliver messages to linked devices.
+            </summary>
+        </member>
+        <member name="M:Dawa.Noise.NoiseProcessor.KeepAliveLoopAsync(System.Threading.CancellationToken)">
+            <summary>
+            Sends a keepalive ping IQ every 25 seconds, like Baileys does after login.
+            The server expects this to consider the device fully online and deliver messages.
+            </summary>
+        </member>
+        <member name="M:Dawa.Noise.NoiseProcessor.SendRetryReceiptAsync(System.String,System.String,System.Int64)">
+            <summary>
+            Sends a retry receipt to WhatsApp, asking the sender to re-encrypt using
+            a fresh pre-key bundle. Called when we receive a message we cannot decrypt
+            (e.g. our session state was lost after a restart).
+            </summary>
+        </member>
+        <member name="M:Dawa.Noise.NoiseProcessor.SendAppStateSyncAsync(System.Threading.CancellationToken)">
+            <summary>
+            Sends the initial app state sync request (xmlns="w:app:state:sync").
+            Baileys calls resyncAppState immediately after auth — WhatsApp may withhold
+            message delivery until the companion device has "checked in" with a sync request.
+            We request all 5 standard collections at version=0 (initial sync).
+            We don't need to process the response content, just sending the request is enough
+            to signal to WhatsApp that this device is ready to receive messages.
+            </summary>
+        </member>
+        <member name="M:Dawa.Noise.NoiseProcessor.SendTextMessageAsync(System.String,System.String,System.Threading.CancellationToken)">
+            <summary>Sends an encrypted text message to a JID using Signal Protocol.</summary>
+        </member>
+        <member name="M:Dawa.Noise.NoiseProcessor.SendReactionAsync(System.String,System.String,System.Boolean,System.String,System.Threading.CancellationToken)">
+            <summary>
+            Sends an emoji reaction to a specific message.
+            </summary>
+            <param name="targetJid">The chat JID (e.g. "31612345678@s.whatsapp.net") containing the target message.</param>
+            <param name="targetMessageId">The ID of the message to react to.</param>
+            <param name="targetFromMe">Whether the target message was sent by us.</param>
+            <param name="emoji">The reaction emoji, e.g. "👍". Pass "" to remove an existing reaction.</param>
+        </member>
+        <member name="M:Dawa.Noise.NoiseProcessor.SendMediaAsync(System.String,System.Byte[],System.String,System.String,System.String,System.String,System.Threading.CancellationToken)">
+            <summary>
+            Sends a media message (image, audio, or document) to a JID.
+            <paramref name="mediaType"/> must be "image", "audio", or "document".
+            <paramref name="fileBytes"/> is the raw (unencrypted) file bytes.
+            <paramref name="mimeType"/> e.g. "image/jpeg", "audio/ogg; codecs=opus", "application/pdf".
+            <paramref name="caption"/> optional text (images only).
+            <paramref name="fileName"/> optional file name (documents).
+            </summary>
+        </member>
+        <member name="M:Dawa.Noise.NoiseProcessor.RequestMediaUploadUrlAsync(System.String,System.Int64,System.String,System.Threading.CancellationToken)">
+            <summary>
+            Requests a media upload URL from WhatsApp.
+            Tries the Baileys w:m IQ (type=set, media_conn) first.
+            Falls back to direct mmg.whatsapp.net upload URL if the IQ times out
+            (the server silently ignores w:m IQs for companion device sessions).
+            Returns (uploadUrl, directPath, authToken).
+            </summary>
+        </member>
+        <member name="M:Dawa.Noise.NoiseProcessor.PadMessage(System.Byte[])">
+            <summary>Pads a proto-encoded message with random PKCS7-style padding (Baileys: writeRandomPadMax16).</summary>
+        </member>
+        <member name="M:Dawa.Noise.NoiseProcessor.EncryptForDevice(System.String,System.Byte[],System.Boolean@)">
+            <summary>Encrypts a padded proto for a single device, returning a 'to' node or null on failure.</summary>
+        </member>
+        <member name="M:Dawa.Noise.NoiseProcessor.FetchPreKeyBundlesAsync(System.Collections.Generic.IEnumerable{System.String},System.Threading.CancellationToken)">
+            <summary>
+            Sends an encrypt IQ to fetch pre-key bundles for a list of device JIDs.
+            Returns a dictionary keyed by device JID.
+            </summary>
+        </member>
+        <member name="M:Dawa.Noise.NoiseProcessor.GetDeviceListAsync(System.String,System.Threading.CancellationToken)">
+            <summary>
+            Sends a USync IQ to get all device JIDs for a phone number.
+            Returns list of device JIDs like "31633984381:0@s.whatsapp.net".
+            </summary>
+        </member>
+        <member name="M:Dawa.Noise.NoiseProcessor.UploadPreKeysAsync(System.Threading.CancellationToken)">
+            <summary>
+            Uploads one-time pre-keys and the signed pre-key to WhatsApp server
+            so other devices can initiate Signal sessions with us.
+            Called once after successful authentication.
+            </summary>
+        </member>
+        <member name="M:Dawa.Noise.NoiseProcessor.FetchAppStateSyncKeyAsync(System.Byte[],System.Threading.CancellationToken)">
+            <summary>
+            Fetches a 32-byte app state key from the server by keyId.
+            </summary>
+        </member>
+        <member name="M:Dawa.Noise.NoiseProcessor.BuildAppStateSyncIQ(System.String,System.Int32,System.Boolean)">
+            <summary>
+            Fetches contacts from WhatsApp via app state sync of the "contact" collection.
+            Returns (JID, Name) pairs for all contacts found in the snapshot.
+            </summary>
+        </member>
+        <member name="M:Dawa.Noise.NoiseProcessor.FetchContactsAsync(System.Threading.CancellationToken)">
+            <summary>
+            Returns contacts from multiple sources:
+            Push names collected from incoming messages (participant_pn, sender_lid, notify attributes).
+            USync contact queries consistently return empty results for companion devices.
+            </summary>
+        </member>
+        <member name="M:Dawa.Noise.NoiseProcessor.FetchContactsViaUsyncAsync(System.Collections.Generic.IEnumerable{System.String},System.Threading.CancellationToken)">
+            <summary>
+            Uses USync IQ (which reliably returns results for companion devices) to fetch
+            contact names for a set of JIDs. Handles both @lid and @s.whatsapp.net JIDs.
+            </summary>
+        </member>
+        <member name="M:Dawa.Noise.NoiseProcessor.FetchChatsAsync(System.Threading.CancellationToken)">
+            <summary>
+            Returns the list of active chats. Primary source is thread_metadata from
+            the ib node that WhatsApp sends immediately after authentication.
+            Falls back to message history if thread_metadata is empty.
+            </summary>
+        </member>
+        <member name="M:Dawa.Noise.NoiseProcessor.GetCacheDebugInfo">
+            <summary>Returns internal cache state for debugging.</summary>
+        </member>
+        <member name="M:Dawa.Noise.NoiseProcessor.FetchMessageHistoryAsync(System.String,System.Int32,System.Threading.CancellationToken)">
+            <summary>
+            Attempts to fetch message history for a JID using a w:msg sync IQ.
+            Returns an empty list if the server does not respond (companion devices may not support this).
+            Note: in-memory message cache is used as primary source; this IQ is a best-effort supplement.
+            </summary>
+        </member>
+        <member name="M:Dawa.Noise.NoiseProcessor.GetGroupJids">
+            <summary>
+            Returns the list of group JIDs from thread_metadata (those ending in @g.us).
+            </summary>
+        </member>
+        <member name="M:Dawa.Noise.NoiseProcessor.FetchGroupMetadataAsync(System.String,System.Threading.CancellationToken)">
+            <summary>
+            Fetches group metadata (name, participants) for a specific group JID.
+            Sends an IQ to the group's server and parses the response.
+            </summary>
+        </member>
+        <member name="M:Dawa.Noise.NoiseProcessor.ProcessHistorySyncAsync(Dawa.Proto.HistorySyncNotification,System.Threading.CancellationToken)">
+            <summary>
+            Downloads, decrypts, decompresses and parses a WhatsApp history sync blob,
+            then fires <see cref="E:Dawa.Noise.NoiseProcessor.HistoryMessageReceived"/> for every past message.
+            Called automatically when the server sends a HISTORY_SYNC_NOTIFICATION.
+            </summary>
+        </member>
+        <member name="M:Dawa.Noise.NoiseProcessor.ZlibInflate(System.Byte[])">
+            <summary>Decompresses zlib-deflated data (strips 2-byte zlib header + 4-byte adler32 trailer).</summary>
+        </member>
+        <member name="T:Dawa.Noise.NoiseState">
+            <summary>
+            Implements the Noise_XX_25519_AESGCM_SHA256 state machine used by WhatsApp.
+            Reference: https://noiseprotocol.org/noise.html
+            </summary>
+        </member>
+        <member name="M:Dawa.Noise.NoiseState.MixHash(System.Byte[])">
+            <summary>Mixes data into the hash chain (no encryption).</summary>
+        </member>
+        <member name="M:Dawa.Noise.NoiseState.MixKey(System.Byte[])">
+            <summary>Mixes input key material into the chaining key and optionally sets a new cipher key.</summary>
+        </member>
+        <member name="M:Dawa.Noise.NoiseState.EncryptWithAssociatedData(System.Byte[])">
+            <summary>Encrypts plaintext with the current key + associated data = current hash.</summary>
+        </member>
+        <member name="M:Dawa.Noise.NoiseState.DecryptWithAssociatedData(System.Byte[])">
+            <summary>Decrypts ciphertext with the current key + associated data = current hash.</summary>
+        </member>
+        <member name="M:Dawa.Noise.NoiseState.Split">
+            <summary>
+            Finalises the handshake and returns the two transport keys (send, receive).
+            </summary>
+        </member>
+        <member name="T:Dawa.Proto.HistorySyncNotification">
+            <summary>
+            Embedded in ProtocolMessage field 6 (HISTORY_SYNC_NOTIFICATION).
+            Points to the encrypted, compressed HistorySync blob on the CDN.
+            </summary>
+        </member>
+        <member name="T:Dawa.Proto.HistorySync">
+            <summary>Top-level proto decoded from the decrypted+decompressed history blob.</summary>
+        </member>
+        <member name="T:Dawa.Proto.HistoryWebMessageInfo">
+            <summary>Minimal decode of WebMessageInfo — only fields needed for history display.</summary>
+        </member>
+        <member name="T:Dawa.Proto.HistoryWaMessage">
+            <summary>Minimal Message decode — plain text + captions.</summary>
+        </member>
+        <member name="T:Dawa.Proto.ProtoEncoder">
+            <summary>
+            Minimal proto3 encoder/decoder for WhatsApp messages.
+            Avoids the complexity of implementing IBufferMessage/IMessage directly.
+            </summary>
+        </member>
+        <member name="M:Dawa.Proto.ProtoEncoder.WriteBoolAlways(System.Collections.Generic.List{System.Byte},System.Int32,System.Boolean)">
+            <summary>Force-writes bool even when false (Baileys always emits default values).</summary>
+        </member>
+        <member name="M:Dawa.Proto.ProtoEncoder.WriteInt32Always(System.Collections.Generic.List{System.Byte},System.Int32,System.Int32)">
+            <summary>Force-writes int even when zero (Baileys always emits default values).</summary>
+        </member>
+        <member name="M:Dawa.Proto.ProtoEncoder.WriteMessageAlways(System.Collections.Generic.List{System.Byte},System.Int32,System.Byte[])">
+            <summary>Force-writes a sub-message even when the payload is empty.</summary>
+        </member>
+        <member name="T:Dawa.Proto.DevicePropsMessage">
+            <summary>DeviceProps (companion registration info), field 8 of DevicePairingRegistrationData.</summary>
+        </member>
+        <member name="T:Dawa.Proto.HistorySyncConfigMessage">
+            <summary>HistorySyncConfig nested in DeviceProps (field 5).</summary>
+        </member>
+        <member name="T:Dawa.Proto.ADVSignedDeviceIdentityHMAC">
+            <summary>Server sends this in device-identity during pair-success. Contains HMAC-protected device identity.</summary>
+        </member>
+        <member name="T:Dawa.Proto.ADVSignedDeviceIdentity">
+            <summary>Decoded from ADVSignedDeviceIdentityHMAC.Details. Client adds deviceSignature and re-encodes.</summary>
+        </member>
+        <member name="M:Dawa.Proto.ADVSignedDeviceIdentity.ToByteArray">
+            <summary>Encode all fields including accountSignatureKey (for device-identity in outgoing pkmsg).</summary>
+        </member>
+        <member name="M:Dawa.Proto.ADVSignedDeviceIdentity.ToByteArrayForReply">
+            <summary>Encode WITHOUT accountSignatureKey (field 2 omitted per Baileys protocol).</summary>
+        </member>
+        <member name="T:Dawa.Proto.ADVDeviceIdentity">
+            <summary>Decoded from ADVSignedDeviceIdentity.Details. Used to get keyIndex for the reply.</summary>
+        </member>
+        <member name="T:Dawa.Proto.WAMessage">
+            <summary>
+            WhatsApp Message proto (field numbers from Baileys WAProto.proto).
+            Only the fields we need for text message extraction are implemented;
+            all others are safely skipped.
+            </summary>
+        </member>
+        <member name="M:Dawa.Proto.WAMessage.GetText">
+            <summary>Extracts the text from whatever message type this is.</summary>
+        </member>
+        <member name="T:Dawa.Proto.ExtendedTextMessage">
+            <summary>Field 6 of Message. Contains text with optional link preview etc.</summary>
+        </member>
+        <member name="T:Dawa.Proto.ImageMessage">
+            <summary>Field 3 of Message. An image with optional caption.</summary>
+        </member>
+        <member name="T:Dawa.Proto.AudioMessage">
+            <summary>Field 4 of Message. An audio clip or voice note (ptt=true).</summary>
+        </member>
+        <member name="T:Dawa.Proto.DocumentMessage">
+            <summary>Field 15 of Message. A document/file attachment.</summary>
+        </member>
+        <member name="T:Dawa.Proto.DeviceSentMessage">
+            <summary>Field 31 of Message. Wraps messages sent from this account on another device.</summary>
+        </member>
+        <member name="T:Dawa.Proto.SenderKeyDistributionMessage">
+            <summary>Field 2 of Message. Distributes group encryption keys.</summary>
+        </member>
+        <member name="T:Dawa.Proto.ProtocolMessage">
+            <summary>Field 12 of Message. Protocol-level messages (message revocation, history sync, etc.)</summary>
+        </member>
+        <member name="T:Dawa.Proto.MessageContextInfo">
+            <summary>Field 35 of Message. Contains device list metadata.</summary>
+        </member>
+        <member name="T:Dawa.Proto.ReactionMessage">
+            <summary>Field 85 of Message. Emoji reaction to another message.</summary>
+        </member>
+        <member name="P:Dawa.Proto.ReactionMessage.Key">
+            <summary>The message being reacted to.</summary>
+        </member>
+        <member name="P:Dawa.Proto.ReactionMessage.Text">
+            <summary>The reaction emoji (e.g. "👍") or "" to remove reaction.</summary>
+        </member>
+        <member name="P:Dawa.Proto.ReactionMessage.SenderTimestampMs">
+            <summary>Sender timestamp in milliseconds.</summary>
+        </member>
+        <member name="T:Dawa.Proto.MessageKey">
+            <summary>Key that identifies a specific WhatsApp message.</summary>
+        </member>
+        <member name="T:Dawa.Signal.MessageCipher">
+            <summary>
+            Low-level AES-CBC helpers used by SignalKeyStore for message encryption/decryption.
+            The Double Ratchet logic lives in SignalKeyStore; this class is a pure static utility.
+            </summary>
+        </member>
+        <member name="M:Dawa.Signal.MessageCipher.AesCbcEncrypt(System.Byte[],System.Byte[],System.Byte[])">
+            <summary>AES-CBC encrypt with PKCS7 padding.</summary>
+        </member>
+        <member name="M:Dawa.Signal.MessageCipher.AesCbcDecrypt(System.Byte[],System.Byte[],System.Byte[])">
+            <summary>AES-CBC decrypt with PKCS7 padding.</summary>
+        </member>
+        <member name="T:Dawa.Signal.SignalKeyStore">
+            <summary>
+            Complete Signal Protocol session management — X3DH + Double Ratchet.
+            Handles session establishment (outgoing and incoming), message encryption, and decryption.
+            Persists sessions to signals.json in the session directory.
+            </summary>
+        </member>
+        <member name="M:Dawa.Signal.SignalKeyStore.RegisterLidMapping(System.String,System.String)">
+            <summary>
+            Registers a mapping from a LID JID (e.g. "824767959274@lid") to a phone JID
+            (e.g. "31633984381@s.whatsapp.net"). Both formats refer to the same device
+            and share the same Signal session.
+            </summary>
+        </member>
+        <member name="M:Dawa.Signal.SignalKeyStore.ResolveJid(System.String)">
+            <summary>
+            Resolves a JID: if it's a known LID, returns the mapped phone JID.
+            Otherwise returns the JID as-is.
+            </summary>
+        </member>
+        <member name="M:Dawa.Signal.SignalKeyStore.TryResolveByIdentity(System.String,System.Byte[])">
+            <summary>
+            For an @lid JID with no explicit mapping, try to find an existing session
+            by matching identity keys from the PreKeyWhisperMessage.
+            </summary>
+        </member>
+        <member name="M:Dawa.Signal.SignalKeyStore.InitOutgoingSession(System.String,Dawa.Signal.PreKeyBundle,Dawa.Auth.AuthState)">
+            <summary>
+            Initializes an outgoing session using X3DH key agreement.
+            Call this before sending the first message to a new contact.
+            </summary>
+        </member>
+        <member name="M:Dawa.Signal.SignalKeyStore.InitIncomingSession(System.String,Dawa.Signal.PreKeyWhisperMessageProto,Dawa.Auth.AuthState)">
+            <summary>
+            Initializes an incoming session when we receive the first PreKeyWhisperMessage.
+            </summary>
+        </member>
+        <member name="M:Dawa.Signal.SignalKeyStore.EncryptMessage(System.String,System.Byte[],Dawa.Auth.AuthState)">
+            <summary>
+            Encrypts a plaintext for the given JID using the Double Ratchet.
+            Returns (encryptedBytes, isPreKey) where isPreKey=true means the caller
+            should wrap this in a PreKeyWhisperMessage frame.
+            </summary>
+        </member>
+        <member name="M:Dawa.Signal.SignalKeyStore.DecryptMessage(System.String,System.String,System.Byte[],Dawa.Auth.AuthState)">
+            <summary>
+            Decrypts a received Signal message. type is "pkmsg" or "msg".
+            </summary>
+        </member>
+        <member name="M:Dawa.Signal.SignalKeyStore.HkdfRatchetStep(System.Byte[],System.Byte[])">
+            <summary>
+            Performs one DH ratchet step.
+            Returns (newRootKey, newChainKey).
+            Uses rootKey as salt, dhOutput as IKM, "WhisperRatchet" as info.
+            </summary>
+        </member>
+        <member name="M:Dawa.Signal.SignalKeyStore.StripKeyPrefix(System.Byte[])">
+            <summary>
+            If key is 33 bytes and key[0]==0x05, returns key[1:].
+            Otherwise returns the key as-is (or trimmed to 32 bytes if needed).
+            </summary>
+        </member>
+        <member name="M:Dawa.Signal.SignalKeyStore.PrefixKey(System.Byte[])">
+            <summary>
+            Adds 0x05 KEY_BUNDLE_TYPE prefix to a 32-byte key (Signal convention).
+            If already 33 bytes with prefix, returns as-is.
+            </summary>
+        </member>
+        <member name="T:Dawa.Signal.SignalSession">
+            <summary>A Signal Double Ratchet session for a single remote device JID.</summary>
+        </member>
+        <member name="P:Dawa.Signal.SignalSession.TheirIdentityPublic">
+            <summary>Their identity public key (raw 32 bytes, no 0x05 prefix).</summary>
+        </member>
+        <member name="P:Dawa.Signal.SignalSession.BaseKey">
+            <summary>X3DH ephemeral public key — sent in the PreKeyWhisperMessage header.</summary>
+        </member>
+        <member name="P:Dawa.Signal.SignalSession.PreKeyId">
+            <summary>Their one-time pre-key ID used during X3DH (0 = none).</summary>
+        </member>
+        <member name="P:Dawa.Signal.SignalSession.SignedPreKeyId">
+            <summary>Their signed pre-key ID used during X3DH.</summary>
+        </member>
+        <member name="P:Dawa.Signal.SignalSession.PeerRegistrationId">
+            <summary>Their registration ID.</summary>
+        </member>
+        <member name="P:Dawa.Signal.SignalSession.IsEstablished">
+            <summary>
+            False when session was just initialized and the first outgoing message
+            must be wrapped in a PreKeyWhisperMessage. Set to true after first send.
+            </summary>
+        </member>
+        <member name="T:Dawa.Signal.PreKeyBundle">
+            <summary>Pre-key bundle fetched from the server for a remote device.</summary>
+        </member>
+        <member name="T:Dawa.Signal.WhisperMessageProto">
+            <summary>
+            WhisperMessage proto (inner encrypted message).
+            field 1: ratchetKey (bytes) - sender's current ratchet public key (32 bytes)
+            field 2: counter (uint32) - message counter Ns
+            field 3: previousCounter (uint32) - PN (messages sent in previous sending chain)
+            field 4: ciphertext (bytes) - AES-CBC encrypted plaintext
+            </summary>
+        </member>
+        <member name="T:Dawa.Signal.PreKeyWhisperMessageProto">
+            <summary>
+            PreKeyWhisperMessage proto (outer message for first contact).
+            field 1: preKeyId (uint32) - one-time pre-key ID (0 if not used)
+            field 2: baseKey (bytes) - X3DH ephemeral public key (32 bytes)
+            field 3: identityKey (bytes) - sender's identity public key (32 bytes)
+            field 4: message (bytes) - complete WhisperMessage bytes (version + proto + mac)
+            field 5: registrationId (uint32) - sender's registration ID
+            field 6: signedPreKeyId (uint32) - signed pre-key ID
+            </summary>
+        </member>
+        <member name="T:Dawa.Transport.FrameSocket">
+             <summary>
+             WebSocket wrapper that adds WhatsApp's 3-byte big-endian length framing.
+             Each frame: [length: 3 bytes BE] [payload: N bytes]
+            
+             A single WebSocket message may contain multiple WA frames back-to-back
+             (Baileys: noise-handler.ts processData drains all frames in a loop).
+             We buffer leftover bytes so each ReceiveFrameAsync call returns exactly one frame.
+             </summary>
+        </member>
+        <member name="M:Dawa.Transport.FrameSocket.SendRawAsync(System.Byte[],System.Threading.CancellationToken)">
+            <summary>Sends raw bytes directly to the WebSocket without any framing.</summary>
+        </member>
+        <member name="M:Dawa.Transport.FrameSocket.SendFrameAsync(System.Byte[],System.Threading.CancellationToken)">
+            <summary>Sends a frame: 3-byte BE length + payload.</summary>
+        </member>
+        <member name="M:Dawa.Transport.FrameSocket.ReceiveFrameAsync(System.Threading.CancellationToken)">
+            <summary>
+            Reads the next WA frame. If the receive buffer already contains a complete
+            frame (leftover from a previous WebSocket message), returns it immediately
+            without touching the network. Otherwise reads one WebSocket message and
+            appends it to the buffer, then extracts the first complete frame.
+            Matches Baileys noise-handler.ts processData drain-loop behaviour.
+            </summary>
+        </member>
+        <member name="T:Dawa.WhatsAppClient">
+             <summary>
+             The main Dawa WhatsApp client. Connects to WhatsApp Web and allows
+             sending and receiving messages without a Node.js dependency.
+            
+             Usage:
+             <code>
+             var client = WhatsAppClient.Create("./wa-session");
+             client.QRCodeReceived += (_, qr) => Console.WriteLine("Scan: " + qr);
+             client.MessageReceived += (_, msg) => Console.WriteLine(msg);
+             await client.ConnectAsync();
+             await client.WaitUntilConnectedAsync();
+             await client.SendMessageAsync("+31612345678", "Hello from Dawa!");
+             </code>
+             </summary>
+        </member>
+        <member name="E:Dawa.WhatsAppClient.QRCodeReceived">
+            <summary>
+            Fired when a QR code is ready to be scanned.
+            The string argument is the raw QR code data (pass to a QR renderer).
+            </summary>
+        </member>
+        <member name="E:Dawa.WhatsAppClient.ConnectionStateChanged">
+            <summary>Fired when the connection state changes.</summary>
+        </member>
+        <member name="E:Dawa.WhatsAppClient.MessageReceived">
+            <summary>Fired when a new message is received.</summary>
+        </member>
+        <member name="E:Dawa.WhatsAppClient.HistoryMessageReceived">
+            <summary>Fired for each historical message loaded from WhatsApp history sync on connect.</summary>
+        </member>
+        <member name="E:Dawa.WhatsAppClient.HistorySyncCompleted">
+            <summary>Fired once after each history sync blob is fully processed. Arg = number of messages emitted.</summary>
+        </member>
+        <member name="E:Dawa.WhatsAppClient.Connected">
+            <summary>Fired once the session is fully authenticated.</summary>
+        </member>
+        <member name="E:Dawa.WhatsAppClient.Disconnected">
+            <summary>Fired when the connection is lost.</summary>
+        </member>
+        <member name="M:Dawa.WhatsAppClient.Create(System.String)">
+            <summary>
+            Creates a new WhatsApp client with default options.
+            </summary>
+            <param name="sessionDirectory">Directory to store session credentials.</param>
+        </member>
+        <member name="M:Dawa.WhatsAppClient.Create(System.String,Microsoft.Extensions.Logging.ILoggerFactory)">
+            <summary>
+            Creates a client with a logger factory (e.g. from dependency injection).
+            </summary>
+        </member>
+        <member name="M:Dawa.WhatsAppClient.ConnectAsync(System.Threading.CancellationToken)">
+            <summary>
+            Connects to WhatsApp and starts the authentication flow.
+            If a session exists it restores it; otherwise fires <see cref="E:Dawa.WhatsAppClient.QRCodeReceived"/>.
+            </summary>
+        </member>
+        <member name="M:Dawa.WhatsAppClient.WaitUntilConnectedAsync(System.Nullable{System.TimeSpan})">
+            <summary>
+            Waits until the client is authenticated and connected.
+            Throws if connection fails or the timeout is exceeded.
+            </summary>
+        </member>
+        <member name="M:Dawa.WhatsAppClient.SendMessageAsync(System.String,System.String,System.Threading.CancellationToken)">
+            <summary>
+            Sends a text message to a phone number or JID.
+            </summary>
+            <param name="to">Phone number ("31612345678") or full JID ("31612345678@s.whatsapp.net").</param>
+            <param name="text">Message text.</param>
+        </member>
+        <member name="M:Dawa.WhatsAppClient.GetCacheDebugInfo">
+            <summary>Returns internal cache state for debugging — thread metadata, LID map, push names.</summary>
+        </member>
+        <member name="M:Dawa.WhatsAppClient.SendMediaAsync(System.String,System.Byte[],System.String,System.String,System.String,System.String,System.Threading.CancellationToken)">
+            <summary>
+            Sends a media message (image, audio, or document) to a phone number or JID.
+            </summary>
+            <param name="to">Phone number or full JID.</param>
+            <param name="fileBytes">Raw (unencrypted) file bytes.</param>
+            <param name="mediaType">"image", "audio", or "document".</param>
+            <param name="mimeType">MIME type, e.g. "image/jpeg".</param>
+            <param name="caption">Optional caption (shown under images).</param>
+            <param name="fileName">File name (used for documents).</param>
+        </member>
+        <member name="M:Dawa.WhatsAppClient.SendReactionAsync(System.String,System.String,System.Boolean,System.String,System.Threading.CancellationToken)">
+            <summary>
+            Sends an emoji reaction to a specific message.
+            </summary>
+            <param name="targetJid">JID of the chat containing the target message.</param>
+            <param name="targetMessageId">ID of the message being reacted to.</param>
+            <param name="targetFromMe">Whether the target message was sent by us.</param>
+            <param name="emoji">The reaction emoji (e.g. "👍"). Pass "" to remove.</param>
+        </member>
+        <member name="M:Dawa.WhatsAppClient.DisconnectAsync">
+            <summary>Disconnects from WhatsApp and cleans up resources.</summary>
+        </member>
+        <member name="M:Dawa.WhatsAppClient.Logout">
+            <summary>Deletes the saved session (forces QR code re-scan on next connect).</summary>
+        </member>
+        <member name="T:Dawa.WhatsAppClientOptions">
+            <summary>Configuration options for the WhatsApp client.</summary>
+        </member>
+        <member name="P:Dawa.WhatsAppClientOptions.SessionDirectory">
+            <summary>Directory where session credentials are stored. Default: ./whatsapp-session</summary>
+        </member>
+        <member name="P:Dawa.WhatsAppClientOptions.BrowserName">
+            <summary>Browser name shown in WhatsApp's "Linked Devices" list.</summary>
+        </member>
+        <member name="P:Dawa.WhatsAppClientOptions.BrowserVersion">
+            <summary>Browser version reported to WhatsApp.</summary>
+        </member>
+        <member name="P:Dawa.WhatsAppClientOptions.QRCodeTimeout">
+            <summary>
+            How long to wait for a QR code scan before timing out.
+            Default: 2 minutes.
+            </summary>
+        </member>
+        <member name="P:Dawa.WhatsAppClientOptions.ConnectionTimeout">
+            <summary>
+            How long to wait for server responses during connection.
+            Default: 30 seconds.
+            </summary>
+        </member>
+        <member name="P:Dawa.WhatsAppClientOptions.AutoReconnect">
+            <summary>
+            Whether to auto-reconnect on connection loss.
+            Default: true.
+            </summary>
+        </member>
+        <member name="P:Dawa.WhatsAppClientOptions.ReconnectDelay">
+            <summary>
+            Delay between reconnect attempts.
+            Default: 5 seconds.
+            </summary>
+        </member>
+    </members>
+</doc>
