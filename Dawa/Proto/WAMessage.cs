@@ -483,6 +483,41 @@ public sealed class WAMessage
         return [.. buf];
     }
 
+    public byte[] ToByteArrayWithRevoke()
+    {
+        var buf = new List<byte>();
+        if (ProtocolMsg != null)
+            ProtoEncoder.WriteMessage(buf, 12, ProtocolMsg.ToByteArray());
+        return [.. buf];
+    }
+
+    /// <summary>
+    /// Returns the ContextInfo (quoted message metadata) from whichever sub-message contains it.
+    /// </summary>
+    public ContextInfo? GetContextInfo()
+    {
+        var inner = DeviceSentMessage?.Message;
+        if (inner != null) return inner.GetContextInfo();
+        return ImageMessage?.ContextInfo
+            ?? AudioMessage?.ContextInfo
+            ?? VideoMessage?.ContextInfo
+            ?? ExtendedTextMessage?.ContextInfo;
+    }
+
+    /// <summary>
+    /// Returns quoted message context (id, sender, text preview, type) for reply display.
+    /// </summary>
+    public (string? quotedId, string? quotedFrom, string? quotedText, Messages.MessageType quotedType) GetQuotedContext()
+    {
+        var ctx = GetContextInfo();
+        if (ctx == null || string.IsNullOrEmpty(ctx.StanzaId))
+            return (null, null, null, Messages.MessageType.Unknown);
+
+        var quotedText = ctx.QuotedMessage?.GetText();
+        var quotedType = ctx.QuotedMessage?.GetMessageType() ?? Messages.MessageType.Unknown;
+        return (ctx.StanzaId, ctx.Participant, quotedText, quotedType);
+    }
+
     public byte[] ToByteArrayWithMedia()
     {
         var buf = new List<byte>();
@@ -496,12 +531,14 @@ public sealed class WAMessage
 /// <summary>Field 6 of Message. Contains text with optional link preview etc.</summary>
 public sealed class ExtendedTextMessage
 {
-    public string Text { get; set; } = "";  // field 1
+    public string Text { get; set; } = "";          // field 1
+    public ContextInfo? ContextInfo { get; set; }   // field 17
 
     public byte[] ToByteArray()
     {
         var buf = new List<byte>();
         ProtoEncoder.WriteString(buf, 1, Text);
+        if (ContextInfo != null) ProtoEncoder.WriteMessage(buf, 17, ContextInfo.ToByteArray());
         return [.. buf];
     }
 
@@ -512,8 +549,12 @@ public sealed class ExtendedTextMessage
         while (r.HasMore)
         {
             var (field, wire) = r.ReadTag();
-            if (field == 1) msg.Text = r.ReadString();
-            else r.Skip(wire);
+            switch (field)
+            {
+                case 1:  msg.Text = r.ReadString(); break;
+                case 17: msg.ContextInfo = ContextInfo.ParseFrom(r.ReadBytes()); break;
+                default: r.Skip(wire); break;
+            }
         }
         return msg;
     }
@@ -530,6 +571,7 @@ public sealed class ImageMessage
     public byte[] FileEncSha256 { get; set; } = []; // field 8
     public string DirectPath { get; set; } = "";    // field 10
     public string Caption { get; set; } = "";       // field 16
+    public ContextInfo? ContextInfo { get; set; }   // field 17
     public long MediaKeyTimestamp { get; set; }      // field 25
 
     public byte[] ToByteArray()
@@ -543,6 +585,7 @@ public sealed class ImageMessage
         if (FileEncSha256.Length > 0) ProtoEncoder.WriteBytes(buf, 8, FileEncSha256);
         ProtoEncoder.WriteString(buf, 10, DirectPath);
         if (!string.IsNullOrEmpty(Caption)) ProtoEncoder.WriteString(buf, 16, Caption);
+        if (ContextInfo != null)      ProtoEncoder.WriteMessage(buf, 17, ContextInfo.ToByteArray());
         if (MediaKeyTimestamp != 0)   ProtoEncoder.WriteUInt64(buf, 25, (ulong)MediaKeyTimestamp);
         return [.. buf];
     }
@@ -564,6 +607,7 @@ public sealed class ImageMessage
                 case 8:  msg.FileEncSha256 = r.ReadBytes(); break;
                 case 10: msg.DirectPath = r.ReadString(); break;
                 case 16: msg.Caption = r.ReadString(); break;
+                case 17: msg.ContextInfo = ContextInfo.ParseFrom(r.ReadBytes()); break;
                 case 25: msg.MediaKeyTimestamp = (long)r.ReadUInt64(); break;
                 default: r.Skip(wire); break;
             }
@@ -585,6 +629,7 @@ public sealed class AudioMessage
     public byte[] FileEncSha256 { get; set; } = []; // field 8
     public string DirectPath { get; set; } = "";    // field 9
     public long MediaKeyTimestamp { get; set; }      // field 12
+    public ContextInfo? ContextInfo { get; set; }   // field 17
 
     public byte[] ToByteArray()
     {
@@ -599,6 +644,7 @@ public sealed class AudioMessage
         if (FileEncSha256.Length > 0) ProtoEncoder.WriteBytes(buf, 8, FileEncSha256);
         ProtoEncoder.WriteString(buf, 9, DirectPath);
         if (MediaKeyTimestamp != 0)   ProtoEncoder.WriteUInt64(buf, 12, (ulong)MediaKeyTimestamp);
+        if (ContextInfo != null)      ProtoEncoder.WriteMessage(buf, 17, ContextInfo.ToByteArray());
         return [.. buf];
     }
 
@@ -621,6 +667,7 @@ public sealed class AudioMessage
                 case 8:  msg.FileEncSha256 = r.ReadBytes(); break;
                 case 9:  msg.DirectPath = r.ReadString(); break;
                 case 12: msg.MediaKeyTimestamp = (long)r.ReadUInt64(); break;
+                case 17: msg.ContextInfo = ContextInfo.ParseFrom(r.ReadBytes()); break;
                 default: r.Skip(wire); break;
             }
         }
@@ -642,6 +689,7 @@ public sealed class VideoMessage
     public string DirectPath { get; set; } = "";    // field 11
     public uint Width { get; set; }                 // field 20
     public uint Height { get; set; }                // field 21
+    public ContextInfo? ContextInfo { get; set; }   // field 17
 
     public static VideoMessage ParseFrom(byte[] data)
     {
@@ -661,6 +709,7 @@ public sealed class VideoMessage
                 case 9:  msg.Caption = r.ReadString(); break;
                 case 10: msg.FileEncSha256 = r.ReadBytes(); break;
                 case 11: msg.DirectPath = r.ReadString(); break;
+                case 17: msg.ContextInfo = ContextInfo.ParseFrom(r.ReadBytes()); break;
                 case 20: msg.Width = r.ReadUInt32(); break;
                 case 21: msg.Height = r.ReadUInt32(); break;
                 default: r.Skip(wire); break;
@@ -826,9 +875,12 @@ public sealed class SenderKeyDistributionMessage
 public sealed class ProtocolMessage
 {
     public int Type { get; set; }  // field 5: type enum
+    // field 1: key (MessageKey) — the message being revoked (for REVOKE)
+    public MessageKey? Key { get; set; }
     // field 6: historySyncNotification (populated when Type == TYPE_HISTORY_SYNC_NOTIFICATION)
     public Dawa.Proto.HistorySyncNotification? HistorySyncNotification { get; set; }
 
+    public const int TYPE_REVOKE                  = 0;
     public const int TYPE_HISTORY_SYNC_NOTIFICATION = 5;
 
     public static ProtocolMessage ParseFrom(byte[] data)
@@ -840,6 +892,7 @@ public sealed class ProtocolMessage
             var (field, wire) = r.ReadTag();
             switch (field)
             {
+                case 1: msg.Key  = MessageKey.ParseFrom(r.ReadBytes()); break;
                 case 5: msg.Type = r.ReadInt32(); break;
                 case 6:
                     var notifBytes = r.ReadBytes();
@@ -849,6 +902,55 @@ public sealed class ProtocolMessage
             }
         }
         return msg;
+    }
+
+    public byte[] ToByteArray()
+    {
+        var buf = new List<byte>();
+        if (Key != null)  ProtoEncoder.WriteMessage(buf, 1, Key.ToByteArray());
+        ProtoEncoder.WriteInt32(buf, 5, Type);
+        return [.. buf];
+    }
+}
+
+/// <summary>ContextInfo — quoted message metadata embedded in most message types (field 17).</summary>
+public sealed class ContextInfo
+{
+    public string StanzaId     { get; set; } = "";  // field 4: ID of the quoted message
+    public string Participant  { get; set; } = "";  // field 5: JID of the quoted message sender
+    public WAMessage? QuotedMessage { get; set; }   // field 6: the quoted message content
+    public bool IsForwarded    { get; set; }         // field 15: forwarded flag
+    public uint ForwardingScore { get; set; }        // field 22: >0 means forwarded
+
+    public static ContextInfo ParseFrom(byte[] data)
+    {
+        var msg = new ContextInfo();
+        var r = ProtoEncoder.CreateReader(data);
+        while (r.HasMore)
+        {
+            var (field, wire) = r.ReadTag();
+            switch (field)
+            {
+                case 4:  msg.StanzaId    = r.ReadString(); break;
+                case 5:  msg.Participant = r.ReadString(); break;
+                case 6:  msg.QuotedMessage = WAMessage.ParseFrom(r.ReadBytes()); break;
+                case 15: msg.IsForwarded = r.ReadBool(); break;
+                case 22: msg.ForwardingScore = r.ReadUInt32(); break;
+                default: r.Skip(wire); break;
+            }
+        }
+        return msg;
+    }
+
+    public byte[] ToByteArray()
+    {
+        var buf = new List<byte>();
+        if (!string.IsNullOrEmpty(StanzaId))   ProtoEncoder.WriteString(buf, 4, StanzaId);
+        if (!string.IsNullOrEmpty(Participant)) ProtoEncoder.WriteString(buf, 5, Participant);
+        if (QuotedMessage != null)              ProtoEncoder.WriteMessage(buf, 6, QuotedMessage.ToByteArray());
+        if (IsForwarded)                        ProtoEncoder.WriteBool(buf, 15, true);
+        if (ForwardingScore > 0)                ProtoEncoder.WriteUInt32(buf, 22, ForwardingScore);
+        return [.. buf];
     }
 }
 

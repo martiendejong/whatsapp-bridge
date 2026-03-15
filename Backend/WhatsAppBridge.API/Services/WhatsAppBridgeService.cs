@@ -197,6 +197,92 @@ public class WhatsAppBridgeService : IAsyncDisposable
         return new { success = true };
     }
 
+    public async Task<byte[]?> DownloadMediaAsync(string sessionId, string mediaUrl, string mediaKeyBase64, string mimeType)
+    {
+        try { return await WhatsAppClient.DownloadMediaAsync(mediaUrl, mediaKeyBase64, mimeType); }
+        catch (Exception ex) { _logger.LogWarning(ex, "DownloadMedia failed for session {Sid}", sessionId); return null; }
+    }
+
+    public async Task<object?> RevokeMessageAsync(string sessionId, string jid, string messageId, bool fromMe, long timestamp)
+    {
+        var client = GetConnectedClient(sessionId);
+        await client.RevokeMessageAsync(jid, messageId, fromMe, timestamp, CancellationToken.None);
+        // Mark as revoked in store
+        var key = $"{sessionId}:{jid}";
+        if (_messageStore.TryGetValue(key, out var msgs))
+        {
+            lock (msgs)
+            {
+                var idx = msgs.FindIndex(m => m.Id == messageId);
+                if (idx >= 0) msgs[idx] = msgs[idx] with { IsRevoked = true, Body = "" };
+            }
+        }
+        return new { success = true };
+    }
+
+    public async Task<object?> ForwardMessageAsync(string sessionId, string toJid, string text)
+    {
+        var client = GetConnectedClient(sessionId);
+        await client.ForwardMessageAsync(toJid, text, CancellationToken.None);
+        return new { success = true };
+    }
+
+    public async Task<object?> SendTypingAsync(string sessionId, string jid, bool isTyping)
+    {
+        var client = GetConnectedClient(sessionId);
+        await client.SendTypingAsync(jid, isTyping, CancellationToken.None);
+        return new { success = true };
+    }
+
+    public async Task<object?> SendPresenceAsync(string sessionId, bool isOnline)
+    {
+        var client = GetConnectedClient(sessionId);
+        await client.SendUserPresenceAsync(isOnline, CancellationToken.None);
+        return new { success = true };
+    }
+
+    public async Task<object?> CreateGroupAsync(string sessionId, string subject, IEnumerable<string> jids)
+    {
+        var client = GetConnectedClient(sessionId);
+        var groupJid = await client.CreateGroupAsync(subject, jids, CancellationToken.None);
+        return new { success = groupJid != null, groupJid };
+    }
+
+    public async Task<object?> LeaveGroupAsync(string sessionId, string groupJid)
+    {
+        var client = GetConnectedClient(sessionId);
+        await client.LeaveGroupAsync(groupJid, CancellationToken.None);
+        return new { success = true };
+    }
+
+    public async Task<object?> AddGroupParticipantsAsync(string sessionId, string groupJid, IEnumerable<string> jids)
+    {
+        var client = GetConnectedClient(sessionId);
+        var results = await client.AddGroupParticipantsAsync(groupJid, jids, CancellationToken.None);
+        return new { success = true, results };
+    }
+
+    public async Task<object?> RemoveGroupParticipantsAsync(string sessionId, string groupJid, IEnumerable<string> jids)
+    {
+        var client = GetConnectedClient(sessionId);
+        var results = await client.RemoveGroupParticipantsAsync(groupJid, jids, CancellationToken.None);
+        return new { success = true, results };
+    }
+
+    public async Task<object?> GetGroupInviteLinkAsync(string sessionId, string groupJid)
+    {
+        var client = GetConnectedClient(sessionId);
+        var link = await client.GetGroupInviteLinkAsync(groupJid, CancellationToken.None);
+        return new { inviteLink = link };
+    }
+
+    public async Task<object?> UpdateGroupSubjectAsync(string sessionId, string groupJid, string subject)
+    {
+        var client = GetConnectedClient(sessionId);
+        await client.UpdateGroupSubjectAsync(groupJid, subject, CancellationToken.None);
+        return new { success = true };
+    }
+
     public async Task<object?> SendReactionAsync(string sessionId, string to, string messageId, bool fromMe, string emoji)
     {
         var client = GetConnectedClient(sessionId);
@@ -401,6 +487,13 @@ public class WhatsAppBridgeService : IAsyncDisposable
     public Task<object?> CheckNumberStatusAsync(string sessionId, string number)
         => Task.FromResult<object?>(new { number, isWhatsApp = true });
 
+    public Dawa.Messages.MessageStatus? GetMessageStatus(string sessionId, string messageId)
+    {
+        if (_clients.TryGetValue(sessionId, out var client))
+            return client.GetMessageStatus(messageId);
+        return null;
+    }
+
     // ─── Helpers ──────────────────────────────────────────────────────────────
 
     private string GetMessageStorePath(string sessionId)
@@ -466,7 +559,12 @@ public class WhatsAppBridgeService : IAsyncDisposable
             MediaKey: msg.MediaKey,
             MediaSha256Enc: msg.MediaSha256Enc,
             ReactionEmoji: msg.ReactionEmoji,
-            ReactionTargetId: msg.ReactionTargetId);
+            ReactionTargetId: msg.ReactionTargetId,
+            IsRevoked: msg.IsRevoked,
+            QuotedMessageId: msg.QuotedMessageId,
+            QuotedFrom: msg.QuotedFrom,
+            QuotedText: msg.QuotedText,
+            QuotedType: msg.QuotedType == Dawa.Messages.MessageType.Unknown ? null : msg.QuotedType.ToString().ToLowerInvariant());
 
         var list = _messageStore.GetOrAdd(key, _ => new List<WhatsAppMessage>());
         lock (list)

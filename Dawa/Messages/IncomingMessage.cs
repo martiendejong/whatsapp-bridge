@@ -16,6 +16,15 @@ public enum MessageType
     Protocol,   // ProtocolMessage (history sync, key distribution, etc.)
 }
 
+/// <summary>Delivery/read status of an outgoing message.</summary>
+public enum MessageStatus
+{
+    Sent,       // Sent to WhatsApp servers
+    Delivered,  // Delivered to recipient device
+    Read,       // Recipient read the message
+    Played,     // Recipient played the voice note
+}
+
 /// <summary>
 /// Represents a received WhatsApp message.
 /// </summary>
@@ -47,6 +56,9 @@ public sealed class IncomingMessage
 
     /// <summary>The push name (display name) of the sender, if provided.</summary>
     public string? PushName { get; init; }
+
+    /// <summary>True if this message has been revoked (deleted for everyone).</summary>
+    public bool IsRevoked { get; init; }
 
     // ── Media fields ──────────────────────────────────────────────────────────
 
@@ -84,6 +96,20 @@ public sealed class IncomingMessage
 
     /// <summary>ID of the message being reacted to.</summary>
     public string? ReactionTargetId { get; init; }
+
+    // ── Quoted/reply context ──────────────────────────────────────────────────
+
+    /// <summary>ID of the message this is a reply to.</summary>
+    public string? QuotedMessageId { get; init; }
+
+    /// <summary>JID of the sender of the quoted message.</summary>
+    public string? QuotedFrom { get; init; }
+
+    /// <summary>Text preview of the quoted message.</summary>
+    public string? QuotedText { get; init; }
+
+    /// <summary>Type of the quoted message.</summary>
+    public MessageType QuotedType { get; init; } = MessageType.Unknown;
 
     // ── UTC helper ────────────────────────────────────────────────────────────
 

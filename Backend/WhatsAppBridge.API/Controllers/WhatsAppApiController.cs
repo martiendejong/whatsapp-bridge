@@ -321,10 +321,324 @@ public class WhatsAppApiController : ControllerBase
 
         return Ok(result);
     }
+
+    /// <summary>
+    /// Download and decrypt WhatsApp media
+    /// POST /api/wa/downloadMedia
+    /// </summary>
+    [HttpPost("downloadMedia")]
+    public async Task<IActionResult> DownloadMedia([FromBody] DownloadMediaRequest request)
+    {
+        var (success, userId, error) = await ValidateApiToken();
+        if (!success)
+            return Unauthorized(new { error });
+
+        var sessionId = await GetUserSessionId(userId!.Value, request.SessionId);
+        if (sessionId == null)
+            return BadRequest(new { error = "No active WhatsApp session" });
+
+        try
+        {
+            var bytes = await _whatsappService.DownloadMediaAsync(sessionId!, request.MediaUrl, request.MediaKey, request.MimeType ?? "application/octet-stream");
+            return File(bytes ?? Array.Empty<byte>(), request.MimeType ?? "application/octet-stream");
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Revoke (delete for everyone) a sent message
+    /// POST /api/wa/revokeMessage
+    /// </summary>
+    [HttpPost("revokeMessage")]
+    public async Task<IActionResult> RevokeMessage([FromBody] RevokeMessageRequest request)
+    {
+        var (success, userId, error) = await ValidateApiToken();
+        if (!success)
+            return Unauthorized(new { error });
+
+        var sessionId = await GetUserSessionId(userId!.Value, request.SessionId);
+        if (sessionId == null)
+            return BadRequest(new { error = "No active WhatsApp session" });
+
+        try
+        {
+            await _whatsappService.RevokeMessageAsync(sessionId!, request.ChatJid, request.MessageId, request.FromMe, 0);
+            return Ok(new { success = true });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Forward a message to another chat
+    /// POST /api/wa/forwardMessage
+    /// </summary>
+    [HttpPost("forwardMessage")]
+    public async Task<IActionResult> ForwardMessage([FromBody] ForwardMessageRequest request)
+    {
+        var (success, userId, error) = await ValidateApiToken();
+        if (!success)
+            return Unauthorized(new { error });
+
+        var sessionId = await GetUserSessionId(userId!.Value, request.SessionId);
+        if (sessionId == null)
+            return BadRequest(new { error = "No active WhatsApp session" });
+
+        try
+        {
+            var result = await _whatsappService.ForwardMessageAsync(sessionId!, request.ToJid, request.Text);
+            return Ok(result);
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Send typing indicator to a chat
+    /// POST /api/wa/sendTyping
+    /// </summary>
+    [HttpPost("sendTyping")]
+    public async Task<IActionResult> SendTyping([FromBody] SendTypingRequest request)
+    {
+        var (success, userId, error) = await ValidateApiToken();
+        if (!success)
+            return Unauthorized(new { error });
+
+        var sessionId = await GetUserSessionId(userId!.Value, request.SessionId);
+        if (sessionId == null)
+            return BadRequest(new { error = "No active WhatsApp session" });
+
+        try
+        {
+            await _whatsappService.SendTypingAsync(sessionId!, request.ChatJid, request.IsTyping);
+            return Ok(new { success = true });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Set user presence (online/offline)
+    /// POST /api/wa/setPresence
+    /// </summary>
+    [HttpPost("setPresence")]
+    public async Task<IActionResult> SetPresence([FromBody] SetPresenceRequest request)
+    {
+        var (success, userId, error) = await ValidateApiToken();
+        if (!success)
+            return Unauthorized(new { error });
+
+        var sessionId = await GetUserSessionId(userId!.Value, request.SessionId);
+        if (sessionId == null)
+            return BadRequest(new { error = "No active WhatsApp session" });
+
+        try
+        {
+            await _whatsappService.SendPresenceAsync(sessionId!, request.Available);
+            return Ok(new { success = true });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Create a new WhatsApp group
+    /// POST /api/wa/createGroup
+    /// </summary>
+    [HttpPost("createGroup")]
+    public async Task<IActionResult> CreateGroup([FromBody] CreateGroupRequest request)
+    {
+        var (success, userId, error) = await ValidateApiToken();
+        if (!success)
+            return Unauthorized(new { error });
+
+        var sessionId = await GetUserSessionId(userId!.Value, request.SessionId);
+        if (sessionId == null)
+            return BadRequest(new { error = "No active WhatsApp session" });
+
+        try
+        {
+            var result = await _whatsappService.CreateGroupAsync(sessionId!, request.Subject, request.Participants);
+            return Ok(result);
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Leave a WhatsApp group
+    /// POST /api/wa/leaveGroup
+    /// </summary>
+    [HttpPost("leaveGroup")]
+    public async Task<IActionResult> LeaveGroup([FromBody] GroupJidRequest request)
+    {
+        var (success, userId, error) = await ValidateApiToken();
+        if (!success)
+            return Unauthorized(new { error });
+
+        var sessionId = await GetUserSessionId(userId!.Value, request.SessionId);
+        if (sessionId == null)
+            return BadRequest(new { error = "No active WhatsApp session" });
+
+        try
+        {
+            await _whatsappService.LeaveGroupAsync(sessionId!, request.GroupJid);
+            return Ok(new { success = true });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Add participants to a WhatsApp group
+    /// POST /api/wa/addGroupParticipants
+    /// </summary>
+    [HttpPost("addGroupParticipants")]
+    public async Task<IActionResult> AddGroupParticipants([FromBody] GroupParticipantsRequest request)
+    {
+        var (success, userId, error) = await ValidateApiToken();
+        if (!success)
+            return Unauthorized(new { error });
+
+        var sessionId = await GetUserSessionId(userId!.Value, request.SessionId);
+        if (sessionId == null)
+            return BadRequest(new { error = "No active WhatsApp session" });
+
+        try
+        {
+            await _whatsappService.AddGroupParticipantsAsync(sessionId!, request.GroupJid, request.Participants);
+            return Ok(new { success = true });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Remove participants from a WhatsApp group
+    /// POST /api/wa/removeGroupParticipants
+    /// </summary>
+    [HttpPost("removeGroupParticipants")]
+    public async Task<IActionResult> RemoveGroupParticipants([FromBody] GroupParticipantsRequest request)
+    {
+        var (success, userId, error) = await ValidateApiToken();
+        if (!success)
+            return Unauthorized(new { error });
+
+        var sessionId = await GetUserSessionId(userId!.Value, request.SessionId);
+        if (sessionId == null)
+            return BadRequest(new { error = "No active WhatsApp session" });
+
+        try
+        {
+            await _whatsappService.RemoveGroupParticipantsAsync(sessionId!, request.GroupJid, request.Participants);
+            return Ok(new { success = true });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Get the invite link for a WhatsApp group
+    /// POST /api/wa/getGroupInviteLink
+    /// </summary>
+    [HttpPost("getGroupInviteLink")]
+    public async Task<IActionResult> GetGroupInviteLink([FromBody] GroupJidRequest request)
+    {
+        var (success, userId, error) = await ValidateApiToken();
+        if (!success)
+            return Unauthorized(new { error });
+
+        var sessionId = await GetUserSessionId(userId!.Value, request.SessionId);
+        if (sessionId == null)
+            return BadRequest(new { error = "No active WhatsApp session" });
+
+        try
+        {
+            var result = await _whatsappService.GetGroupInviteLinkAsync(sessionId!, request.GroupJid);
+            return Ok(result);
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Update a WhatsApp group subject (name)
+    /// POST /api/wa/updateGroupSubject
+    /// </summary>
+    [HttpPost("updateGroupSubject")]
+    public async Task<IActionResult> UpdateGroupSubject([FromBody] UpdateGroupSubjectRequest request)
+    {
+        var (success, userId, error) = await ValidateApiToken();
+        if (!success)
+            return Unauthorized(new { error });
+
+        var sessionId = await GetUserSessionId(userId!.Value, request.SessionId);
+        if (sessionId == null)
+            return BadRequest(new { error = "No active WhatsApp session" });
+
+        try
+        {
+            await _whatsappService.UpdateGroupSubjectAsync(sessionId!, request.GroupJid, request.Subject);
+            return Ok(new { success = true });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Get message delivery/read status
+    /// GET /api/wa/messageStatus?messageId=xxx
+    /// </summary>
+    [HttpGet("messageStatus")]
+    public async Task<IActionResult> GetMessageStatus([FromQuery] string messageId, [FromQuery] string? sessionId = null)
+    {
+        var (success, userId, error) = await ValidateApiToken();
+        if (!success)
+            return Unauthorized(new { error });
+
+        var resolvedSessionId = await GetUserSessionId(userId!.Value, sessionId);
+        if (resolvedSessionId == null)
+            return BadRequest(new { error = "No active WhatsApp session" });
+
+        var status = _whatsappService.GetMessageStatus(resolvedSessionId!, messageId);
+        return Ok(new { messageId, status = status?.ToString() ?? "unknown" });
+    }
 }
 
 public record SendMessageRequest(string To, string Body, string? SessionId = null);
 public record SendMediaRequest(string To, string MediaUrl, string? Caption = null, string? SessionId = null);
+public record DownloadMediaRequest(string MediaUrl, string MediaKey, string? MimeType = null, string? SessionId = null);
+public record RevokeMessageRequest(string ChatJid, string MessageId, bool FromMe = true, string? SessionId = null);
+public record ForwardMessageRequest(string ToJid, string Text, string? SessionId = null);
+public record SendTypingRequest(string ChatJid, bool IsTyping = true, string? SessionId = null);
+public record SetPresenceRequest(bool Available, string? SessionId = null);
+public record CreateGroupRequest(string Subject, List<string> Participants, string? SessionId = null);
+public record GroupJidRequest(string GroupJid, string? SessionId = null);
+public record GroupParticipantsRequest(string GroupJid, List<string> Participants, string? SessionId = null);
+public record UpdateGroupSubjectRequest(string GroupJid, string Subject, string? SessionId = null);
 public record WhatsAppMessage(
     string Id,
     string From,
@@ -342,5 +656,11 @@ public record WhatsAppMessage(
     string? MediaKey = null,
     string? MediaSha256Enc = null,
     string? ReactionEmoji = null,
-    string? ReactionTargetId = null);
+    string? ReactionTargetId = null,
+    bool IsRevoked = false,
+    string? QuotedMessageId = null,
+    string? QuotedFrom = null,
+    string? QuotedText = null,
+    string? QuotedType = null,
+    string? Status = null);
 public record WhatsAppContact(string Id, string Name, string Number);
