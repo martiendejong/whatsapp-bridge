@@ -454,7 +454,19 @@ public class WhatsAppBridgeService : IAsyncDisposable
             From: msg.FromMe ? "me" : msg.From,
             To: msg.RemoteJid,
             Body: msg.Text ?? "",
-            Timestamp: msg.Timestamp);
+            Timestamp: msg.Timestamp,
+            Type: msg.Type.ToString().ToLowerInvariant(),
+            MediaUrl: msg.MediaUrl,
+            MimeType: msg.MimeType,
+            FileName: msg.FileName,
+            FileSize: msg.FileSize,
+            Duration: msg.Duration,
+            Width: msg.Width,
+            Height: msg.Height,
+            MediaKey: msg.MediaKey,
+            MediaSha256Enc: msg.MediaSha256Enc,
+            ReactionEmoji: msg.ReactionEmoji,
+            ReactionTargetId: msg.ReactionTargetId);
 
         var list = _messageStore.GetOrAdd(key, _ => new List<WhatsAppMessage>());
         lock (list)

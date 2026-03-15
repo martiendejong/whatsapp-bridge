@@ -765,6 +765,7 @@ public sealed class NoiseProcessor : IAsyncDisposable
                 try
                 {
                     var senderJid = participant ?? from;
+                    _logger.LogDebug("Participants path: decrypting encType={EncType} from {Jid}", encType, senderJid);
                     var plaintext = _signalStore.DecryptMessage(senderJid, encType, encNode.Data, _auth);
                     var waMsg     = WAMessage.ParseFrom(plaintext);
 
@@ -787,34 +788,58 @@ public sealed class NoiseProcessor : IAsyncDisposable
                         continue;
                     }
 
-                    var text = waMsg.GetText();
-                    if (string.IsNullOrEmpty(text))
+                    // ── Skip other protocol messages (key sync, app state, etc.) ──────────────
+                    if (waMsg.ProtocolMsg != null)
                     {
-                        // Log unknown protocol messages for diagnostics
-                        _logger.LogDebug("Participants path: unknown message type from {Jid} (no text, protocolType={PT})",
-                            senderJid, waMsg.ProtocolMsg?.Type);
+                        _logger.LogDebug("Participants path: protocol message type={PT} from {Jid} — skipping",
+                            waMsg.ProtocolMsg.Type, senderJid);
                         _ = SendAckAsync(id, from, timestamp);
                         continue;
                     }
 
-                    MessageReceived?.Invoke(this, new IncomingMessage
+                    // ── Fire MessageReceived for ALL user message types ────────────────────────
+                    var (msgType, text, mediaUrl, mimeType, fileName, fileSize,
+                         duration, width, height, mediaKey, mediaSha256Enc,
+                         reactionEmoji, reactionTargetId) = waMsg.GetAllFields();
+
+                    if (msgType == Messages.MessageType.Unknown)
                     {
-                        Id          = id,
-                        From        = senderJid,
-                        RemoteJid   = from,
-                        Participant = participant,
-                        Text        = text,
-                        FromMe      = fromMe,
-                        Timestamp   = timestamp,
-                        PushName    = pushName,
+                        _logger.LogDebug("Participants path: unknown message type from {Jid} — ACKing and skipping", senderJid);
+                        _ = SendAckAsync(id, from, timestamp);
+                        continue;
+                    }
+
+                    _logger.LogInformation("Participants path: {MsgType} message from {Jid}", msgType, senderJid);
+
+                    MessageReceived?.Invoke(this, new Messages.IncomingMessage
+                    {
+                        Id              = id,
+                        From            = senderJid,
+                        RemoteJid       = from,
+                        Participant     = participant,
+                        Type            = msgType,
+                        Text            = text,
+                        FromMe          = fromMe,
+                        Timestamp       = timestamp,
+                        PushName        = pushName,
+                        MediaUrl        = mediaUrl,
+                        MimeType        = mimeType,
+                        FileName        = fileName,
+                        FileSize        = fileSize,
+                        Duration        = duration,
+                        Width           = width,
+                        Height          = height,
+                        MediaKey        = mediaKey,
+                        MediaSha256Enc  = mediaSha256Enc,
+                        ReactionEmoji   = reactionEmoji,
+                        ReactionTargetId = reactionTargetId,
                     });
 
-                    // ACK
                     _ = SendAckAsync(id, from, timestamp);
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "Failed to decrypt message from {Jid}", from);
+                    _logger.LogError(ex, "Participants path: failed to decrypt encType={EncType} from {Jid}", encType, from);
                     _ = SendRetryReceiptAsync(id, from, timestamp);
                 }
             }
@@ -859,15 +884,8 @@ public sealed class NoiseProcessor : IAsyncDisposable
                 }
 
                 var text = waMsg.GetText();
-                _logger.LogInformation("Parsed WAMessage from {Jid}: text={Text}, hasDeviceSent={DevSent}, hasSKDM={SKDM}, hasHistorySync={HasHS}",
-                    from, text ?? "(null)", waMsg.DeviceSentMessage != null, waMsg.SenderKeyDist != null, waMsg.IsHistorySync);
-
-                // ── HistorySync: the phone pushes encrypted chat history blobs ─────────
-                if (waMsg.IsHistorySync)
-                {
-                    _ = HandleHistorySyncAsync(waMsg.HistorySyncNotification!, id, from, timestamp, CancellationToken.None);
-                    return; // ACK is sent inside HandleHistorySyncAsync
-                }
+                _logger.LogInformation("Parsed WAMessage from {Jid}: text={Text}, hasDeviceSent={DevSent}, hasSKDM={SKDM}",
+                    from, text ?? "(null)", waMsg.DeviceSentMessage != null, waMsg.SenderKeyDist != null);
 
                 // ── History sync notification ─────────────────────────────────
                 if (waMsg.ProtocolMsg?.Type == Proto.ProtocolMessage.TYPE_HISTORY_SYNC_NOTIFICATION
@@ -887,19 +905,50 @@ public sealed class NoiseProcessor : IAsyncDisposable
                     return;
                 }
 
-                if (!string.IsNullOrEmpty(text))
+                // ── Skip other protocol messages (key sync, app state, etc.) ──────────────
+                if (waMsg.ProtocolMsg != null)
                 {
-                    MessageReceived?.Invoke(this, new IncomingMessage
+                    _logger.LogDebug("Direct enc path: protocol message type={PT} from {Jid} — skipping",
+                        waMsg.ProtocolMsg.Type, from);
+                    _ = SendAckAsync(id, from, timestamp);
+                    return;
+                }
+
+                // ── Fire MessageReceived for ALL user message types ────────────────────────
+                var (msgType, text2, mediaUrl, mimeType, fileName, fileSize,
+                     duration, width, height, mediaKey, mediaSha256Enc,
+                     reactionEmoji, reactionTargetId) = waMsg.GetAllFields();
+
+                if (msgType != Messages.MessageType.Unknown)
+                {
+                    _logger.LogInformation("Direct enc path: {MsgType} message from {Jid}", msgType, from);
+                    MessageReceived?.Invoke(this, new Messages.IncomingMessage
                     {
-                        Id          = id,
-                        From        = participant ?? from,
-                        RemoteJid   = from,
-                        Participant = participant,
-                        Text        = text,
-                        FromMe      = fromMe,
-                        Timestamp   = timestamp,
-                        PushName    = pushName,
+                        Id              = id,
+                        From            = participant ?? from,
+                        RemoteJid       = from,
+                        Participant     = participant,
+                        Type            = msgType,
+                        Text            = text2,
+                        FromMe          = fromMe,
+                        Timestamp       = timestamp,
+                        PushName        = pushName,
+                        MediaUrl        = mediaUrl,
+                        MimeType        = mimeType,
+                        FileName        = fileName,
+                        FileSize        = fileSize,
+                        Duration        = duration,
+                        Width           = width,
+                        Height          = height,
+                        MediaKey        = mediaKey,
+                        MediaSha256Enc  = mediaSha256Enc,
+                        ReactionEmoji   = reactionEmoji,
+                        ReactionTargetId = reactionTargetId,
                     });
+                }
+                else
+                {
+                    _logger.LogDebug("Direct enc path: unknown message type from {Jid} — ACKing", from);
                 }
                 _ = SendAckAsync(id, from, timestamp);
             }
@@ -2674,15 +2723,39 @@ public sealed class NoiseProcessor : IAsyncDisposable
         if (myJid == null)
             throw new InvalidOperationException("Not authenticated");
 
-        // Collect messages for the target JID as they arrive
+        // If given a LID, resolve to phone JID for the peerDataOperationRequestMessage
+        // (phone stores chats by phone JID internally, not LID)
+        string requestJid = normalizedJid;
+        if (normalizedJid.EndsWith("@lid"))
+        {
+            // Try to resolve LID → phone JID via our cache
+            if (_lidToPhone.TryGetValue(normalizedJid, out var phoneJid))
+            {
+                _logger.LogInformation("OnDemandHistorySync: resolved LID {Lid} → {Phone} for request", normalizedJid, phoneJid);
+                requestJid = phoneJid;
+            }
+            else
+            {
+                // Strip LID number and try as phone number
+                var lidNum = normalizedJid.Split('@')[0];
+                _logger.LogWarning("OnDemandHistorySync: no phone mapping for LID {Lid} — will try phone JID too", normalizedJid);
+            }
+        }
+
+        // Collect messages for the target JID as they arrive (match both phone and LID variants)
         var collected = new List<IncomingMessage>();
         var tcs = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
 
         EventHandler<IncomingMessage> onMsg = (_, msg) =>
         {
+            var remoteBase = normalizedJid.Split('@')[0];
+            var requestBase = requestJid.Split('@')[0];
             if (msg.RemoteJid == normalizedJid ||
+                msg.RemoteJid == requestJid ||
                 msg.From == normalizedJid ||
-                msg.From?.StartsWith(normalizedJid.Split('@')[0]) == true)
+                msg.From == requestJid ||
+                (msg.RemoteJid?.Split('@')[0] == remoteBase) ||
+                (msg.RemoteJid?.Split('@')[0] == requestBase))
             {
                 lock (collected) { collected.Add(msg); }
             }
@@ -2699,8 +2772,14 @@ public sealed class NoiseProcessor : IAsyncDisposable
 
         try
         {
-            _logger.LogInformation("OnDemandHistorySync: sending peerDataOperationRequestMessage for {ChatJid}", normalizedJid);
-            await SendPeerDataOperationRequestAsync(myJid, normalizedJid, count, ct);
+            _logger.LogInformation("OnDemandHistorySync: sending peerDataOperationRequestMessage for {ChatJid} (requestJid={ReqJid})", normalizedJid, requestJid);
+            await SendPeerDataOperationRequestAsync(myJid, requestJid, count, ct);
+            // If LID and request JID differ, also try with the original LID (phone may accept either)
+            if (requestJid != normalizedJid)
+            {
+                await Task.Delay(1000, ct);
+                await SendPeerDataOperationRequestAsync(myJid, normalizedJid, count, ct);
+            }
 
             // Wait up to 35 seconds for the phone to push the history sync notification
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(35));
@@ -3271,7 +3350,11 @@ public sealed class NoiseProcessor : IAsyncDisposable
                         var wmi = histMsg.Message;
                         if (wmi?.Key == null) continue;
                         var text = wmi.MessageBody?.EffectiveText ?? "";
-                        if (string.IsNullOrEmpty(text)) continue;
+                        var msgType = string.IsNullOrEmpty(text)
+                            ? Messages.MessageType.Unknown
+                            : Messages.MessageType.Text;
+                        // Skip unknown (no content at all) messages
+                        if (msgType == Messages.MessageType.Unknown) continue;
 
                         var remoteJid = wmi.Key.RemoteJid ?? conversation.Id;
                         var fromMe    = wmi.Key.FromMe;
@@ -3285,6 +3368,7 @@ public sealed class NoiseProcessor : IAsyncDisposable
                             Id        = wmi.Key.Id,
                             From      = senderJid,
                             RemoteJid = remoteJid,
+                            Type      = msgType,
                             Text      = text,
                             FromMe    = fromMe,
                             Timestamp = (long)wmi.Timestamp,
@@ -3395,7 +3479,10 @@ public sealed class NoiseProcessor : IAsyncDisposable
                     if (wmi?.Key == null) continue;
 
                     var text = wmi.MessageBody?.EffectiveText ?? "";
-                    if (string.IsNullOrEmpty(text)) continue;
+                    var msgType = string.IsNullOrEmpty(text)
+                        ? Messages.MessageType.Unknown
+                        : Messages.MessageType.Text;
+                    if (msgType == Messages.MessageType.Unknown) continue;
 
                     var remoteJid  = wmi.Key.RemoteJid ?? chatJid;
                     var fromMe     = wmi.Key.FromMe;
@@ -3411,6 +3498,7 @@ public sealed class NoiseProcessor : IAsyncDisposable
                         From        = senderJid,
                         RemoteJid   = remoteJid,
                         Participant = wmi.Key.Participant.Length > 0 ? wmi.Key.Participant : null,
+                        Type        = msgType,
                         Text        = text,
                         FromMe      = fromMe,
                         Timestamp   = (long)wmi.Timestamp,

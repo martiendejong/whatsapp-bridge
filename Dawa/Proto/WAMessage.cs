@@ -295,6 +295,8 @@ public sealed class WAMessage
     public ImageMessage? ImageMessage { get; set; }                  // field 3
     public AudioMessage? AudioMessage { get; set; }                  // field 4
     public ExtendedTextMessage? ExtendedTextMessage { get; set; }    // field 6
+    public VideoMessage? VideoMessage { get; set; }                  // field 5
+    public StickerMessage? StickerMessage { get; set; }              // field 50
     public ProtocolMessage? ProtocolMsg { get; set; }                // field 12
     public DocumentMessage? DocumentMessage { get; set; }               // field 15
     public DeviceSentMessage? DeviceSentMessage { get; set; }           // field 31
@@ -313,11 +315,113 @@ public sealed class WAMessage
             return ExtendedTextMessage.Text;
         if (DeviceSentMessage?.Message != null)
             return DeviceSentMessage.Message.GetText();
+        // Caption from media messages
+        if (ImageMessage    != null && !string.IsNullOrEmpty(ImageMessage.Caption))    return ImageMessage.Caption;
+        if (VideoMessage    != null && !string.IsNullOrEmpty(VideoMessage.Caption))    return VideoMessage.Caption;
+        if (DocumentMessage != null && !string.IsNullOrEmpty(DocumentMessage.Title)) return DocumentMessage.Title;
         return null;
     }
 
-    /// <summary>True if this is a HistorySync notification message (field 46 present).</summary>
-    public bool IsHistorySync => HistorySyncNotification != null;
+    /// <summary>Returns the MessageType enum value for this message.</summary>
+    public Messages.MessageType GetMessageType()
+    {
+        if (DeviceSentMessage?.Message != null) return DeviceSentMessage.Message.GetMessageType();
+        if (!string.IsNullOrEmpty(Conversation))    return Messages.MessageType.Text;
+        if (ExtendedTextMessage != null)            return Messages.MessageType.Text;
+        if (ImageMessage    != null)                return Messages.MessageType.Image;
+        if (AudioMessage    != null)                return Messages.MessageType.Audio;
+        if (VideoMessage    != null)                return Messages.MessageType.Video;
+        if (DocumentMessage != null)                return Messages.MessageType.Document;
+        if (StickerMessage  != null)                return Messages.MessageType.Sticker;
+        if (ReactionMessage != null)                return Messages.MessageType.Reaction;
+        if (ProtocolMsg     != null)                return Messages.MessageType.Protocol;
+        return Messages.MessageType.Unknown;
+    }
+
+    /// <summary>Extracts all fields needed to populate an IncomingMessage from this WAMessage.</summary>
+    public (Messages.MessageType type, string? text, string? mediaUrl, string? mimeType,
+            string? fileName, long? fileSize, uint? duration, uint? width, uint? height,
+            string? mediaKey, string? mediaSha256Enc, string? reactionEmoji, string? reactionTargetId)
+        GetAllFields()
+    {
+        var inner = DeviceSentMessage?.Message;
+        if (inner != null) return inner.GetAllFields();
+
+        var type = GetMessageType();
+        var text = GetText();
+
+        if (ImageMessage != null)
+            return (type, text,
+                mediaUrl:      ImageMessage.Url,
+                mimeType:      ImageMessage.MimeType,
+                fileName:      null,
+                fileSize:      (long?)ImageMessage.FileLength,
+                duration:      null,
+                width:         null,
+                height:        null,
+                mediaKey:      Convert.ToBase64String(ImageMessage.MediaKey),
+                mediaSha256Enc:Convert.ToBase64String(ImageMessage.FileEncSha256),
+                null, null);
+
+        if (AudioMessage != null)
+            return (type, text,
+                mediaUrl:      AudioMessage.Url,
+                mimeType:      AudioMessage.MimeType,
+                fileName:      null,
+                fileSize:      (long?)AudioMessage.FileLength,
+                duration:      AudioMessage.Seconds,
+                width:         null,
+                height:        null,
+                mediaKey:      Convert.ToBase64String(AudioMessage.MediaKey),
+                mediaSha256Enc:Convert.ToBase64String(AudioMessage.FileEncSha256),
+                null, null);
+
+        if (VideoMessage != null)
+            return (type, text,
+                mediaUrl:      VideoMessage.Url,
+                mimeType:      VideoMessage.MimeType,
+                fileName:      null,
+                fileSize:      (long?)VideoMessage.FileLength,
+                duration:      VideoMessage.Seconds,
+                width:         VideoMessage.Width,
+                height:        VideoMessage.Height,
+                mediaKey:      Convert.ToBase64String(VideoMessage.MediaKey),
+                mediaSha256Enc:Convert.ToBase64String(VideoMessage.FileEncSha256),
+                null, null);
+
+        if (DocumentMessage != null)
+            return (type, text,
+                mediaUrl:      DocumentMessage.Url,
+                mimeType:      DocumentMessage.MimeType,
+                fileName:      DocumentMessage.FileName,
+                fileSize:      (long?)DocumentMessage.FileLength,
+                duration:      null,
+                width:         null,
+                height:        null,
+                mediaKey:      Convert.ToBase64String(DocumentMessage.MediaKey),
+                mediaSha256Enc:Convert.ToBase64String(DocumentMessage.FileEncSha256),
+                null, null);
+
+        if (StickerMessage != null)
+            return (type, text,
+                mediaUrl:      StickerMessage.Url,
+                mimeType:      StickerMessage.MimeType,
+                fileName:      null,
+                fileSize:      (long?)StickerMessage.FileLength,
+                duration:      null,
+                width:         StickerMessage.Width,
+                height:        StickerMessage.Height,
+                mediaKey:      Convert.ToBase64String(StickerMessage.MediaKey),
+                mediaSha256Enc:Convert.ToBase64String(StickerMessage.FileEncSha256),
+                null, null);
+
+        if (ReactionMessage != null)
+            return (type, null, null, null, null, null, null, null, null, null, null,
+                reactionEmoji:    ReactionMessage.Text,
+                reactionTargetId: ReactionMessage.Key?.Id);
+
+        return (type, text, null, null, null, null, null, null, null, null, null, null, null);
+    }
 
     public byte[] ToByteArray()
     {
@@ -346,9 +450,11 @@ public sealed class WAMessage
                 case 2:  msg.SenderKeyDist = SenderKeyDistributionMessage.ParseFrom(r.ReadBytes()); break;
                 case 3:  msg.ImageMessage = ImageMessage.ParseFrom(r.ReadBytes()); break;
                 case 4:  msg.AudioMessage = AudioMessage.ParseFrom(r.ReadBytes()); break;
+                case 5:  msg.VideoMessage = VideoMessage.ParseFrom(r.ReadBytes()); break;
                 case 6:  msg.ExtendedTextMessage = ExtendedTextMessage.ParseFrom(r.ReadBytes()); break;
                 case 12: msg.ProtocolMsg = ProtocolMessage.ParseFrom(r.ReadBytes()); break;
                 case 15: msg.DocumentMessage = DocumentMessage.ParseFrom(r.ReadBytes()); break;
+                case 50: msg.StickerMessage = StickerMessage.ParseFrom(r.ReadBytes()); break;
                 case 31: msg.DeviceSentMessage = DeviceSentMessage.ParseFrom(r.ReadBytes()); break;
                 case 35: msg.MessageContextInfo = MessageContextInfo.ParseFrom(r.ReadBytes()); break;
                 case 46:  msg.HistorySyncNotification = HistorySyncNotification.Decode(r.ReadBytes()); break;
@@ -515,6 +621,86 @@ public sealed class AudioMessage
                 case 8:  msg.FileEncSha256 = r.ReadBytes(); break;
                 case 9:  msg.DirectPath = r.ReadString(); break;
                 case 12: msg.MediaKeyTimestamp = (long)r.ReadUInt64(); break;
+                default: r.Skip(wire); break;
+            }
+        }
+        return msg;
+    }
+}
+
+/// <summary>Field 5 of Message. A video with optional caption.</summary>
+public sealed class VideoMessage
+{
+    public string Url { get; set; } = "";           // field 1
+    public string MimeType { get; set; } = "";      // field 2
+    public byte[] FileSha256 { get; set; } = [];    // field 3
+    public ulong FileLength { get; set; }            // field 4
+    public uint Seconds { get; set; }               // field 5
+    public byte[] MediaKey { get; set; } = [];      // field 7
+    public string Caption { get; set; } = "";       // field 9
+    public byte[] FileEncSha256 { get; set; } = []; // field 10
+    public string DirectPath { get; set; } = "";    // field 11
+    public uint Width { get; set; }                 // field 20
+    public uint Height { get; set; }                // field 21
+
+    public static VideoMessage ParseFrom(byte[] data)
+    {
+        var msg = new VideoMessage();
+        var r = ProtoEncoder.CreateReader(data);
+        while (r.HasMore)
+        {
+            var (field, wire) = r.ReadTag();
+            switch (field)
+            {
+                case 1:  msg.Url = r.ReadString(); break;
+                case 2:  msg.MimeType = r.ReadString(); break;
+                case 3:  msg.FileSha256 = r.ReadBytes(); break;
+                case 4:  msg.FileLength = r.ReadUInt64(); break;
+                case 5:  msg.Seconds = r.ReadUInt32(); break;
+                case 7:  msg.MediaKey = r.ReadBytes(); break;
+                case 9:  msg.Caption = r.ReadString(); break;
+                case 10: msg.FileEncSha256 = r.ReadBytes(); break;
+                case 11: msg.DirectPath = r.ReadString(); break;
+                case 20: msg.Width = r.ReadUInt32(); break;
+                case 21: msg.Height = r.ReadUInt32(); break;
+                default: r.Skip(wire); break;
+            }
+        }
+        return msg;
+    }
+}
+
+/// <summary>Field 50 of Message. A sticker.</summary>
+public sealed class StickerMessage
+{
+    public string Url { get; set; } = "";           // field 1
+    public string MimeType { get; set; } = "";      // field 2
+    public byte[] FileSha256 { get; set; } = [];    // field 3
+    public ulong FileLength { get; set; }            // field 4
+    public byte[] MediaKey { get; set; } = [];      // field 5
+    public byte[] FileEncSha256 { get; set; } = []; // field 6
+    public string DirectPath { get; set; } = "";    // field 7
+    public uint Width { get; set; }                 // field 9
+    public uint Height { get; set; }                // field 10
+
+    public static StickerMessage ParseFrom(byte[] data)
+    {
+        var msg = new StickerMessage();
+        var r = ProtoEncoder.CreateReader(data);
+        while (r.HasMore)
+        {
+            var (field, wire) = r.ReadTag();
+            switch (field)
+            {
+                case 1:  msg.Url = r.ReadString(); break;
+                case 2:  msg.MimeType = r.ReadString(); break;
+                case 3:  msg.FileSha256 = r.ReadBytes(); break;
+                case 4:  msg.FileLength = r.ReadUInt64(); break;
+                case 5:  msg.MediaKey = r.ReadBytes(); break;
+                case 6:  msg.FileEncSha256 = r.ReadBytes(); break;
+                case 7:  msg.DirectPath = r.ReadString(); break;
+                case 9:  msg.Width = r.ReadUInt32(); break;
+                case 10: msg.Height = r.ReadUInt32(); break;
                 default: r.Skip(wire); break;
             }
         }

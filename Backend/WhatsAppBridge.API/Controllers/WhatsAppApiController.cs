@@ -325,5 +325,22 @@ public class WhatsAppApiController : ControllerBase
 
 public record SendMessageRequest(string To, string Body, string? SessionId = null);
 public record SendMediaRequest(string To, string MediaUrl, string? Caption = null, string? SessionId = null);
-public record WhatsAppMessage(string Id, string From, string To, string Body, long Timestamp);
+public record WhatsAppMessage(
+    string Id,
+    string From,
+    string To,
+    string Body,
+    long Timestamp,
+    string Type = "text",
+    string? MediaUrl = null,
+    string? MimeType = null,
+    string? FileName = null,
+    long? FileSize = null,
+    uint? Duration = null,
+    uint? Width = null,
+    uint? Height = null,
+    string? MediaKey = null,
+    string? MediaSha256Enc = null,
+    string? ReactionEmoji = null,
+    string? ReactionTargetId = null);
 public record WhatsAppContact(string Id, string Name, string Number);
