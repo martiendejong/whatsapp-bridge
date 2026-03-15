@@ -58,6 +58,9 @@ public sealed class WhatsAppClient : IAsyncDisposable
     /// <summary>Fired when the connection is lost.</summary>
     public event EventHandler? Disconnected;
 
+    /// <summary>Fired when a HistorySync blob is received, decrypted, and processed.</summary>
+    public event EventHandler<HistorySyncBatch>? HistorySyncReceived;
+
     // ─── Properties ─────────────────────────────────────────────────────────
 
     public ConnectionState State => _state;
@@ -125,6 +128,7 @@ public sealed class WhatsAppClient : IAsyncDisposable
                 Connected?.Invoke(this, EventArgs.Empty);
             };
             _noiseProcessor.MessageReceived += (_, msg) => MessageReceived?.Invoke(this, msg);
+            _noiseProcessor.HistorySyncReceived += (_, batch) => HistorySyncReceived?.Invoke(this, batch);
 
             await _noiseProcessor.PerformHandshakeAsync(_cts.Token);
 
