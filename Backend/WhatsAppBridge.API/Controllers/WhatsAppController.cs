@@ -438,6 +438,22 @@ public class WhatsAppController : ControllerBase
         return Ok(_whatsappService.GetSessionDebugInfo(sessionId));
     }
 
+    /// <summary>
+    /// Debug: disconnect and immediately reconnect a session.
+    /// Use this after deploying to trigger WhatsApp to resend history sync blobs.
+    /// The phone will send INITIAL_BOOTSTRAP blobs again on fresh reconnect.
+    /// Example: POST /api/WhatsApp/test-reconnect/{sessionId}
+    /// </summary>
+    [AllowAnonymous]
+    [HttpPost("test-reconnect/{sessionId}")]
+    public async Task<IActionResult> TestReconnect(string sessionId)
+    {
+        await _whatsappService.DisconnectSessionAsync(sessionId);
+        await Task.Delay(2000); // brief pause so socket fully closes
+        await _whatsappService.RestoreSessionAsync(sessionId);
+        return Ok(new { message = "Reconnecting session — phone will resend history sync blobs", sessionId });
+    }
+
     [HttpDelete("sessions/{sessionId}")]
     public async Task<IActionResult> DeleteSession(string sessionId)
     {
