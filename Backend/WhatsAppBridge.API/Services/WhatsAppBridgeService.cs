@@ -259,6 +259,30 @@ public class WhatsAppBridgeService : IAsyncDisposable
         await client.SendReadReceiptAsync(jid, messageId, timestamp, CancellationToken.None);
     }
 
+    public async Task<string?> ResolveLidAsync(string sessionId, string lidJid)
+    {
+        if (!_clients.TryGetValue(sessionId, out var client) || !client.IsConnected)
+            return null;
+        return await client.ResolveLidAsync(lidJid, CancellationToken.None);
+    }
+
+    public async Task<List<object>?> FetchMessageHistoryAsync(string sessionId, string jid, int count)
+    {
+        if (!_clients.TryGetValue(sessionId, out var client) || !client.IsConnected)
+            return null;
+        var messages = await client.FetchMessageHistoryAsync(jid, count, CancellationToken.None);
+        return messages.Select(m => (object)new
+        {
+            id        = m.Id,
+            from      = m.From,
+            remoteJid = m.RemoteJid,
+            text      = m.Text,
+            fromMe    = m.FromMe,
+            timestamp = m.Timestamp,
+            pushName  = m.PushName,
+        }).ToList();
+    }
+
     public async Task<List<WhatsAppContact>?> GetContactsAsync(string sessionId)
     {
         if (!_clients.TryGetValue(sessionId, out var client) || !client.IsConnected)

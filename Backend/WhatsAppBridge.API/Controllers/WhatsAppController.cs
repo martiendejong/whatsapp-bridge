@@ -438,6 +438,71 @@ public class WhatsAppController : ControllerBase
         return Ok(_whatsappService.GetSessionDebugInfo(sessionId));
     }
 
+    /// <summary>
+    /// Debug: resolve a LID JID to a phone JID via usync IQ.
+    /// Sends a live usync query to WhatsApp and returns the resolved phone JID.
+    /// Example: GET /api/WhatsApp/test-resolve-lid/{sessionId}/261542083862683%40lid
+    /// </summary>
+    [AllowAnonymous]
+    [HttpGet("test-resolve-lid/{sessionId}/{lid}")]
+    public async Task<IActionResult> TestResolveLid(string sessionId, string lid)
+    {
+        var resolved = await _whatsappService.ResolveLidAsync(sessionId, lid);
+        return Ok(new
+        {
+            lid,
+            resolved,
+            success = resolved != null,
+        });
+    }
+
+    /// <summary>
+    /// Debug: return all stored messages for a chat JID from the in-memory message store.
+    /// Example: GET /api/WhatsApp/test-stored-messages/{sessionId}/261542083862683%40lid
+    /// </summary>
+    [AllowAnonymous]
+    [HttpGet("test-stored-messages/{sessionId}/{chatId}")]
+    public async Task<IActionResult> TestStoredMessages(string sessionId, string chatId)
+    {
+        var messages = await _whatsappService.GetMessagesAsync(sessionId, chatId, 100);
+        return Ok(new
+        {
+            chatId,
+            count = messages?.Count ?? 0,
+            messages,
+        });
+    }
+
+    /// <summary>
+    /// Debug: attempt to fetch message history for a JID by sending a w:msg sync IQ.
+    /// Also resolves LID JIDs to phone JIDs first via usync before fetching.
+    /// Example: POST /api/WhatsApp/test-fetch-history/{sessionId}/261542083862683%40lid
+    /// </summary>
+    [AllowAnonymous]
+    [HttpPost("test-fetch-history/{sessionId}/{chatId}")]
+    public async Task<IActionResult> TestFetchHistory(string sessionId, string chatId)
+    {
+        // If it's a LID, resolve to phone JID first
+        var resolvedJid = chatId;
+        if (chatId.EndsWith("@lid"))
+        {
+            var phoneJid = await _whatsappService.ResolveLidAsync(sessionId, chatId);
+            if (phoneJid != null)
+            {
+                resolvedJid = phoneJid;
+            }
+        }
+
+        var messages = await _whatsappService.FetchMessageHistoryAsync(sessionId, resolvedJid, 50);
+        return Ok(new
+        {
+            requestedJid = chatId,
+            resolvedJid,
+            count = messages?.Count ?? 0,
+            messages,
+        });
+    }
+
     [HttpDelete("sessions/{sessionId}")]
     public async Task<IActionResult> DeleteSession(string sessionId)
     {
