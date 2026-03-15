@@ -239,6 +239,13 @@ public sealed class WhatsAppClient : IAsyncDisposable
         return _noiseProcessor.GetGroupJids();
     }
 
+    public Task<string?> ResolveLidAsync(string lidJid, CancellationToken ct)
+    {
+        if (_noiseProcessor == null || _state != ConnectionState.Connected)
+            return Task.FromResult<string?>(null);
+        return _noiseProcessor.ResolveLidAsync(lidJid, ct);
+    }
+
     public Task<Dawa.Noise.GroupMetadata?> FetchGroupMetadataAsync(string groupJid, CancellationToken ct)
     {
         if (_noiseProcessor == null || _state != ConnectionState.Connected)

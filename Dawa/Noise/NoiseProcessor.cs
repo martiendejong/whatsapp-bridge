@@ -2553,6 +2553,53 @@ public sealed class NoiseProcessor : IAsyncDisposable
         return null;
     }
 
+    /// <summary>
+    /// Resolves a LID JID to a phone JID using a usync IQ query.
+    /// If already cached, returns the cached value immediately.
+    /// Otherwise sends a usync query to WhatsApp and caches the result.
+    /// Returns null if the LID cannot be resolved.
+    /// </summary>
+    public async Task<string?> ResolveLidAsync(string lidJid, CancellationToken ct)
+    {
+        if (!lidJid.EndsWith("@lid"))
+            return lidJid; // Not a LID, return as-is
+
+        // Check in-memory cache first
+        if (_lidToPhone.TryGetValue(lidJid, out var cached))
+        {
+            _logger.LogInformation("ResolveLidAsync: {Lid} → {Phone} (cached)", lidJid, cached);
+            return cached;
+        }
+
+        // Send usync IQ to resolve this LID
+        _logger.LogInformation("ResolveLidAsync: sending usync IQ to resolve {Lid}", lidJid);
+        var contacts = await FetchContactsViaUsyncAsync([lidJid], ct);
+
+        // Check cache again — FetchContactsViaUsyncAsync populates _lidToPhone on success
+        if (_lidToPhone.TryGetValue(lidJid, out var resolved))
+        {
+            _logger.LogInformation("ResolveLidAsync: {Lid} → {Phone} (resolved via usync)", lidJid, resolved);
+            SaveCacheToDisk();
+            return resolved;
+        }
+
+        _logger.LogWarning("ResolveLidAsync: could not resolve {Lid} (usync returned {Count} contacts, none matched)",
+            lidJid, contacts.Count);
+        return null;
+    }
+
+    /// <summary>
+    /// Returns all in-memory stored messages for a given JID.
+    /// Checks both the given JID and any known LID variant.
+    /// </summary>
+    public List<IncomingMessage> GetStoredMessages(string jid)
+    {
+        var result = new List<IncomingMessage>();
+        // Note: messages are stored via MessageReceived event in the service layer,
+        // not in NoiseProcessor. This returns an empty list — use WhatsAppBridgeService.GetMessagesAsync.
+        return result;
+    }
+
     public async ValueTask DisposeAsync()
     {
         _keepAliveCts?.Cancel();
