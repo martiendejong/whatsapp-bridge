@@ -57,6 +57,15 @@ public sealed class NoiseProcessor : IAsyncDisposable
     // Shared HttpClient for CDN media uploads
     private static readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(60) };
 
+    // Track the last on-demand history request so we can auto-resend when the phone sends a retry receipt
+    private (string ChatJid, string? OldestMsgId, bool OldestMsgFromMe, long OldestMsgTimestampMs, int Count)? _lastPdoRequest;
+    private readonly HashSet<string> _sentPdoMsgIds = new();
+
+    // Index into auth.PreKeys for retry receipts — incremented per receipt so each message
+    // gets a unique one-time pre-key. Without this all retry receipts would advertise the
+    // same pre-key; only the first re-encrypted message would decrypt (the key gets consumed).
+    private int _retryPreKeyIndex = 0;
+
     public event EventHandler<string>? QRCodeGenerated;
     public event EventHandler<AuthState>? Authenticated;
     public event EventHandler<IncomingMessage>? MessageReceived;
@@ -308,15 +317,7 @@ public sealed class NoiseProcessor : IAsyncDisposable
                 HandlePresenceNode(node);
                 break;
             case "receipt":
-                HandleReceiptNode(node);
-                // Ack the receipt back to server
-                {
-                    var receiptId   = node.GetAttr("id") ?? "";
-                    var receiptFrom = node.GetAttr("from") ?? node.GetAttr("to") ?? "";
-                    var receiptT    = long.TryParse(node.GetAttr("t"), out var rt) ? rt : 0L;
-                    if (!string.IsNullOrEmpty(receiptId) && !string.IsNullOrEmpty(receiptFrom))
-                        _ = SendAckAsync(receiptId, receiptFrom, receiptT);
-                }
+                await HandleReceiptAsync(node, ct);
                 break;
             case "success":
                 if (!_sessionAuthenticated)
@@ -416,6 +417,28 @@ public sealed class NoiseProcessor : IAsyncDisposable
                     PendingRoutingInfo = routingBytes;
                     _logger.LogInformation("Received edge_routing ({Len} bytes) — stored for next reconnect.", routingBytes.Length);
                 }
+            }
+            else if (child.Tag == "offline_preview")
+            {
+                // WA sends offline_preview to tell us there are queued offline messages.
+                // Baileys responds with <ib><offline_batch count="100"/></ib> to trigger delivery.
+                // Without this, WA never delivers the offline messages.
+                var msgCount = child.GetAttr("message") ?? "0";
+                _logger.LogInformation("offline_preview: {Count} queued messages — requesting offline_batch", msgCount);
+                var offlineBatch = new BinaryNode("ib")
+                {
+                    Content = new List<BinaryNode>
+                    {
+                        new("offline_batch", new Dictionary<string, string> { ["count"] = "100" }),
+                    },
+                };
+                await SendNodeAsync(offlineBatch, ct);
+            }
+            else if (child.Tag == "offline")
+            {
+                // WA sends this after delivering all offline messages.
+                var offlineCount = child.GetAttr("count") ?? "0";
+                _logger.LogInformation("offline delivery complete: {Count} items received", offlineCount);
             }
             else if (child.Tag == "thread_metadata")
             {
@@ -1117,6 +1140,9 @@ public sealed class NoiseProcessor : IAsyncDisposable
     /// a fresh pre-key bundle. Called when we receive a message we cannot decrypt
     /// (e.g. our session state was lost after a restart).
     /// </summary>
+    public Task SendManualRetryReceiptAsync(string to, string msgId, long timestamp, CancellationToken ct) =>
+        SendRetryReceiptAsync(msgId, to, timestamp);
+
     private async Task SendRetryReceiptAsync(string msgId, string to, long timestamp)
     {
         try
@@ -1140,6 +1166,10 @@ public sealed class NoiseProcessor : IAsyncDisposable
                         ["v"]     = "1",
                     }),
                     new("registration", null, new byte[] { (byte)(_auth.RegistrationId >> 24), (byte)(_auth.RegistrationId >> 16), (byte)(_auth.RegistrationId >> 8), (byte)_auth.RegistrationId }),
+                    // <keys> — our identity + signed pre-key + one-time pre-key so the sender can
+                    // re-establish a fresh Signal session. MUST include <key> (one-time pre-key) —
+                    // without it the phone ACKs the retry receipt but never re-encrypts the message.
+                    BuildRetryKeysNode(_auth),
                 },
             };
             await SendNodeAsync(retry, cts.Token);
@@ -1149,6 +1179,62 @@ public sealed class NoiseProcessor : IAsyncDisposable
         {
             _logger.LogWarning(ex, "Failed to send retry receipt for {MsgId}", msgId);
         }
+    }
+
+    /// Builds a <skey> node from our signed pre-key — included in retry receipts so the
+    /// sender can re-encrypt using a fresh Signal session with our current keys.
+    private static BinaryNode BuildSignedPreKeyNode(Auth.AuthState auth)
+    {
+        var spkId = auth.SignedPreKeyId;
+        var idBytes = new byte[] { (byte)(spkId >> 16), (byte)(spkId >> 8), (byte)spkId };
+        return new BinaryNode("skey", null, new List<BinaryNode>
+        {
+            new("id",        null, idBytes),
+            new("value",     null, auth.SignedPreKeyPublic),
+            new("signature", null, auth.SignedPreKeySignature),
+        });
+    }
+
+    /// Builds the <keys> node for retry receipts.
+    /// Node order matches Baileys: type, identity, key (one-time), skey (signed), device-identity.
+    /// The device-identity is REQUIRED for the phone to trust and process the retry receipt.
+    /// Uses _retryPreKeyIndex to assign a unique pre-key per message so that if multiple
+    /// re-encrypted pkmsg responses arrive they can each be decrypted independently.
+    private BinaryNode BuildRetryKeysNode(Auth.AuthState auth)
+    {
+        static byte[] Be3(uint v) => [(byte)(v >> 16), (byte)(v >> 8), (byte)v];
+
+        var children = new List<BinaryNode>
+        {
+            new("type",     null, new byte[] { 5 }),   // DJB_TYPE = 0x05
+            new("identity", null, auth.SignedIdentityKeyPublic),
+        };
+
+        // Pick a unique one-time pre-key for each retry receipt. _retryPreKeyIndex increments
+        // per call so that each re-encrypted pkmsg response uses a different X3DH pre-key and
+        // can be decrypted independently (keys are consumed by InitIncomingSession on use).
+        var keyIndex = _retryPreKeyIndex++;
+        var otpk = keyIndex < auth.PreKeys.Count ? auth.PreKeys[keyIndex] : auth.PreKeys.LastOrDefault();
+        if (otpk != null)
+        {
+            // <key> comes BEFORE <skey> — this matches Baileys xmppPreKey / xmppSignedPreKey order
+            children.Add(new BinaryNode("key", null, new List<BinaryNode>
+            {
+                new("id",    null, Be3(otpk.Id)),
+                new("value", null, otpk.Public),
+            }));
+        }
+
+        // <skey> (signed pre-key) AFTER <key>
+        children.Add(BuildSignedPreKeyNode(auth));
+
+        // device-identity — REQUIRED! Phone uses this to verify our device and re-establish session.
+        if (auth.Account != null)
+        {
+            children.Add(new BinaryNode("device-identity") { Content = auth.Account });
+        }
+
+        return new BinaryNode("keys", null, children);
     }
 
     /// <summary>
@@ -2900,6 +2986,10 @@ public sealed class NoiseProcessor : IAsyncDisposable
             ["to"]   = $"{myPhone}@s.whatsapp.net",
         }) { Content = contentNodes };
 
+        // Track this PDO message so that if the phone sends a retry receipt we can resend
+        _sentPdoMsgIds.Add(msgId);
+        _lastPdoRequest = (targetChatJid, null, false, 0, count);
+
         await SendNodeAsync(msgNode, ct);
         _logger.LogInformation("OnDemandHistorySync: sent peerDataOperationRequestMessage (msgId={Id}) to self", msgId);
     }
@@ -3654,11 +3744,14 @@ public sealed class NoiseProcessor : IAsyncDisposable
 
     public event EventHandler<(string MessageId, Messages.MessageStatus Status)>? MessageStatusUpdated;
 
-    private void HandleReceiptNode(BinaryNode node)
+    private async Task HandleReceiptAsync(BinaryNode node, CancellationToken ct)
     {
         var id   = node.GetAttr("id") ?? "";
+        var from = node.GetAttr("from") ?? node.GetAttr("to") ?? "";
         var type = node.GetAttr("type") ?? "delivery";
+        var t    = long.TryParse(node.GetAttr("t"), out var rt) ? rt : 0L;
 
+        // Update delivery/read status for outgoing messages
         var status = type switch
         {
             "read"     => Messages.MessageStatus.Read,
@@ -3671,6 +3764,52 @@ public sealed class NoiseProcessor : IAsyncDisposable
             _messageStatuses[id] = status;
             MessageStatusUpdated?.Invoke(this, (id, status));
             _logger.LogDebug("Receipt: msg {Id} → {Status}", id, status);
+        }
+
+        // ACK the receipt
+        if (!string.IsNullOrEmpty(id) && !string.IsNullOrEmpty(from))
+        {
+            try
+            {
+                using var cts2 = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                var ack = new BinaryNode("ack", new Dictionary<string, string>
+                {
+                    ["id"]    = id,
+                    ["to"]    = from,
+                    ["class"] = "receipt",
+                    ["t"]     = t.ToString(),
+                });
+                await SendNodeAsync(ack, cts2.Token);
+                _logger.LogDebug("Sent ACK for receipt id={Id} from={From}", id, from);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to ACK receipt {Id}", id);
+            }
+        }
+
+        // If the phone tells us it couldn't decrypt one of our PDO messages, resend it
+        if (type == "retry" && _sentPdoMsgIds.Contains(id) && _lastPdoRequest.HasValue)
+        {
+            var req = _lastPdoRequest.Value;
+            _logger.LogInformation(
+                "HandleReceipt: phone can't decrypt our PDO {Id} — resending fresh PDO for chat {Chat}",
+                id, req.ChatJid);
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await RequestOnDemandHistorySyncAsync(req.ChatJid, req.Count, ct);
+                }
+                catch (Exception ex2)
+                {
+                    _logger.LogWarning(ex2, "Failed to resend PDO after retry receipt");
+                }
+            }, ct);
+        }
+        else if (type == "retry")
+        {
+            _logger.LogInformation("HandleReceipt: retry receipt for non-PDO message {Id} from {From} — ACK'd, not resending", id, from);
         }
     }
 

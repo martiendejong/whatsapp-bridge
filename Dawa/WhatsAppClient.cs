@@ -256,6 +256,13 @@ public sealed class WhatsAppClient : IAsyncDisposable
         return _noiseProcessor.GetGroupJids();
     }
 
+    public Task SendManualRetryReceiptAsync(string senderJid, string msgId, long timestamp, CancellationToken ct)
+    {
+        if (_noiseProcessor == null || _state != ConnectionState.Connected)
+            return Task.CompletedTask;
+        return _noiseProcessor.SendManualRetryReceiptAsync(senderJid, msgId, timestamp, ct);
+    }
+
     public Task<string?> ResolveLidAsync(string lidJid, CancellationToken ct)
     {
         if (_noiseProcessor == null || _state != ConnectionState.Connected)
