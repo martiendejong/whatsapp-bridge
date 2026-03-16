@@ -184,7 +184,21 @@ public class WhatsAppApiController : ControllerBase
                     ? $"WhatsApp session '{request.SessionId}' not found or not connected"
                     : "No active WhatsApp session" });
 
-            var result = await _whatsappService.SendMediaAsync(sessionId, request.To, request.MediaUrl, request.Caption);
+            // Download media from URL
+            using var httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+            var response = await httpClient.GetAsync(request.MediaUrl);
+            response.EnsureSuccessStatusCode();
+            var fileBytes = await response.Content.ReadAsByteArrayAsync();
+            var mimeType = response.Content.Headers.ContentType?.MediaType ?? "application/octet-stream";
+            var mediaType = mimeType.StartsWith("image/") ? "image"
+                          : mimeType.StartsWith("audio/") ? "audio"
+                          : mimeType.StartsWith("video/") ? "video"
+                          : "document";
+            var uri = new Uri(request.MediaUrl);
+            var fn = Path.GetFileName(uri.LocalPath);
+            var result = await _whatsappService.SendMediaAsync(
+                sessionId, request.To, mediaType, mimeType, fileBytes,
+                request.Caption ?? "", fn);
 
             return Ok(result);
         }

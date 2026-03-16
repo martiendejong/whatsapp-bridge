@@ -430,6 +430,111 @@ public class WhatsAppController : ControllerBase
         }
     }
 
+    /// <summary>Send an emoji reaction to a message.</summary>
+    [HttpPost("sessions/{sessionId}/react")]
+    public async Task<IActionResult> SendReaction(string sessionId, [FromBody] ReactRequest request)
+    {
+        var userId = GetUserId();
+        var session = await _context.WhatsAppSessions
+            .FirstOrDefaultAsync(s => s.SessionId == sessionId && s.UserId == userId);
+
+        if (session == null)
+            return NotFound(new { error = "Session not found" });
+
+        if (session.Status != "connected")
+            return BadRequest(new { error = $"Session is not connected (status: {session.Status})" });
+
+        try
+        {
+            await _whatsappService.SendReactionAsync(sessionId, request.To, request.MessageId, request.FromMe, request.Emoji);
+            return Ok(new { success = true });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    public record ReactRequest(string To, string MessageId, bool FromMe, string Emoji);
+
+    /// <summary>Test reaction (anonymous, dev only).</summary>
+    [AllowAnonymous]
+    [HttpPost("test-react/{sessionId}")]
+    public async Task<IActionResult> TestReact(string sessionId, [FromBody] ReactRequest request)
+    {
+        try
+        {
+            await _whatsappService.SendReactionAsync(sessionId, request.To, request.MessageId, request.FromMe, request.Emoji);
+            return Ok(new { success = true });
+        }
+        catch (Exception ex)
+        {
+            return Ok(new { error = ex.Message });
+        }
+    }
+
+    /// <summary>Send a media message (image, audio, document) — accepts multipart form with file + metadata.</summary>
+    [HttpPost("sessions/{sessionId}/send-media")]
+    public async Task<IActionResult> SendMedia(string sessionId, [FromForm] SendMediaRequest request)
+    {
+        var userId = GetUserId();
+        var session = await _context.WhatsAppSessions
+            .FirstOrDefaultAsync(s => s.SessionId == sessionId && s.UserId == userId);
+
+        if (session == null) return NotFound();
+        if (session.Status != "connected")
+            return BadRequest(new { error = $"Session is not connected (status: {session.Status})" });
+
+        try
+        {
+            using var ms = new MemoryStream();
+            await request.File.CopyToAsync(ms);
+            var fileBytes = ms.ToArray();
+            var mediaType = request.MediaType ?? DetectMediaType(request.File.ContentType);
+            var result = await _whatsappService.SendMediaAsync(
+                sessionId, request.To, mediaType,
+                request.File.ContentType, fileBytes,
+                request.Caption ?? "", request.FileName ?? request.File.FileName);
+            return Ok(result);
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    /// <summary>Test media send (anonymous, dev only) — base64 body.</summary>
+    [AllowAnonymous]
+    [HttpPost("test-send-media/{sessionId}")]
+    public async Task<IActionResult> TestSendMedia(string sessionId, [FromBody] TestMediaRequest request)
+    {
+        try
+        {
+            var fileBytes = Convert.FromBase64String(request.FileBase64);
+            var mediaType = request.MediaType ?? DetectMediaType(request.MimeType);
+            var result = await _whatsappService.SendMediaAsync(
+                sessionId, request.To, mediaType,
+                request.MimeType, fileBytes,
+                request.Caption ?? "", request.FileName ?? "file");
+            return Ok(result);
+        }
+        catch (Exception ex)
+        {
+            return Ok(new { error = ex.Message });
+        }
+    }
+
+    private static string DetectMediaType(string? mimeType) => mimeType switch
+    {
+        { } m when m.StartsWith("image/") => "image",
+        { } m when m.StartsWith("audio/") => "audio",
+        { } m when m.StartsWith("video/") => "video",
+        _ => "document",
+    };
+
+    public record SendMediaRequest(IFormFile File, string To, string? MediaType, string? Caption, string? FileName);
+    public record TestMediaRequest(string To, string FileBase64, string MimeType, string? MediaType, string? Caption, string? FileName);
+
     /// <summary>Debug: show internal cache state (anonymous, dev only).</summary>
     [AllowAnonymous]
     [HttpGet("test-debug/{sessionId}")]

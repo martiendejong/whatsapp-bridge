@@ -253,6 +253,39 @@ public sealed class WhatsAppClient : IAsyncDisposable
         return _noiseProcessor.FetchGroupMetadataAsync(groupJid, ct);
     }
 
+    /// <summary>
+    /// Sends a media message (image, audio, or document) to a phone number or JID.
+    /// </summary>
+    /// <param name="to">Phone number or full JID.</param>
+    /// <param name="fileBytes">Raw (unencrypted) file bytes.</param>
+    /// <param name="mediaType">"image", "audio", or "document".</param>
+    /// <param name="mimeType">MIME type, e.g. "image/jpeg".</param>
+    /// <param name="caption">Optional caption (shown under images).</param>
+    /// <param name="fileName">File name (used for documents).</param>
+    public async Task SendMediaAsync(string to, byte[] fileBytes, string mediaType, string mimeType,
+        string caption = "", string fileName = "", CancellationToken cancellationToken = default)
+    {
+        if (_noiseProcessor == null || _state != ConnectionState.Connected)
+            throw new InvalidOperationException("Client is not connected.");
+
+        var jid = to.Contains('@') ? to : $"{new string(to.Where(char.IsDigit).ToArray())}@s.whatsapp.net";
+        await _noiseProcessor.SendMediaAsync(jid, fileBytes, mediaType, mimeType, caption, fileName, cancellationToken);
+    }
+
+    /// <summary>
+    /// Sends an emoji reaction to a specific message.
+    /// </summary>
+    /// <param name="targetJid">JID of the chat containing the target message.</param>
+    /// <param name="targetMessageId">ID of the message being reacted to.</param>
+    /// <param name="targetFromMe">Whether the target message was sent by us.</param>
+    /// <param name="emoji">The reaction emoji (e.g. "👍"). Pass "" to remove.</param>
+    public Task SendReactionAsync(string targetJid, string targetMessageId, bool targetFromMe, string emoji, CancellationToken ct)
+    {
+        if (_noiseProcessor == null || _state != ConnectionState.Connected)
+            throw new InvalidOperationException("Client is not connected.");
+        return _noiseProcessor.SendReactionAsync(targetJid, targetMessageId, targetFromMe, emoji, ct);
+    }
+
     // ─── Disconnection ───────────────────────────────────────────────────────
 
     /// <summary>Disconnects from WhatsApp and cleans up resources.</summary>

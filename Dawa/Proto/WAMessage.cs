@@ -292,11 +292,15 @@ public sealed class WAMessage
 {
     public string? Conversation { get; set; }                        // field 1
     public SenderKeyDistributionMessage? SenderKeyDist { get; set; } // field 2
+    public ImageMessage? ImageMessage { get; set; }                  // field 3
+    public AudioMessage? AudioMessage { get; set; }                  // field 4
     public ExtendedTextMessage? ExtendedTextMessage { get; set; }    // field 6
     public ProtocolMessage? ProtocolMsg { get; set; }                // field 12
+    public DocumentMessage? DocumentMessage { get; set; }               // field 15
     public DeviceSentMessage? DeviceSentMessage { get; set; }           // field 31
     public MessageContextInfo? MessageContextInfo { get; set; }         // field 35
     public HistorySyncNotification? HistorySyncNotification { get; set; } // field 46
+    public ReactionMessage? ReactionMessage { get; set; }               // field 85
 
     /// <summary>Extracts the text from whatever message type this is.</summary>
     public string? GetText()
@@ -317,8 +321,11 @@ public sealed class WAMessage
     {
         var buf = new List<byte>();
         ProtoEncoder.WriteString(buf, 1, Conversation);
+        if (ImageMessage != null)    ProtoEncoder.WriteMessage(buf, 3,  ImageMessage.ToByteArray());
+        if (AudioMessage != null)    ProtoEncoder.WriteMessage(buf, 4,  AudioMessage.ToByteArray());
         if (ExtendedTextMessage != null)
             ProtoEncoder.WriteMessage(buf, 6, ExtendedTextMessage.ToByteArray());
+        if (DocumentMessage != null) ProtoEncoder.WriteMessage(buf, 15, DocumentMessage.ToByteArray());
         if (DeviceSentMessage != null)
             ProtoEncoder.WriteMessage(buf, 31, DeviceSentMessage.ToByteArray());
         return [.. buf];
@@ -335,15 +342,36 @@ public sealed class WAMessage
             {
                 case 1:  msg.Conversation = r.ReadString(); break;
                 case 2:  msg.SenderKeyDist = SenderKeyDistributionMessage.ParseFrom(r.ReadBytes()); break;
+                case 3:  msg.ImageMessage = ImageMessage.ParseFrom(r.ReadBytes()); break;
+                case 4:  msg.AudioMessage = AudioMessage.ParseFrom(r.ReadBytes()); break;
                 case 6:  msg.ExtendedTextMessage = ExtendedTextMessage.ParseFrom(r.ReadBytes()); break;
                 case 12: msg.ProtocolMsg = ProtocolMessage.ParseFrom(r.ReadBytes()); break;
+                case 15: msg.DocumentMessage = DocumentMessage.ParseFrom(r.ReadBytes()); break;
                 case 31: msg.DeviceSentMessage = DeviceSentMessage.ParseFrom(r.ReadBytes()); break;
                 case 35: msg.MessageContextInfo = MessageContextInfo.ParseFrom(r.ReadBytes()); break;
                 case 46: msg.HistorySyncNotification = HistorySyncNotification.ParseFrom(r.ReadBytes()); break;
+                case 85: msg.ReactionMessage = ReactionMessage.ParseFrom(r.ReadBytes()); break;
                 default: r.Skip(wire); break;
             }
         }
         return msg;
+    }
+
+    public byte[] ToByteArrayWithReaction()
+    {
+        var buf = new List<byte>();
+        if (ReactionMessage != null)
+            ProtoEncoder.WriteMessage(buf, 85, ReactionMessage.ToByteArray());
+        return [.. buf];
+    }
+
+    public byte[] ToByteArrayWithMedia()
+    {
+        var buf = new List<byte>();
+        if (ImageMessage != null)    ProtoEncoder.WriteMessage(buf, 3,  ImageMessage.ToByteArray());
+        if (AudioMessage != null)    ProtoEncoder.WriteMessage(buf, 4,  AudioMessage.ToByteArray());
+        if (DocumentMessage != null) ProtoEncoder.WriteMessage(buf, 15, DocumentMessage.ToByteArray());
+        return [.. buf];
     }
 }
 
@@ -368,6 +396,171 @@ public sealed class ExtendedTextMessage
             var (field, wire) = r.ReadTag();
             if (field == 1) msg.Text = r.ReadString();
             else r.Skip(wire);
+        }
+        return msg;
+    }
+}
+
+/// <summary>Field 3 of Message. An image with optional caption.</summary>
+public sealed class ImageMessage
+{
+    public string Url { get; set; } = "";           // field 1
+    public string MimeType { get; set; } = "";      // field 2
+    public byte[] FileSha256 { get; set; } = [];    // field 3
+    public ulong FileLength { get; set; }            // field 4
+    public byte[] MediaKey { get; set; } = [];      // field 7
+    public byte[] FileEncSha256 { get; set; } = []; // field 8
+    public string DirectPath { get; set; } = "";    // field 10
+    public string Caption { get; set; } = "";       // field 16
+    public long MediaKeyTimestamp { get; set; }      // field 25
+
+    public byte[] ToByteArray()
+    {
+        var buf = new List<byte>();
+        ProtoEncoder.WriteString(buf, 1, Url);
+        ProtoEncoder.WriteString(buf, 2, MimeType);
+        if (FileSha256.Length > 0)    ProtoEncoder.WriteBytes(buf, 3, FileSha256);
+        if (FileLength > 0)           ProtoEncoder.WriteUInt64(buf, 4, FileLength);
+        if (MediaKey.Length > 0)      ProtoEncoder.WriteBytes(buf, 7, MediaKey);
+        if (FileEncSha256.Length > 0) ProtoEncoder.WriteBytes(buf, 8, FileEncSha256);
+        ProtoEncoder.WriteString(buf, 10, DirectPath);
+        if (!string.IsNullOrEmpty(Caption)) ProtoEncoder.WriteString(buf, 16, Caption);
+        if (MediaKeyTimestamp != 0)   ProtoEncoder.WriteUInt64(buf, 25, (ulong)MediaKeyTimestamp);
+        return [.. buf];
+    }
+
+    public static ImageMessage ParseFrom(byte[] data)
+    {
+        var msg = new ImageMessage();
+        var r = ProtoEncoder.CreateReader(data);
+        while (r.HasMore)
+        {
+            var (field, wire) = r.ReadTag();
+            switch (field)
+            {
+                case 1:  msg.Url = r.ReadString(); break;
+                case 2:  msg.MimeType = r.ReadString(); break;
+                case 3:  msg.FileSha256 = r.ReadBytes(); break;
+                case 4:  msg.FileLength = r.ReadUInt64(); break;
+                case 7:  msg.MediaKey = r.ReadBytes(); break;
+                case 8:  msg.FileEncSha256 = r.ReadBytes(); break;
+                case 10: msg.DirectPath = r.ReadString(); break;
+                case 16: msg.Caption = r.ReadString(); break;
+                case 25: msg.MediaKeyTimestamp = (long)r.ReadUInt64(); break;
+                default: r.Skip(wire); break;
+            }
+        }
+        return msg;
+    }
+}
+
+/// <summary>Field 4 of Message. An audio clip or voice note (ptt=true).</summary>
+public sealed class AudioMessage
+{
+    public string Url { get; set; } = "";           // field 1
+    public string MimeType { get; set; } = "";      // field 2
+    public byte[] FileSha256 { get; set; } = [];    // field 3
+    public ulong FileLength { get; set; }            // field 4
+    public uint Seconds { get; set; }               // field 5 (duration)
+    public bool Ptt { get; set; }                   // field 6 (push-to-talk = voice note)
+    public byte[] MediaKey { get; set; } = [];      // field 7
+    public byte[] FileEncSha256 { get; set; } = []; // field 8
+    public string DirectPath { get; set; } = "";    // field 9
+    public long MediaKeyTimestamp { get; set; }      // field 12
+
+    public byte[] ToByteArray()
+    {
+        var buf = new List<byte>();
+        ProtoEncoder.WriteString(buf, 1, Url);
+        ProtoEncoder.WriteString(buf, 2, MimeType);
+        if (FileSha256.Length > 0)    ProtoEncoder.WriteBytes(buf, 3, FileSha256);
+        if (FileLength > 0)           ProtoEncoder.WriteUInt64(buf, 4, FileLength);
+        if (Seconds > 0)              ProtoEncoder.WriteUInt32(buf, 5, Seconds);
+        if (Ptt)                      ProtoEncoder.WriteBool(buf, 6, Ptt);
+        if (MediaKey.Length > 0)      ProtoEncoder.WriteBytes(buf, 7, MediaKey);
+        if (FileEncSha256.Length > 0) ProtoEncoder.WriteBytes(buf, 8, FileEncSha256);
+        ProtoEncoder.WriteString(buf, 9, DirectPath);
+        if (MediaKeyTimestamp != 0)   ProtoEncoder.WriteUInt64(buf, 12, (ulong)MediaKeyTimestamp);
+        return [.. buf];
+    }
+
+    public static AudioMessage ParseFrom(byte[] data)
+    {
+        var msg = new AudioMessage();
+        var r = ProtoEncoder.CreateReader(data);
+        while (r.HasMore)
+        {
+            var (field, wire) = r.ReadTag();
+            switch (field)
+            {
+                case 1:  msg.Url = r.ReadString(); break;
+                case 2:  msg.MimeType = r.ReadString(); break;
+                case 3:  msg.FileSha256 = r.ReadBytes(); break;
+                case 4:  msg.FileLength = r.ReadUInt64(); break;
+                case 5:  msg.Seconds = r.ReadUInt32(); break;
+                case 6:  msg.Ptt = r.ReadBool(); break;
+                case 7:  msg.MediaKey = r.ReadBytes(); break;
+                case 8:  msg.FileEncSha256 = r.ReadBytes(); break;
+                case 9:  msg.DirectPath = r.ReadString(); break;
+                case 12: msg.MediaKeyTimestamp = (long)r.ReadUInt64(); break;
+                default: r.Skip(wire); break;
+            }
+        }
+        return msg;
+    }
+}
+
+/// <summary>Field 15 of Message. A document/file attachment.</summary>
+public sealed class DocumentMessage
+{
+    public string Url { get; set; } = "";           // field 1
+    public string MimeType { get; set; } = "";      // field 2
+    public string Title { get; set; } = "";         // field 3
+    public byte[] FileSha256 { get; set; } = [];    // field 4
+    public ulong FileLength { get; set; }            // field 5
+    public byte[] MediaKey { get; set; } = [];      // field 7
+    public string FileName { get; set; } = "";      // field 8
+    public byte[] FileEncSha256 { get; set; } = []; // field 9
+    public string DirectPath { get; set; } = "";    // field 10
+    public long MediaKeyTimestamp { get; set; }      // field 16
+
+    public byte[] ToByteArray()
+    {
+        var buf = new List<byte>();
+        ProtoEncoder.WriteString(buf, 1, Url);
+        ProtoEncoder.WriteString(buf, 2, MimeType);
+        ProtoEncoder.WriteString(buf, 3, Title);
+        if (FileSha256.Length > 0)    ProtoEncoder.WriteBytes(buf, 4, FileSha256);
+        if (FileLength > 0)           ProtoEncoder.WriteUInt64(buf, 5, FileLength);
+        if (MediaKey.Length > 0)      ProtoEncoder.WriteBytes(buf, 7, MediaKey);
+        ProtoEncoder.WriteString(buf, 8, FileName);
+        if (FileEncSha256.Length > 0) ProtoEncoder.WriteBytes(buf, 9, FileEncSha256);
+        ProtoEncoder.WriteString(buf, 10, DirectPath);
+        if (MediaKeyTimestamp != 0)   ProtoEncoder.WriteUInt64(buf, 16, (ulong)MediaKeyTimestamp);
+        return [.. buf];
+    }
+
+    public static DocumentMessage ParseFrom(byte[] data)
+    {
+        var msg = new DocumentMessage();
+        var r = ProtoEncoder.CreateReader(data);
+        while (r.HasMore)
+        {
+            var (field, wire) = r.ReadTag();
+            switch (field)
+            {
+                case 1:  msg.Url = r.ReadString(); break;
+                case 2:  msg.MimeType = r.ReadString(); break;
+                case 3:  msg.Title = r.ReadString(); break;
+                case 4:  msg.FileSha256 = r.ReadBytes(); break;
+                case 5:  msg.FileLength = r.ReadUInt64(); break;
+                case 7:  msg.MediaKey = r.ReadBytes(); break;
+                case 8:  msg.FileName = r.ReadString(); break;
+                case 9:  msg.FileEncSha256 = r.ReadBytes(); break;
+                case 10: msg.DirectPath = r.ReadString(); break;
+                case 16: msg.MediaKeyTimestamp = (long)r.ReadUInt64(); break;
+                default: r.Skip(wire); break;
+            }
         }
         return msg;
     }
@@ -661,5 +854,78 @@ public sealed class MessageContextInfo
             }
         }
         return msg;
+    }
+}
+
+/// <summary>Field 85 of Message. Emoji reaction to another message.</summary>
+public sealed class ReactionMessage
+{
+    /// <summary>The message being reacted to.</summary>
+    public MessageKey? Key { get; set; }                  // field 1
+    /// <summary>The reaction emoji (e.g. "👍") or "" to remove reaction.</summary>
+    public string Text { get; set; } = "";                // field 2
+    /// <summary>Sender timestamp in milliseconds.</summary>
+    public long SenderTimestampMs { get; set; }           // field 4
+
+    public static ReactionMessage ParseFrom(byte[] data)
+    {
+        var msg = new ReactionMessage();
+        var r = ProtoEncoder.CreateReader(data);
+        while (r.HasMore)
+        {
+            var (field, wire) = r.ReadTag();
+            switch (field)
+            {
+                case 1: msg.Key = MessageKey.ParseFrom(r.ReadBytes()); break;
+                case 2: msg.Text = r.ReadString(); break;
+                case 4: msg.SenderTimestampMs = (long)r.ReadUInt64(); break;
+                default: r.Skip(wire); break;
+            }
+        }
+        return msg;
+    }
+
+    public byte[] ToByteArray()
+    {
+        var buf = new List<byte>();
+        if (Key != null) ProtoEncoder.WriteMessage(buf, 1, Key.ToByteArray());
+        if (!string.IsNullOrEmpty(Text)) ProtoEncoder.WriteString(buf, 2, Text);
+        if (SenderTimestampMs != 0) ProtoEncoder.WriteUInt64(buf, 4, (ulong)SenderTimestampMs);
+        return [.. buf];
+    }
+}
+
+/// <summary>Key that identifies a specific WhatsApp message.</summary>
+public sealed class MessageKey
+{
+    public string RemoteJid { get; set; } = "";   // field 1
+    public bool   FromMe    { get; set; }          // field 2
+    public string Id        { get; set; } = "";    // field 3
+
+    public static MessageKey ParseFrom(byte[] data)
+    {
+        var msg = new MessageKey();
+        var r = ProtoEncoder.CreateReader(data);
+        while (r.HasMore)
+        {
+            var (field, wire) = r.ReadTag();
+            switch (field)
+            {
+                case 1: msg.RemoteJid = r.ReadString(); break;
+                case 2: msg.FromMe    = r.ReadBool();   break;
+                case 3: msg.Id        = r.ReadString(); break;
+                default: r.Skip(wire); break;
+            }
+        }
+        return msg;
+    }
+
+    public byte[] ToByteArray()
+    {
+        var buf = new List<byte>();
+        if (!string.IsNullOrEmpty(RemoteJid)) ProtoEncoder.WriteString(buf, 1, RemoteJid);
+        if (FromMe) ProtoEncoder.WriteBool(buf, 2, FromMe);
+        if (!string.IsNullOrEmpty(Id)) ProtoEncoder.WriteString(buf, 3, Id);
+        return [.. buf];
     }
 }
