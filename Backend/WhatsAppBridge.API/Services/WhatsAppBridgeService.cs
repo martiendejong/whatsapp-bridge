@@ -415,7 +415,7 @@ public class WhatsAppBridgeService : IAsyncDisposable
             }
         }
 
-        await client.RequestOnDemandHistoryAsync(jid, oldestMsgId, oldestFromMe, oldestTimestamp, count, CancellationToken.None);
+        await client.RequestOnDemandHistorySyncAsync(jid, count, CancellationToken.None);
     }
 
     public async Task<List<object>?> FetchMessageHistoryAsync(string sessionId, string jid, int count)

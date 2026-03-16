@@ -19,6 +19,7 @@ public sealed class HistorySyncNotification
     public string DirectPath    { get; set; } = "";  // field 5
     public int    SyncType      { get; set; }         // field 6
     public int    Progress      { get; set; }         // field 9
+    public byte[] InlineBlob    { get; set; } = [];  // field 10 (newer WA: zlib blob sent inline)
 
     public const int INITIAL_BOOTSTRAP = 0;
     public const int RECENT            = 2;
@@ -43,6 +44,7 @@ public sealed class HistorySyncNotification
                 case 5:  obj.DirectPath    = r.ReadString();      break;
                 case 6:  obj.SyncType      = r.ReadInt32();       break;
                 case 9:  obj.Progress      = r.ReadInt32();       break;
+                case 10: obj.InlineBlob    = r.ReadBytes();       break;
                 default: r.Skip(wt);                              break;
             }
         }
