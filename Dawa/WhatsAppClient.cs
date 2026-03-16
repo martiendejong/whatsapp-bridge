@@ -52,17 +52,14 @@ public sealed class WhatsAppClient : IAsyncDisposable
     /// <summary>Fired when a new message is received.</summary>
     public event EventHandler<IncomingMessage>? MessageReceived;
 
-    /// <summary>Fired for each historical message loaded from WhatsApp history sync on connect.</summary>
-    public event EventHandler<IncomingMessage>? HistoryMessageReceived;
-
-    /// <summary>Fired once after each history sync blob is fully processed. Arg = number of messages emitted.</summary>
-    public event EventHandler<int>? HistorySyncCompleted;
-
     /// <summary>Fired once the session is fully authenticated.</summary>
     public event EventHandler? Connected;
 
     /// <summary>Fired when the connection is lost.</summary>
     public event EventHandler? Disconnected;
+
+    /// <summary>Fired when a HistorySync blob is received, decrypted, and processed.</summary>
+    public event EventHandler<HistorySyncBatch>? HistorySyncReceived;
 
     // ─── Properties ─────────────────────────────────────────────────────────
 
@@ -130,9 +127,8 @@ public sealed class WhatsAppClient : IAsyncDisposable
                 _connectedTcs?.TrySetResult(true);
                 Connected?.Invoke(this, EventArgs.Empty);
             };
-            _noiseProcessor.MessageReceived        += (_, msg) => MessageReceived?.Invoke(this, msg);
-            _noiseProcessor.HistoryMessageReceived += (_, msg) => HistoryMessageReceived?.Invoke(this, msg);
-            _noiseProcessor.HistorySyncCompleted   += (_, n)   => HistorySyncCompleted?.Invoke(this, n);
+            _noiseProcessor.MessageReceived += (_, msg) => MessageReceived?.Invoke(this, msg);
+            _noiseProcessor.HistorySyncReceived += (_, batch) => HistorySyncReceived?.Invoke(this, batch);
 
             await _noiseProcessor.PerformHandshakeAsync(_cts.Token);
 
@@ -230,6 +226,13 @@ public sealed class WhatsAppClient : IAsyncDisposable
         return _noiseProcessor.SendReadReceiptAsync(jid, messageId, timestamp, ct);
     }
 
+    public Task SendManualRetryReceiptAsync(string senderJid, string msgId, long timestamp, CancellationToken ct)
+    {
+        if (_noiseProcessor == null || _state != ConnectionState.Connected)
+            throw new InvalidOperationException("Client is not connected.");
+        return _noiseProcessor.SendManualRetryReceiptAsync(senderJid, msgId, timestamp, ct);
+    }
+
     public Task<List<Dawa.Messages.IncomingMessage>> FetchMessageHistoryAsync(string jid, int count, CancellationToken ct)
     {
         if (_noiseProcessor == null || _state != ConnectionState.Connected)
@@ -237,17 +240,11 @@ public sealed class WhatsAppClient : IAsyncDisposable
         return _noiseProcessor.FetchMessageHistoryAsync(jid, count, ct);
     }
 
-    /// <summary>
-    /// Requests an on-demand history sync from the phone (sends a peerDataOperationRequestMessage
-    /// to our own JID). The phone responds by pushing a HISTORY_SYNC_NOTIFICATION of type ON_DEMAND
-    /// which the receive loop picks up and fires HistoryMessageReceived for each message.
-    /// Returns the messages from that chat that arrived during the push notification (or empty on timeout).
-    /// </summary>
-    public Task<List<Dawa.Messages.IncomingMessage>> RequestOnDemandHistorySyncAsync(string chatJid, int count, CancellationToken ct)
+    public Task RequestOnDemandHistoryAsync(string chatJid, string? oldestMsgId, bool oldestMsgFromMe, long oldestMsgTimestampMs, int count, CancellationToken ct)
     {
         if (_noiseProcessor == null || _state != ConnectionState.Connected)
-            return Task.FromResult(new List<Dawa.Messages.IncomingMessage>());
-        return _noiseProcessor.RequestOnDemandHistorySyncAsync(chatJid, count, ct);
+            return Task.CompletedTask;
+        return _noiseProcessor.RequestOnDemandHistoryAsync(chatJid, oldestMsgId, oldestMsgFromMe, oldestMsgTimestampMs, count, ct);
     }
 
     public List<string> GetGroupJids()
@@ -268,130 +265,6 @@ public sealed class WhatsAppClient : IAsyncDisposable
         if (_noiseProcessor == null || _state != ConnectionState.Connected)
             throw new InvalidOperationException("Client is not connected.");
         return _noiseProcessor.FetchGroupMetadataAsync(groupJid, ct);
-    }
-
-    /// <summary>
-    /// Sends a media message (image, audio, or document) to a phone number or JID.
-    /// </summary>
-    /// <param name="to">Phone number or full JID.</param>
-    /// <param name="fileBytes">Raw (unencrypted) file bytes.</param>
-    /// <param name="mediaType">"image", "audio", or "document".</param>
-    /// <param name="mimeType">MIME type, e.g. "image/jpeg".</param>
-    /// <param name="caption">Optional caption (shown under images).</param>
-    /// <param name="fileName">File name (used for documents).</param>
-    public async Task SendMediaAsync(string to, byte[] fileBytes, string mediaType, string mimeType,
-        string caption = "", string fileName = "", CancellationToken cancellationToken = default)
-    {
-        if (_noiseProcessor == null || _state != ConnectionState.Connected)
-            throw new InvalidOperationException("Client is not connected.");
-
-        var jid = to.Contains('@') ? to : $"{new string(to.Where(char.IsDigit).ToArray())}@s.whatsapp.net";
-        await _noiseProcessor.SendMediaAsync(jid, fileBytes, mediaType, mimeType, caption, fileName, cancellationToken);
-    }
-
-    /// <summary>
-    /// Sends an emoji reaction to a specific message.
-    /// </summary>
-    public Task SendReactionAsync(string targetJid, string targetMessageId, bool targetFromMe, string emoji, CancellationToken ct)
-    {
-        if (_noiseProcessor == null || _state != ConnectionState.Connected)
-            throw new InvalidOperationException("Client is not connected.");
-        return _noiseProcessor.SendReactionAsync(targetJid, targetMessageId, targetFromMe, emoji, ct);
-    }
-
-    /// <summary>Sends a typing indicator (composing) or stops it (paused) for a specific chat.</summary>
-    public Task SendTypingAsync(string jid, bool isTyping, CancellationToken ct)
-    {
-        if (_noiseProcessor == null || _state != ConnectionState.Connected)
-            throw new InvalidOperationException("Client is not connected.");
-        return _noiseProcessor.SendTypingAsync(jid, isTyping, ct);
-    }
-
-    /// <summary>Updates this device's presence to available or unavailable.</summary>
-    public Task SendUserPresenceAsync(bool isOnline, CancellationToken ct)
-    {
-        if (_noiseProcessor == null || _state != ConnectionState.Connected)
-            throw new InvalidOperationException("Client is not connected.");
-        return _noiseProcessor.SendUserPresenceAsync(isOnline, ct);
-    }
-
-    /// <summary>Deletes a sent message for everyone (delete for everyone).</summary>
-    public Task RevokeMessageAsync(string jid, string messageId, bool fromMe, long timestamp, CancellationToken ct)
-    {
-        if (_noiseProcessor == null || _state != ConnectionState.Connected)
-            throw new InvalidOperationException("Client is not connected.");
-        return _noiseProcessor.RevokeMessageAsync(jid, messageId, fromMe, timestamp, ct);
-    }
-
-    /// <summary>Forwards a message (as text) to another chat.</summary>
-    public Task ForwardMessageAsync(string toJid, string text, CancellationToken ct)
-    {
-        if (_noiseProcessor == null || _state != ConnectionState.Connected)
-            throw new InvalidOperationException("Client is not connected.");
-        return _noiseProcessor.ForwardMessageAsync(toJid, text, ct);
-    }
-
-    /// <summary>Creates a new WhatsApp group. Returns the group JID or null on failure.</summary>
-    public Task<string?> CreateGroupAsync(string subject, IEnumerable<string> participantJids, CancellationToken ct)
-    {
-        if (_noiseProcessor == null || _state != ConnectionState.Connected)
-            throw new InvalidOperationException("Client is not connected.");
-        return _noiseProcessor.CreateGroupAsync(subject, participantJids, ct);
-    }
-
-    /// <summary>Leaves a WhatsApp group.</summary>
-    public Task LeaveGroupAsync(string groupJid, CancellationToken ct)
-    {
-        if (_noiseProcessor == null || _state != ConnectionState.Connected)
-            throw new InvalidOperationException("Client is not connected.");
-        return _noiseProcessor.LeaveGroupAsync(groupJid, ct);
-    }
-
-    /// <summary>Adds participants to a group.</summary>
-    public Task<Dictionary<string, string>> AddGroupParticipantsAsync(string groupJid, IEnumerable<string> jids, CancellationToken ct)
-    {
-        if (_noiseProcessor == null || _state != ConnectionState.Connected)
-            throw new InvalidOperationException("Client is not connected.");
-        return _noiseProcessor.AddGroupParticipantsAsync(groupJid, jids, ct);
-    }
-
-    /// <summary>Removes participants from a group.</summary>
-    public Task<Dictionary<string, string>> RemoveGroupParticipantsAsync(string groupJid, IEnumerable<string> jids, CancellationToken ct)
-    {
-        if (_noiseProcessor == null || _state != ConnectionState.Connected)
-            throw new InvalidOperationException("Client is not connected.");
-        return _noiseProcessor.RemoveGroupParticipantsAsync(groupJid, jids, ct);
-    }
-
-    /// <summary>Gets the group invite link URL.</summary>
-    public Task<string?> GetGroupInviteLinkAsync(string groupJid, CancellationToken ct)
-    {
-        if (_noiseProcessor == null || _state != ConnectionState.Connected)
-            throw new InvalidOperationException("Client is not connected.");
-        return _noiseProcessor.GetGroupInviteLinkAsync(groupJid, ct);
-    }
-
-    /// <summary>Updates the group subject (name).</summary>
-    public Task UpdateGroupSubjectAsync(string groupJid, string newSubject, CancellationToken ct)
-    {
-        if (_noiseProcessor == null || _state != ConnectionState.Connected)
-            throw new InvalidOperationException("Client is not connected.");
-        return _noiseProcessor.UpdateGroupSubjectAsync(groupJid, newSubject, ct);
-    }
-
-    /// <summary>Downloads and decrypts a media file from the WhatsApp CDN.</summary>
-    public static Task<byte[]> DownloadMediaAsync(string mediaUrl, string mediaKeyBase64, string mimeType)
-        => Noise.NoiseProcessor.DownloadMediaAsync(mediaUrl, mediaKeyBase64, mimeType);
-
-    /// <summary>Gets the delivery/read status of a sent message.</summary>
-    public Messages.MessageStatus? GetMessageStatus(string messageId)
-        => _noiseProcessor?.GetMessageStatus(messageId);
-
-    /// <summary>Fired when a message delivery/read receipt is received.</summary>
-    public event EventHandler<(string MessageId, Messages.MessageStatus Status)>? MessageStatusUpdated
-    {
-        add    { if (_noiseProcessor != null) _noiseProcessor.MessageStatusUpdated += value; }
-        remove { if (_noiseProcessor != null) _noiseProcessor.MessageStatusUpdated -= value; }
     }
 
     // ─── Disconnection ───────────────────────────────────────────────────────

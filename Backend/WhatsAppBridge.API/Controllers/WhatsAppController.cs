@@ -224,6 +224,7 @@ public class WhatsAppController : ControllerBase
 
     public record JidRequest(string Jid);
     public record ReadReceiptRequest(string Jid, string MessageId, long Timestamp);
+    public record RequestHistoryBody(string ChatJid, int Count = 100, bool NoAnchor = false);
 
     /// <summary>
     /// Test endpoint for sending messages without auth (dev only).
@@ -635,6 +636,42 @@ public class WhatsAppController : ControllerBase
     /// Also resolves LID JIDs to phone JIDs first via usync before fetching.
     /// Example: POST /api/WhatsApp/test-fetch-history/{sessionId}/261542083862683%40lid
     /// </summary>
+    /// <summary>
+    /// Sends a PeerDataOperationRequestMessage (ON_DEMAND) to the primary phone,
+    /// asking it to push older messages for the given chat as a HistorySync blob.
+    /// The phone replies asynchronously — new messages will appear in getMessages after a few seconds.
+    /// Example: POST /api/WhatsApp/sessions/{sessionId}/request-history
+    /// Body: { "chatJid": "31621427931@s.whatsapp.net", "count": 100 }
+    /// </summary>
+    [AllowAnonymous]
+    [HttpPost("sessions/{sessionId}/request-history")]
+    public async Task<IActionResult> RequestHistory(string sessionId, [FromBody] RequestHistoryBody body)
+    {
+        var jid = body.ChatJid.Contains('@') ? body.ChatJid : $"{body.ChatJid}@s.whatsapp.net";
+        var count = body.Count > 0 ? body.Count : 100;
+        await _whatsappService.RequestOnDemandHistoryAsync(sessionId, jid, count, body.NoAnchor);
+        return Ok(new { success = true, message = $"ON_DEMAND history request sent for {jid}, asking for {count} messages" });
+    }
+
+    public record RetryReceiptBody(string SenderJid, string MsgId, long Timestamp);
+
+    /// <summary>
+    /// Manually sends a retry receipt for a specific message ID.
+    /// Use when a pkmsg arrived from the phone but couldn't be decrypted (pre-key consumed)
+    /// and the server's offline copy has expired. This prompts the phone to re-encrypt and resend.
+    /// Example: POST /api/WhatsApp/sessions/{sessionId}/send-retry-receipt
+    /// Body: { "senderJid": "31633984381@s.whatsapp.net", "msgId": "AC0285F5B1EDFE10C33D1758DBFEC1BF", "timestamp": 1773656045 }
+    /// </summary>
+    [AllowAnonymous]
+    [HttpPost("sessions/{sessionId}/send-retry-receipt")]
+    public async Task<IActionResult> SendRetryReceipt(string sessionId, [FromBody] RetryReceiptBody body)
+    {
+        if (!_whatsappService.TryGetClient(sessionId, out var client) || client == null)
+            return NotFound(new { error = "Session not found" });
+        await client.SendManualRetryReceiptAsync(body.SenderJid, body.MsgId, body.Timestamp, CancellationToken.None);
+        return Ok(new { success = true, message = $"Retry receipt sent for {body.MsgId} to {body.SenderJid}" });
+    }
+
     [AllowAnonymous]
     [HttpPost("test-fetch-history/{sessionId}/{chatId}")]
     public async Task<IActionResult> TestFetchHistory(string sessionId, string chatId)

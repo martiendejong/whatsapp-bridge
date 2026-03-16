@@ -48,6 +48,12 @@ public sealed class SignalKeyStore
 
     public bool HasSession(string jid) => _sessions.ContainsKey(ResolveJid(jid));
 
+    public void DeleteSession(string jid)
+    {
+        _sessions.Remove(ResolveJid(jid));
+        SaveSessions();
+    }
+
     // ─── LID ↔ Phone JID mapping ────────────────────────────────────────────
 
     /// <summary>
@@ -178,12 +184,16 @@ public sealed class SignalKeyStore
         }
         catch { /* best effort */ }
 
+        // Preserve existing ReceiveChainKey so incoming messages (e.g. ON_DEMAND history
+        // sync response) can still be decrypted after we reset the outgoing session.
+        var existingReceiveChainKey = GetSession(jid)?.ReceiveChainKey ?? [];
+
         var session = new SignalSession
         {
             RemoteJid                = jid,
             RootKey                  = rootKey2,
             SendChainKey             = sendChainKey,
-            ReceiveChainKey          = [],
+            ReceiveChainKey          = existingReceiveChainKey,
             SendCounter              = 0,
             ReceiveCounter           = 0,
             PrevSendCounter          = 0,

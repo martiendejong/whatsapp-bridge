@@ -388,6 +388,36 @@ public class WhatsAppBridgeService : IAsyncDisposable
         return await client.ResolveLidAsync(lidJid, CancellationToken.None);
     }
 
+    public async Task RequestOnDemandHistoryAsync(string sessionId, string chatJid, int count, bool noAnchor = false)
+    {
+        var client = GetConnectedClient(sessionId);
+
+        // Normalize JID
+        var jid = chatJid.Contains('@') ? chatJid : $"{chatJid}@s.whatsapp.net";
+        var key = $"{sessionId}:{jid}";
+
+        // Find the oldest stored message for this chat so the phone knows where to continue from
+        string? oldestMsgId     = null;
+        bool    oldestFromMe    = false;
+        long    oldestTimestamp = 0;
+
+        if (!noAnchor && _messageStore.TryGetValue(key, out var msgs))
+        {
+            lock (msgs)
+            {
+                var oldest = msgs.MinBy(m => m.Timestamp);
+                if (oldest != null)
+                {
+                    oldestMsgId     = oldest.Id;
+                    oldestFromMe    = oldest.From == "me";
+                    oldestTimestamp = oldest.Timestamp * 1000L; // convert seconds → milliseconds
+                }
+            }
+        }
+
+        await client.RequestOnDemandHistoryAsync(jid, oldestMsgId, oldestFromMe, oldestTimestamp, count, CancellationToken.None);
+    }
+
     public async Task<List<object>?> FetchMessageHistoryAsync(string sessionId, string jid, int count)
     {
         if (!_clients.TryGetValue(sessionId, out var client) || !client.IsConnected)
@@ -611,6 +641,9 @@ public class WhatsAppBridgeService : IAsyncDisposable
             cacheDebugInfo = client.GetCacheDebugInfo(),
         };
     }
+
+    public bool TryGetClient(string sessionId, out WhatsAppClient? client)
+        => _clients.TryGetValue(sessionId, out client);
 
     private WhatsAppClient GetConnectedClient(string sessionId)
     {
