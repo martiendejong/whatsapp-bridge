@@ -723,6 +723,225 @@ public class WhatsAppController : ControllerBase
         return Ok(new { message = "Reconnecting session — phone will resend history sync blobs", sessionId });
     }
 
+    // ─── Message operations ───────────────────────────────────────────────────
+
+    public record RevokeRequest(string Jid, string MessageId, bool FromMe, long Timestamp);
+
+    /// <summary>Revoke (delete for everyone) a message you sent.</summary>
+    [HttpPost("sessions/{sessionId}/revoke")]
+    public async Task<IActionResult> RevokeMessage(string sessionId, [FromBody] RevokeRequest request)
+    {
+        var userId = GetUserId();
+        var session = await _context.WhatsAppSessions
+            .FirstOrDefaultAsync(s => s.SessionId == sessionId && s.UserId == userId);
+        if (session == null) return NotFound(new { error = "Session not found" });
+        if (session.Status != "connected")
+            return BadRequest(new { error = $"Session is not connected (status: {session.Status})" });
+        try
+        {
+            await _whatsappService.RevokeMessageAsync(sessionId, request.Jid, request.MessageId, request.FromMe, request.Timestamp);
+            return Ok(new { success = true });
+        }
+        catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
+    }
+
+    public record ForwardRequest(string ToJid, string Text);
+
+    /// <summary>Forward a message (as plain text) to another chat.</summary>
+    [HttpPost("sessions/{sessionId}/forward")]
+    public async Task<IActionResult> ForwardMessage(string sessionId, [FromBody] ForwardRequest request)
+    {
+        var userId = GetUserId();
+        var session = await _context.WhatsAppSessions
+            .FirstOrDefaultAsync(s => s.SessionId == sessionId && s.UserId == userId);
+        if (session == null) return NotFound(new { error = "Session not found" });
+        if (session.Status != "connected")
+            return BadRequest(new { error = $"Session is not connected (status: {session.Status})" });
+        try
+        {
+            await _whatsappService.ForwardMessageAsync(sessionId, request.ToJid, request.Text);
+            return Ok(new { success = true });
+        }
+        catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
+    }
+
+    public record TypingRequest(string Jid, bool IsTyping);
+
+    /// <summary>Send a typing indicator (composing / paused) to a chat.</summary>
+    [HttpPost("sessions/{sessionId}/typing")]
+    public async Task<IActionResult> SendTyping(string sessionId, [FromBody] TypingRequest request)
+    {
+        var userId = GetUserId();
+        var session = await _context.WhatsAppSessions
+            .FirstOrDefaultAsync(s => s.SessionId == sessionId && s.UserId == userId);
+        if (session == null) return NotFound(new { error = "Session not found" });
+        if (session.Status != "connected")
+            return BadRequest(new { error = $"Session is not connected (status: {session.Status})" });
+        try
+        {
+            await _whatsappService.SendTypingAsync(sessionId, request.Jid, request.IsTyping);
+            return Ok(new { success = true });
+        }
+        catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
+    }
+
+    public record UserPresenceRequest(bool IsOnline);
+
+    /// <summary>Set your own online/offline presence status.</summary>
+    [HttpPost("sessions/{sessionId}/user-presence")]
+    public async Task<IActionResult> SendUserPresence(string sessionId, [FromBody] UserPresenceRequest request)
+    {
+        var userId = GetUserId();
+        var session = await _context.WhatsAppSessions
+            .FirstOrDefaultAsync(s => s.SessionId == sessionId && s.UserId == userId);
+        if (session == null) return NotFound(new { error = "Session not found" });
+        if (session.Status != "connected")
+            return BadRequest(new { error = $"Session is not connected (status: {session.Status})" });
+        try
+        {
+            await _whatsappService.SendPresenceAsync(sessionId, request.IsOnline);
+            return Ok(new { success = true });
+        }
+        catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
+    }
+
+    // ─── Group operations ─────────────────────────────────────────────────────
+
+    public record CreateGroupRequest(string Subject, List<string> Participants);
+
+    /// <summary>Create a new WhatsApp group and return the new group JID.</summary>
+    [HttpPost("sessions/{sessionId}/groups")]
+    public async Task<IActionResult> CreateGroup(string sessionId, [FromBody] CreateGroupRequest request)
+    {
+        var userId = GetUserId();
+        var session = await _context.WhatsAppSessions
+            .FirstOrDefaultAsync(s => s.SessionId == sessionId && s.UserId == userId);
+        if (session == null) return NotFound(new { error = "Session not found" });
+        if (session.Status != "connected")
+            return BadRequest(new { error = $"Session is not connected (status: {session.Status})" });
+        try
+        {
+            var groupJid = await _whatsappService.CreateGroupAsync(sessionId, request.Subject, request.Participants);
+            return Ok(new { success = true, groupJid });
+        }
+        catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
+    }
+
+    /// <summary>Leave a group.</summary>
+    [HttpDelete("sessions/{sessionId}/groups/{groupJid}")]
+    public async Task<IActionResult> LeaveGroup(string sessionId, string groupJid)
+    {
+        var userId = GetUserId();
+        var session = await _context.WhatsAppSessions
+            .FirstOrDefaultAsync(s => s.SessionId == sessionId && s.UserId == userId);
+        if (session == null) return NotFound(new { error = "Session not found" });
+        if (session.Status != "connected")
+            return BadRequest(new { error = $"Session is not connected (status: {session.Status})" });
+        try
+        {
+            await _whatsappService.LeaveGroupAsync(sessionId, groupJid);
+            return Ok(new { success = true });
+        }
+        catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
+    }
+
+    public record ParticipantsRequest(List<string> Participants);
+
+    /// <summary>Add participants to a group. Returns a map of JID → result code.</summary>
+    [HttpPost("sessions/{sessionId}/groups/{groupJid}/participants")]
+    public async Task<IActionResult> AddGroupParticipants(string sessionId, string groupJid, [FromBody] ParticipantsRequest request)
+    {
+        var userId = GetUserId();
+        var session = await _context.WhatsAppSessions
+            .FirstOrDefaultAsync(s => s.SessionId == sessionId && s.UserId == userId);
+        if (session == null) return NotFound(new { error = "Session not found" });
+        if (session.Status != "connected")
+            return BadRequest(new { error = $"Session is not connected (status: {session.Status})" });
+        try
+        {
+            var results = await _whatsappService.AddGroupParticipantsAsync(sessionId, groupJid, request.Participants);
+            return Ok(new { success = true, results });
+        }
+        catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
+    }
+
+    /// <summary>Remove participants from a group. Returns a map of JID → result code.</summary>
+    [HttpDelete("sessions/{sessionId}/groups/{groupJid}/participants")]
+    public async Task<IActionResult> RemoveGroupParticipants(string sessionId, string groupJid, [FromBody] ParticipantsRequest request)
+    {
+        var userId = GetUserId();
+        var session = await _context.WhatsAppSessions
+            .FirstOrDefaultAsync(s => s.SessionId == sessionId && s.UserId == userId);
+        if (session == null) return NotFound(new { error = "Session not found" });
+        if (session.Status != "connected")
+            return BadRequest(new { error = $"Session is not connected (status: {session.Status})" });
+        try
+        {
+            var results = await _whatsappService.RemoveGroupParticipantsAsync(sessionId, groupJid, request.Participants);
+            return Ok(new { success = true, results });
+        }
+        catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
+    }
+
+    /// <summary>Get the invite link for a group.</summary>
+    [HttpGet("sessions/{sessionId}/groups/{groupJid}/invite-link")]
+    public async Task<IActionResult> GetGroupInviteLink(string sessionId, string groupJid)
+    {
+        var userId = GetUserId();
+        var session = await _context.WhatsAppSessions
+            .FirstOrDefaultAsync(s => s.SessionId == sessionId && s.UserId == userId);
+        if (session == null) return NotFound(new { error = "Session not found" });
+        if (session.Status != "connected")
+            return BadRequest(new { error = $"Session is not connected (status: {session.Status})" });
+        try
+        {
+            var link = await _whatsappService.GetGroupInviteLinkAsync(sessionId, groupJid);
+            return Ok(new { inviteLink = link });
+        }
+        catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
+    }
+
+    public record UpdateSubjectRequest(string Subject);
+
+    /// <summary>Update the subject (name) of a group.</summary>
+    [HttpPut("sessions/{sessionId}/groups/{groupJid}/subject")]
+    public async Task<IActionResult> UpdateGroupSubject(string sessionId, string groupJid, [FromBody] UpdateSubjectRequest request)
+    {
+        var userId = GetUserId();
+        var session = await _context.WhatsAppSessions
+            .FirstOrDefaultAsync(s => s.SessionId == sessionId && s.UserId == userId);
+        if (session == null) return NotFound(new { error = "Session not found" });
+        if (session.Status != "connected")
+            return BadRequest(new { error = $"Session is not connected (status: {session.Status})" });
+        try
+        {
+            await _whatsappService.UpdateGroupSubjectAsync(sessionId, groupJid, request.Subject);
+            return Ok(new { success = true });
+        }
+        catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
+    }
+
+    // ─── LID resolution ───────────────────────────────────────────────────────
+
+    /// <summary>Resolve a LID JID to its phone-number JID.</summary>
+    [HttpGet("sessions/{sessionId}/resolve-lid/{lid}")]
+    public async Task<IActionResult> ResolveLid(string sessionId, string lid)
+    {
+        var userId = GetUserId();
+        var session = await _context.WhatsAppSessions
+            .FirstOrDefaultAsync(s => s.SessionId == sessionId && s.UserId == userId);
+        if (session == null) return NotFound(new { error = "Session not found" });
+        try
+        {
+            var phoneJid = await _whatsappService.ResolveLidAsync(sessionId, lid);
+            if (phoneJid == null) return NotFound(new { error = "LID could not be resolved" });
+            return Ok(new { lid, phoneJid });
+        }
+        catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
+    }
+
+    // ─── Session management ───────────────────────────────────────────────────
+
     [HttpDelete("sessions/{sessionId}")]
     public async Task<IActionResult> DeleteSession(string sessionId)
     {
