@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
 using WhatsAppBridge.API.Data;
+using WhatsAppBridge.API.Models;
 using WhatsAppBridge.API.Services;
 
 namespace WhatsAppBridge.API.Controllers;
@@ -647,10 +648,17 @@ public class WhatsAppController : ControllerBase
     [HttpPost("sessions/{sessionId}/request-history")]
     public async Task<IActionResult> RequestHistory(string sessionId, [FromBody] RequestHistoryBody body)
     {
-        var jid = body.ChatJid.Contains('@') ? body.ChatJid : $"{body.ChatJid}@s.whatsapp.net";
-        var count = body.Count > 0 ? body.Count : 100;
-        await _whatsappService.RequestOnDemandHistoryAsync(sessionId, jid, count, body.NoAnchor);
-        return Ok(new { success = true, message = $"ON_DEMAND history request sent for {jid}, asking for {count} messages" });
+        try
+        {
+            var jid = body.ChatJid.Contains('@') ? body.ChatJid : $"{body.ChatJid}@s.whatsapp.net";
+            var count = body.Count > 0 ? body.Count : 100;
+            await _whatsappService.RequestOnDemandHistoryAsync(sessionId, jid, count, body.NoAnchor);
+            return Ok(new { success = true, message = $"ON_DEMAND history request sent for {jid}, asking for {count} messages" });
+        }
+        catch (WhatsAppServiceException ex)
+        {
+            return StatusCode(503, new { error = ex.Message });
+        }
     }
 
     public record RetryReceiptBody(string SenderJid, string MsgId, long Timestamp);
@@ -668,6 +676,8 @@ public class WhatsAppController : ControllerBase
     {
         if (!_whatsappService.TryGetClient(sessionId, out var client) || client == null)
             return NotFound(new { error = "Session not found" });
+        if (!client.IsConnected)
+            return StatusCode(503, new { error = "Session is not connected" });
         await client.SendManualRetryReceiptAsync(body.SenderJid, body.MsgId, body.Timestamp, CancellationToken.None);
         return Ok(new { success = true, message = $"Retry receipt sent for {body.MsgId} to {body.SenderJid}" });
     }
