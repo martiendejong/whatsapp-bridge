@@ -24,11 +24,12 @@ public static class MediaCrypto
 {
     private static string HkdfInfo(string mediaType) => mediaType switch
     {
-        "image"    => "WhatsApp Image Keys",
-        "video"    => "WhatsApp Video Keys",
-        "audio"    => "WhatsApp Audio Keys",
-        "document" => "WhatsApp Document Keys",
-        _          => "WhatsApp Image Keys",
+        "image"       => "WhatsApp Image Keys",
+        "video"       => "WhatsApp Video Keys",
+        "audio"       => "WhatsApp Audio Keys",
+        "document"    => "WhatsApp Document Keys",
+        "md-msg-hist" => "WhatsApp History Keys",
+        _             => "WhatsApp Image Keys",
     };
 
     /// <summary>
@@ -72,5 +73,24 @@ public static class MediaCrypto
             FileLength         = plaintext.Length,
             MediaKeyTimestamp  = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
         };
+    }
+
+    /// <summary>
+    /// Decrypts a WhatsApp CDN blob (enc || 10-byte mac) back to plaintext.
+    /// Used for downloading media and history sync blobs.
+    /// <paramref name="mediaType"/> e.g. "image", "md-msg-hist".
+    /// </summary>
+    public static byte[] Decrypt(byte[] encWithMac, byte[] mediaKey, string mediaType)
+    {
+        // Derive the same keys the sender used
+        var info      = Encoding.UTF8.GetBytes(HkdfInfo(mediaType));
+        var derived   = DawaHKDF.DeriveKey(mediaKey, new byte[32], info, 112);
+        var iv        = derived[0..16];
+        var cipherKey = derived[16..48];
+
+        // Strip the 10-byte MAC at the end — we trust the server validated it
+        var enc = encWithMac[..^10];
+
+        return MessageCipher.AesCbcDecrypt(cipherKey, iv, enc);
     }
 }

@@ -295,12 +295,16 @@ public sealed class WAMessage
     public ImageMessage? ImageMessage { get; set; }                  // field 3
     public AudioMessage? AudioMessage { get; set; }                  // field 4
     public ExtendedTextMessage? ExtendedTextMessage { get; set; }    // field 6
+    public VideoMessage? VideoMessage { get; set; }                  // field 5
+    public StickerMessage? StickerMessage { get; set; }              // field 50
     public ProtocolMessage? ProtocolMsg { get; set; }                // field 12
     public DocumentMessage? DocumentMessage { get; set; }               // field 15
     public DeviceSentMessage? DeviceSentMessage { get; set; }           // field 31
     public MessageContextInfo? MessageContextInfo { get; set; }         // field 35
     public HistorySyncNotification? HistorySyncNotification { get; set; } // field 46
     public ReactionMessage? ReactionMessage { get; set; }               // field 85
+    public PeerDataOperationRequestMessage?  PeerDataOperation { get; set; } // field 145
+    public PeerDataOperationResponseMessage? PeerDataResponse  { get; set; } // field 146
 
     /// <summary>Extracts the text from whatever message type this is.</summary>
     public string? GetText()
@@ -311,11 +315,113 @@ public sealed class WAMessage
             return ExtendedTextMessage.Text;
         if (DeviceSentMessage?.Message != null)
             return DeviceSentMessage.Message.GetText();
+        // Caption from media messages
+        if (ImageMessage    != null && !string.IsNullOrEmpty(ImageMessage.Caption))    return ImageMessage.Caption;
+        if (VideoMessage    != null && !string.IsNullOrEmpty(VideoMessage.Caption))    return VideoMessage.Caption;
+        if (DocumentMessage != null && !string.IsNullOrEmpty(DocumentMessage.Title)) return DocumentMessage.Title;
         return null;
     }
 
-    /// <summary>True if this is a HistorySync notification message (field 46 present).</summary>
-    public bool IsHistorySync => HistorySyncNotification != null;
+    /// <summary>Returns the MessageType enum value for this message.</summary>
+    public Messages.MessageType GetMessageType()
+    {
+        if (DeviceSentMessage?.Message != null) return DeviceSentMessage.Message.GetMessageType();
+        if (!string.IsNullOrEmpty(Conversation))    return Messages.MessageType.Text;
+        if (ExtendedTextMessage != null)            return Messages.MessageType.Text;
+        if (ImageMessage    != null)                return Messages.MessageType.Image;
+        if (AudioMessage    != null)                return Messages.MessageType.Audio;
+        if (VideoMessage    != null)                return Messages.MessageType.Video;
+        if (DocumentMessage != null)                return Messages.MessageType.Document;
+        if (StickerMessage  != null)                return Messages.MessageType.Sticker;
+        if (ReactionMessage != null)                return Messages.MessageType.Reaction;
+        if (ProtocolMsg     != null)                return Messages.MessageType.Protocol;
+        return Messages.MessageType.Unknown;
+    }
+
+    /// <summary>Extracts all fields needed to populate an IncomingMessage from this WAMessage.</summary>
+    public (Messages.MessageType type, string? text, string? mediaUrl, string? mimeType,
+            string? fileName, long? fileSize, uint? duration, uint? width, uint? height,
+            string? mediaKey, string? mediaSha256Enc, string? reactionEmoji, string? reactionTargetId)
+        GetAllFields()
+    {
+        var inner = DeviceSentMessage?.Message;
+        if (inner != null) return inner.GetAllFields();
+
+        var type = GetMessageType();
+        var text = GetText();
+
+        if (ImageMessage != null)
+            return (type, text,
+                mediaUrl:      ImageMessage.Url,
+                mimeType:      ImageMessage.MimeType,
+                fileName:      null,
+                fileSize:      (long?)ImageMessage.FileLength,
+                duration:      null,
+                width:         null,
+                height:        null,
+                mediaKey:      Convert.ToBase64String(ImageMessage.MediaKey),
+                mediaSha256Enc:Convert.ToBase64String(ImageMessage.FileEncSha256),
+                null, null);
+
+        if (AudioMessage != null)
+            return (type, text,
+                mediaUrl:      AudioMessage.Url,
+                mimeType:      AudioMessage.MimeType,
+                fileName:      null,
+                fileSize:      (long?)AudioMessage.FileLength,
+                duration:      AudioMessage.Seconds,
+                width:         null,
+                height:        null,
+                mediaKey:      Convert.ToBase64String(AudioMessage.MediaKey),
+                mediaSha256Enc:Convert.ToBase64String(AudioMessage.FileEncSha256),
+                null, null);
+
+        if (VideoMessage != null)
+            return (type, text,
+                mediaUrl:      VideoMessage.Url,
+                mimeType:      VideoMessage.MimeType,
+                fileName:      null,
+                fileSize:      (long?)VideoMessage.FileLength,
+                duration:      VideoMessage.Seconds,
+                width:         VideoMessage.Width,
+                height:        VideoMessage.Height,
+                mediaKey:      Convert.ToBase64String(VideoMessage.MediaKey),
+                mediaSha256Enc:Convert.ToBase64String(VideoMessage.FileEncSha256),
+                null, null);
+
+        if (DocumentMessage != null)
+            return (type, text,
+                mediaUrl:      DocumentMessage.Url,
+                mimeType:      DocumentMessage.MimeType,
+                fileName:      DocumentMessage.FileName,
+                fileSize:      (long?)DocumentMessage.FileLength,
+                duration:      null,
+                width:         null,
+                height:        null,
+                mediaKey:      Convert.ToBase64String(DocumentMessage.MediaKey),
+                mediaSha256Enc:Convert.ToBase64String(DocumentMessage.FileEncSha256),
+                null, null);
+
+        if (StickerMessage != null)
+            return (type, text,
+                mediaUrl:      StickerMessage.Url,
+                mimeType:      StickerMessage.MimeType,
+                fileName:      null,
+                fileSize:      (long?)StickerMessage.FileLength,
+                duration:      null,
+                width:         StickerMessage.Width,
+                height:        StickerMessage.Height,
+                mediaKey:      Convert.ToBase64String(StickerMessage.MediaKey),
+                mediaSha256Enc:Convert.ToBase64String(StickerMessage.FileEncSha256),
+                null, null);
+
+        if (ReactionMessage != null)
+            return (type, null, null, null, null, null, null, null, null, null, null,
+                reactionEmoji:    ReactionMessage.Text,
+                reactionTargetId: ReactionMessage.Key?.Id);
+
+        return (type, text, null, null, null, null, null, null, null, null, null, null, null);
+    }
 
     public byte[] ToByteArray()
     {
@@ -344,17 +450,29 @@ public sealed class WAMessage
                 case 2:  msg.SenderKeyDist = SenderKeyDistributionMessage.ParseFrom(r.ReadBytes()); break;
                 case 3:  msg.ImageMessage = ImageMessage.ParseFrom(r.ReadBytes()); break;
                 case 4:  msg.AudioMessage = AudioMessage.ParseFrom(r.ReadBytes()); break;
+                case 5:  msg.VideoMessage = VideoMessage.ParseFrom(r.ReadBytes()); break;
                 case 6:  msg.ExtendedTextMessage = ExtendedTextMessage.ParseFrom(r.ReadBytes()); break;
                 case 12: msg.ProtocolMsg = ProtocolMessage.ParseFrom(r.ReadBytes()); break;
                 case 15: msg.DocumentMessage = DocumentMessage.ParseFrom(r.ReadBytes()); break;
+                case 50: msg.StickerMessage = StickerMessage.ParseFrom(r.ReadBytes()); break;
                 case 31: msg.DeviceSentMessage = DeviceSentMessage.ParseFrom(r.ReadBytes()); break;
                 case 35: msg.MessageContextInfo = MessageContextInfo.ParseFrom(r.ReadBytes()); break;
-                case 46: msg.HistorySyncNotification = HistorySyncNotification.ParseFrom(r.ReadBytes()); break;
-                case 85: msg.ReactionMessage = ReactionMessage.ParseFrom(r.ReadBytes()); break;
+                case 46:  msg.HistorySyncNotification = HistorySyncNotification.Decode(r.ReadBytes()); break;
+                case 85:  msg.ReactionMessage = ReactionMessage.ParseFrom(r.ReadBytes()); break;
+                case 145: msg.PeerDataOperation = null; r.Skip(wire); break; // outgoing only — skip
+                case 146: msg.PeerDataResponse = PeerDataOperationResponseMessage.Decode(r.ReadBytes()); break;
                 default: r.Skip(wire); break;
             }
         }
         return msg;
+    }
+
+    public byte[] ToByteArrayWithPeerDataOperation()
+    {
+        var buf = new List<byte>();
+        if (PeerDataOperation != null)
+            ProtoEncoder.WriteMessage(buf, 145, PeerDataOperation.ToByteArray());
+        return [.. buf];
     }
 
     public byte[] ToByteArrayWithReaction()
@@ -510,6 +628,86 @@ public sealed class AudioMessage
     }
 }
 
+/// <summary>Field 5 of Message. A video with optional caption.</summary>
+public sealed class VideoMessage
+{
+    public string Url { get; set; } = "";           // field 1
+    public string MimeType { get; set; } = "";      // field 2
+    public byte[] FileSha256 { get; set; } = [];    // field 3
+    public ulong FileLength { get; set; }            // field 4
+    public uint Seconds { get; set; }               // field 5
+    public byte[] MediaKey { get; set; } = [];      // field 7
+    public string Caption { get; set; } = "";       // field 9
+    public byte[] FileEncSha256 { get; set; } = []; // field 10
+    public string DirectPath { get; set; } = "";    // field 11
+    public uint Width { get; set; }                 // field 20
+    public uint Height { get; set; }                // field 21
+
+    public static VideoMessage ParseFrom(byte[] data)
+    {
+        var msg = new VideoMessage();
+        var r = ProtoEncoder.CreateReader(data);
+        while (r.HasMore)
+        {
+            var (field, wire) = r.ReadTag();
+            switch (field)
+            {
+                case 1:  msg.Url = r.ReadString(); break;
+                case 2:  msg.MimeType = r.ReadString(); break;
+                case 3:  msg.FileSha256 = r.ReadBytes(); break;
+                case 4:  msg.FileLength = r.ReadUInt64(); break;
+                case 5:  msg.Seconds = r.ReadUInt32(); break;
+                case 7:  msg.MediaKey = r.ReadBytes(); break;
+                case 9:  msg.Caption = r.ReadString(); break;
+                case 10: msg.FileEncSha256 = r.ReadBytes(); break;
+                case 11: msg.DirectPath = r.ReadString(); break;
+                case 20: msg.Width = r.ReadUInt32(); break;
+                case 21: msg.Height = r.ReadUInt32(); break;
+                default: r.Skip(wire); break;
+            }
+        }
+        return msg;
+    }
+}
+
+/// <summary>Field 50 of Message. A sticker.</summary>
+public sealed class StickerMessage
+{
+    public string Url { get; set; } = "";           // field 1
+    public string MimeType { get; set; } = "";      // field 2
+    public byte[] FileSha256 { get; set; } = [];    // field 3
+    public ulong FileLength { get; set; }            // field 4
+    public byte[] MediaKey { get; set; } = [];      // field 5
+    public byte[] FileEncSha256 { get; set; } = []; // field 6
+    public string DirectPath { get; set; } = "";    // field 7
+    public uint Width { get; set; }                 // field 9
+    public uint Height { get; set; }                // field 10
+
+    public static StickerMessage ParseFrom(byte[] data)
+    {
+        var msg = new StickerMessage();
+        var r = ProtoEncoder.CreateReader(data);
+        while (r.HasMore)
+        {
+            var (field, wire) = r.ReadTag();
+            switch (field)
+            {
+                case 1:  msg.Url = r.ReadString(); break;
+                case 2:  msg.MimeType = r.ReadString(); break;
+                case 3:  msg.FileSha256 = r.ReadBytes(); break;
+                case 4:  msg.FileLength = r.ReadUInt64(); break;
+                case 5:  msg.MediaKey = r.ReadBytes(); break;
+                case 6:  msg.FileEncSha256 = r.ReadBytes(); break;
+                case 7:  msg.DirectPath = r.ReadString(); break;
+                case 9:  msg.Width = r.ReadUInt32(); break;
+                case 10: msg.Height = r.ReadUInt32(); break;
+                default: r.Skip(wire); break;
+            }
+        }
+        return msg;
+    }
+}
+
 /// <summary>Field 15 of Message. A document/file attachment.</summary>
 public sealed class DocumentMessage
 {
@@ -628,6 +826,10 @@ public sealed class SenderKeyDistributionMessage
 public sealed class ProtocolMessage
 {
     public int Type { get; set; }  // field 5: type enum
+    // field 6: historySyncNotification (populated when Type == TYPE_HISTORY_SYNC_NOTIFICATION)
+    public Dawa.Proto.HistorySyncNotification? HistorySyncNotification { get; set; }
+
+    public const int TYPE_HISTORY_SYNC_NOTIFICATION = 5;
 
     public static ProtocolMessage ParseFrom(byte[] data)
     {
@@ -639,137 +841,10 @@ public sealed class ProtocolMessage
             switch (field)
             {
                 case 5: msg.Type = r.ReadInt32(); break;
-                default: r.Skip(wire); break;
-            }
-        }
-        return msg;
-    }
-}
-
-/// <summary>
-/// Field 46 of Message. Sent by the phone to companion devices when history needs to be synced.
-/// Contains CDN credentials to download an encrypted HistorySync protobuf blob.
-/// Field numbers verified against Baileys WAProto.d.ts.
-/// </summary>
-public sealed class HistorySyncNotification
-{
-    public byte[] FileSha256    { get; set; } = [];  // field 1
-    public ulong  FileLength    { get; set; }         // field 2
-    public byte[] MediaKey      { get; set; } = [];  // field 3
-    public byte[] FileEncSha256 { get; set; } = [];  // field 4
-    public string DirectPath    { get; set; } = "";  // field 6  (CDN path)
-    public int    SyncType      { get; set; }         // field 7  (enum: 0=INITIAL_BOOTSTRAP, 2=FULL, 3=RECENT, 6=ON_DEMAND)
-    public uint   ChunkOrder    { get; set; }         // field 8
-    public string? OriginalMessageId { get; set; }   // field 9
-
-    public static HistorySyncNotification ParseFrom(byte[] data)
-    {
-        var msg = new HistorySyncNotification();
-        var r = ProtoEncoder.CreateReader(data);
-        while (r.HasMore)
-        {
-            var (field, wire) = r.ReadTag();
-            switch (field)
-            {
-                case 1: msg.FileSha256    = r.ReadBytes(); break;
-                case 2: msg.FileLength    = r.ReadUInt64(); break;
-                case 3: msg.MediaKey      = r.ReadBytes(); break;
-                case 4: msg.FileEncSha256 = r.ReadBytes(); break;
-                case 6: msg.DirectPath   = r.ReadString(); break;
-                case 7: msg.SyncType     = r.ReadInt32(); break;
-                case 8: msg.ChunkOrder   = r.ReadUInt32(); break;
-                case 9: msg.OriginalMessageId = r.ReadString(); break;
-                default: r.Skip(wire); break;
-            }
-        }
-        return msg;
-    }
-
-    public string SyncTypeName => SyncType switch
-    {
-        0 => "INITIAL_BOOTSTRAP",
-        1 => "INITIAL_STATUS_V3",
-        2 => "FULL",
-        3 => "RECENT",
-        4 => "PUSH",
-        5 => "NON_BLOCKING_DATA",
-        6 => "ON_DEMAND",
-        _ => $"UNKNOWN({SyncType})",
-    };
-}
-
-/// <summary>
-/// Top-level HistorySync protobuf. The encrypted blob downloaded via HistorySyncNotification
-/// decodes to this message. Contains one or more conversations with their messages.
-/// </summary>
-public sealed class HistorySync
-{
-    public int SyncType { get; set; }                              // field 1
-    public List<HistorySyncConversation> Conversations { get; set; } = new(); // field 2 (repeated)
-    public List<HistorySyncPushName> PushNames { get; set; } = new(); // field 5 (repeated)
-
-    public static HistorySync ParseFrom(byte[] data)
-    {
-        var msg = new HistorySync();
-        var r = ProtoEncoder.CreateReader(data);
-        while (r.HasMore)
-        {
-            var (field, wire) = r.ReadTag();
-            switch (field)
-            {
-                case 1: msg.SyncType = r.ReadInt32(); break;
-                case 2: msg.Conversations.Add(HistorySyncConversation.ParseFrom(r.ReadBytes())); break;
-                case 5: msg.PushNames.Add(HistorySyncPushName.ParseFrom(r.ReadBytes())); break;
-                default: r.Skip(wire); break;
-            }
-        }
-        return msg;
-    }
-}
-
-/// <summary>Push name mapping from HistorySync field 5.</summary>
-public sealed class HistorySyncPushName
-{
-    public string Id       { get; set; } = "";  // field 1 - JID
-    public string PushName { get; set; } = "";  // field 3
-
-    public static HistorySyncPushName ParseFrom(byte[] data)
-    {
-        var msg = new HistorySyncPushName();
-        var r = ProtoEncoder.CreateReader(data);
-        while (r.HasMore)
-        {
-            var (field, wire) = r.ReadTag();
-            switch (field)
-            {
-                case 1: msg.Id = r.ReadString(); break;
-                case 3: msg.PushName = r.ReadString(); break;
-                default: r.Skip(wire); break;
-            }
-        }
-        return msg;
-    }
-}
-
-/// <summary>A single chat thread inside HistorySync.</summary>
-public sealed class HistorySyncConversation
-{
-    public string Id { get; set; } = "";                          // field 1 - chat JID
-    public List<WebMessageInfo> Messages { get; set; } = new();  // field 2 (repeated)
-    public string Name { get; set; } = "";                        // field 11
-
-    public static HistorySyncConversation ParseFrom(byte[] data)
-    {
-        var msg = new HistorySyncConversation();
-        var r = ProtoEncoder.CreateReader(data);
-        while (r.HasMore)
-        {
-            var (field, wire) = r.ReadTag();
-            switch (field)
-            {
-                case 1:  msg.Id = r.ReadString(); break;
-                case 2:  msg.Messages.Add(WebMessageInfo.ParseFrom(r.ReadBytes())); break;
-                case 11: msg.Name = r.ReadString(); break;
+                case 6:
+                    var notifBytes = r.ReadBytes();
+                    msg.HistorySyncNotification = Dawa.Proto.HistorySyncNotification.Decode(notifBytes);
+                    break;
                 default: r.Skip(wire); break;
             }
         }
@@ -892,6 +967,98 @@ public sealed class ReactionMessage
         if (!string.IsNullOrEmpty(Text)) ProtoEncoder.WriteString(buf, 2, Text);
         if (SenderTimestampMs != 0) ProtoEncoder.WriteUInt64(buf, 4, (ulong)SenderTimestampMs);
         return [.. buf];
+    }
+}
+
+/// <summary>
+/// Field 145 of WAMessage.
+/// Sent to our own JID to request the phone push an ON_DEMAND history sync blob
+/// for a specific chat via HISTORY_SYNC_NOTIFICATION (syncType 5).
+/// </summary>
+public sealed class PeerDataOperationRequestMessage
+{
+    public const int TYPE_HISTORY_SYNC_ON_DEMAND = 7;  // PeerDataOperationRequestType enum
+
+    public int    RequestType      { get; set; } = TYPE_HISTORY_SYNC_ON_DEMAND;  // field 1
+    public string ChatJid          { get; set; } = "";  // historySyncOnDemandRequest.chatJid (field 6 → sub-field 1)
+    public string OldestMsgId      { get; set; } = "";  // historySyncOnDemandRequest.oldestMsgId (field 6 → sub-field 2)
+    public bool   OldestMsgFromMe  { get; set; }        // historySyncOnDemandRequest.oldestMsgFromMe (field 6 → sub-field 3)
+    public int    OnDemandMsgCount { get; set; } = 50;  // historySyncOnDemandRequest.onDemandMsgCount (field 6 → sub-field 4)
+
+    public byte[] ToByteArray()
+    {
+        var buf = new List<byte>();
+        // field 1: peerDataOperationRequestType
+        ProtoEncoder.WriteInt32(buf, 1, RequestType);
+
+        // field 6: historySyncOnDemandRequest (embedded message)
+        var req = new List<byte>();
+        ProtoEncoder.WriteString(req, 1, ChatJid);
+        if (!string.IsNullOrEmpty(OldestMsgId)) ProtoEncoder.WriteString(req, 2, OldestMsgId);
+        if (OldestMsgFromMe)                    ProtoEncoder.WriteBool(req, 3, true);
+        ProtoEncoder.WriteInt32Always(req, 4, OnDemandMsgCount);  // always emit count even if 0
+        ProtoEncoder.WriteMessage(buf, 6, [.. req]);
+
+        return [.. buf];
+    }
+}
+
+/// <summary>
+/// Field 146 of WAMessage — response sent by the phone to a PeerDataOperationRequestMessage.
+/// For ON_DEMAND history, historySyncOnDemandRequestResult.historyData contains
+/// an inline compressed+encrypted history blob (same format as CDN download).
+/// </summary>
+public sealed class PeerDataOperationResponseMessage
+{
+    /// <summary>List of results, one per request item.</summary>
+    public List<PeerDataOperationResult> Results { get; set; } = [];
+
+    public static PeerDataOperationResponseMessage Decode(byte[] data)
+    {
+        var obj = new PeerDataOperationResponseMessage();
+        var r   = ProtoEncoder.CreateReader(data);
+        while (r.HasMore)
+        {
+            var (field, wt) = r.ReadTag();
+            if (field == 1) obj.Results.Add(PeerDataOperationResult.Decode(r.ReadBytes()));
+            else r.Skip(wt);
+        }
+        return obj;
+    }
+}
+
+public sealed class PeerDataOperationResult
+{
+    public int    ResultType  { get; set; }   // field 1: 0=OK, 1=UNSUPPORTED, 2=NOT_FOUND
+    public byte[] HistoryData { get; set; } = []; // field 6 → historySyncOnDemandRequestResult.historyData (sub-field 1)
+
+    public static PeerDataOperationResult Decode(byte[] data)
+    {
+        var obj = new PeerDataOperationResult();
+        var r   = ProtoEncoder.CreateReader(data);
+        while (r.HasMore)
+        {
+            var (field, wt) = r.ReadTag();
+            switch (field)
+            {
+                case 1: obj.ResultType  = r.ReadInt32(); break;
+                case 6: obj.HistoryData = ReadHistoryData(r.ReadBytes()); break;
+                default: r.Skip(wt); break;
+            }
+        }
+        return obj;
+    }
+
+    private static byte[] ReadHistoryData(byte[] resultBytes)
+    {
+        var r = ProtoEncoder.CreateReader(resultBytes);
+        while (r.HasMore)
+        {
+            var (f, wt) = r.ReadTag();
+            if (f == 1) return r.ReadBytes();
+            r.Skip(wt);
+        }
+        return [];
     }
 }
 

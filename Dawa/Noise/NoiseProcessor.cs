@@ -60,7 +60,10 @@ public sealed class NoiseProcessor : IAsyncDisposable
     public event EventHandler<string>? QRCodeGenerated;
     public event EventHandler<AuthState>? Authenticated;
     public event EventHandler<IncomingMessage>? MessageReceived;
-    public event EventHandler<HistorySyncBatch>? HistorySyncReceived;
+    /// <summary>Fired for each message loaded from history sync (past messages).</summary>
+    public event EventHandler<IncomingMessage>? HistoryMessageReceived;
+    /// <summary>Fired once after a history-sync blob has been fully processed (use to flush persisted store).</summary>
+    public event EventHandler<int>? HistorySyncCompleted;
 
     public NoiseProcessor(FrameSocket socket, AuthState auth, WhatsAppClientOptions options, ILogger logger)
     {
@@ -762,36 +765,81 @@ public sealed class NoiseProcessor : IAsyncDisposable
                 try
                 {
                     var senderJid = participant ?? from;
+                    _logger.LogDebug("Participants path: decrypting encType={EncType} from {Jid}", encType, senderJid);
                     var plaintext = _signalStore.DecryptMessage(senderJid, encType, encNode.Data, _auth);
                     var waMsg     = WAMessage.ParseFrom(plaintext);
 
-                    if (waMsg.IsHistorySync)
+                    // ── History sync notification (participants path) ─────────────────────────
+                    if (waMsg.ProtocolMsg?.Type == Proto.ProtocolMessage.TYPE_HISTORY_SYNC_NOTIFICATION
+                        && waMsg.ProtocolMsg.HistorySyncNotification != null)
                     {
-                        _ = HandleHistorySyncAsync(waMsg.HistorySyncNotification!, id, from, timestamp, CancellationToken.None);
+                        _logger.LogInformation("Participants path: received HISTORY_SYNC_NOTIFICATION from {Jid}", senderJid);
+                        _ = Task.Run(() => ProcessHistorySyncAsync(waMsg.ProtocolMsg.HistorySyncNotification, CancellationToken.None));
+                        _ = SendAckAsync(id, from, timestamp);
                         continue;
                     }
 
-                    var text      = waMsg.GetText();
-                    if (string.IsNullOrEmpty(text)) continue;
-
-                    MessageReceived?.Invoke(this, new IncomingMessage
+                    // ── Peer data operation response (ON_DEMAND history) ──────────────────────
+                    if (waMsg.PeerDataResponse != null)
                     {
-                        Id          = id,
-                        From        = senderJid,
-                        RemoteJid   = from,
-                        Participant = participant,
-                        Text        = text,
-                        FromMe      = fromMe,
-                        Timestamp   = timestamp,
-                        PushName    = pushName,
+                        _logger.LogInformation("Participants path: received PeerDataOperationResponseMessage from {Jid}", senderJid);
+                        _ = Task.Run(() => ProcessPeerDataResponseAsync(waMsg.PeerDataResponse, CancellationToken.None));
+                        _ = SendAckAsync(id, from, timestamp);
+                        continue;
+                    }
+
+                    // ── Skip other protocol messages (key sync, app state, etc.) ──────────────
+                    if (waMsg.ProtocolMsg != null)
+                    {
+                        _logger.LogDebug("Participants path: protocol message type={PT} from {Jid} — skipping",
+                            waMsg.ProtocolMsg.Type, senderJid);
+                        _ = SendAckAsync(id, from, timestamp);
+                        continue;
+                    }
+
+                    // ── Fire MessageReceived for ALL user message types ────────────────────────
+                    var (msgType, text, mediaUrl, mimeType, fileName, fileSize,
+                         duration, width, height, mediaKey, mediaSha256Enc,
+                         reactionEmoji, reactionTargetId) = waMsg.GetAllFields();
+
+                    if (msgType == Messages.MessageType.Unknown)
+                    {
+                        _logger.LogDebug("Participants path: unknown message type from {Jid} — ACKing and skipping", senderJid);
+                        _ = SendAckAsync(id, from, timestamp);
+                        continue;
+                    }
+
+                    _logger.LogInformation("Participants path: {MsgType} message from {Jid}", msgType, senderJid);
+
+                    MessageReceived?.Invoke(this, new Messages.IncomingMessage
+                    {
+                        Id              = id,
+                        From            = senderJid,
+                        RemoteJid       = from,
+                        Participant     = participant,
+                        Type            = msgType,
+                        Text            = text,
+                        FromMe          = fromMe,
+                        Timestamp       = timestamp,
+                        PushName        = pushName,
+                        MediaUrl        = mediaUrl,
+                        MimeType        = mimeType,
+                        FileName        = fileName,
+                        FileSize        = fileSize,
+                        Duration        = duration,
+                        Width           = width,
+                        Height          = height,
+                        MediaKey        = mediaKey,
+                        MediaSha256Enc  = mediaSha256Enc,
+                        ReactionEmoji   = reactionEmoji,
+                        ReactionTargetId = reactionTargetId,
                     });
 
-                    // ACK
                     _ = SendAckAsync(id, from, timestamp);
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "Failed to decrypt message from {Jid}", from);
+                    _logger.LogError(ex, "Participants path: failed to decrypt encType={EncType} from {Jid}", encType, from);
                     _ = SendRetryReceiptAsync(id, from, timestamp);
                 }
             }
@@ -836,29 +884,71 @@ public sealed class NoiseProcessor : IAsyncDisposable
                 }
 
                 var text = waMsg.GetText();
-                _logger.LogInformation("Parsed WAMessage from {Jid}: text={Text}, hasDeviceSent={DevSent}, hasSKDM={SKDM}, hasHistorySync={HasHS}",
-                    from, text ?? "(null)", waMsg.DeviceSentMessage != null, waMsg.SenderKeyDist != null, waMsg.IsHistorySync);
+                _logger.LogInformation("Parsed WAMessage from {Jid}: text={Text}, hasDeviceSent={DevSent}, hasSKDM={SKDM}",
+                    from, text ?? "(null)", waMsg.DeviceSentMessage != null, waMsg.SenderKeyDist != null);
 
-                // ── HistorySync: the phone pushes encrypted chat history blobs ─────────
-                if (waMsg.IsHistorySync)
+                // ── History sync notification ─────────────────────────────────
+                if (waMsg.ProtocolMsg?.Type == Proto.ProtocolMessage.TYPE_HISTORY_SYNC_NOTIFICATION
+                    && waMsg.ProtocolMsg.HistorySyncNotification != null)
                 {
-                    _ = HandleHistorySyncAsync(waMsg.HistorySyncNotification!, id, from, timestamp, CancellationToken.None);
-                    return; // ACK is sent inside HandleHistorySyncAsync
+                    _ = Task.Run(() => ProcessHistorySyncAsync(waMsg.ProtocolMsg.HistorySyncNotification, CancellationToken.None));
+                    _ = SendAckAsync(id, from, timestamp);
+                    return;
                 }
 
-                if (!string.IsNullOrEmpty(text))
+                // ── Peer data operation response (ON_DEMAND history inline) ──────────
+                if (waMsg.PeerDataResponse != null)
                 {
-                    MessageReceived?.Invoke(this, new IncomingMessage
+                    _logger.LogInformation("Direct enc path: received PeerDataOperationResponseMessage from {Jid}", from);
+                    _ = Task.Run(() => ProcessPeerDataResponseAsync(waMsg.PeerDataResponse, CancellationToken.None));
+                    _ = SendAckAsync(id, from, timestamp);
+                    return;
+                }
+
+                // ── Skip other protocol messages (key sync, app state, etc.) ──────────────
+                if (waMsg.ProtocolMsg != null)
+                {
+                    _logger.LogDebug("Direct enc path: protocol message type={PT} from {Jid} — skipping",
+                        waMsg.ProtocolMsg.Type, from);
+                    _ = SendAckAsync(id, from, timestamp);
+                    return;
+                }
+
+                // ── Fire MessageReceived for ALL user message types ────────────────────────
+                var (msgType, text2, mediaUrl, mimeType, fileName, fileSize,
+                     duration, width, height, mediaKey, mediaSha256Enc,
+                     reactionEmoji, reactionTargetId) = waMsg.GetAllFields();
+
+                if (msgType != Messages.MessageType.Unknown)
+                {
+                    _logger.LogInformation("Direct enc path: {MsgType} message from {Jid}", msgType, from);
+                    MessageReceived?.Invoke(this, new Messages.IncomingMessage
                     {
-                        Id          = id,
-                        From        = participant ?? from,
-                        RemoteJid   = from,
-                        Participant = participant,
-                        Text        = text,
-                        FromMe      = fromMe,
-                        Timestamp   = timestamp,
-                        PushName    = pushName,
+                        Id              = id,
+                        From            = participant ?? from,
+                        RemoteJid       = from,
+                        Participant     = participant,
+                        Type            = msgType,
+                        Text            = text2,
+                        FromMe          = fromMe,
+                        Timestamp       = timestamp,
+                        PushName        = pushName,
+                        MediaUrl        = mediaUrl,
+                        MimeType        = mimeType,
+                        FileName        = fileName,
+                        FileSize        = fileSize,
+                        Duration        = duration,
+                        Width           = width,
+                        Height          = height,
+                        MediaKey        = mediaKey,
+                        MediaSha256Enc  = mediaSha256Enc,
+                        ReactionEmoji   = reactionEmoji,
+                        ReactionTargetId = reactionTargetId,
                     });
+                }
+                else
+                {
+                    _logger.LogDebug("Direct enc path: unknown message type from {Jid} — ACKing", from);
                 }
                 _ = SendAckAsync(id, from, timestamp);
             }
@@ -2617,6 +2707,181 @@ public sealed class NoiseProcessor : IAsyncDisposable
     /// Returns an empty list if the server does not respond (companion devices may not support this).
     /// Note: in-memory message cache is used as primary source; this IQ is a best-effort supplement.
     /// </summary>
+    /// <summary>
+    /// Requests an ON_DEMAND history sync from the phone by sending a
+    /// peerDataOperationRequestMessage to our own JID.
+    /// The phone responds by pushing a HISTORY_SYNC_NOTIFICATION (syncType 5 = ON_DEMAND)
+    /// which our receive loop handles, firing HistoryMessageReceived for each past message.
+    /// Returns the messages collected from that push notification (or empty if the phone
+    /// does not respond within the timeout).
+    /// </summary>
+    public async Task<List<IncomingMessage>> RequestOnDemandHistorySyncAsync(string chatJid, int count, CancellationToken ct)
+    {
+        var normalizedJid = chatJid.Contains('@') ? chatJid : $"{chatJid}@s.whatsapp.net";
+
+        var myJid = _auth.Me?.Id;
+        if (myJid == null)
+            throw new InvalidOperationException("Not authenticated");
+
+        // If given a LID, resolve to phone JID for the peerDataOperationRequestMessage
+        // (phone stores chats by phone JID internally, not LID)
+        string requestJid = normalizedJid;
+        if (normalizedJid.EndsWith("@lid"))
+        {
+            // Try to resolve LID → phone JID via our cache
+            if (_lidToPhone.TryGetValue(normalizedJid, out var phoneJid))
+            {
+                _logger.LogInformation("OnDemandHistorySync: resolved LID {Lid} → {Phone} for request", normalizedJid, phoneJid);
+                requestJid = phoneJid;
+            }
+            else
+            {
+                // Strip LID number and try as phone number
+                var lidNum = normalizedJid.Split('@')[0];
+                _logger.LogWarning("OnDemandHistorySync: no phone mapping for LID {Lid} — will try phone JID too", normalizedJid);
+            }
+        }
+
+        // Collect messages for the target JID as they arrive (match both phone and LID variants)
+        var collected = new List<IncomingMessage>();
+        var tcs = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        EventHandler<IncomingMessage> onMsg = (_, msg) =>
+        {
+            var remoteBase = normalizedJid.Split('@')[0];
+            var requestBase = requestJid.Split('@')[0];
+            if (msg.RemoteJid == normalizedJid ||
+                msg.RemoteJid == requestJid ||
+                msg.From == normalizedJid ||
+                msg.From == requestJid ||
+                (msg.RemoteJid?.Split('@')[0] == remoteBase) ||
+                (msg.RemoteJid?.Split('@')[0] == requestBase))
+            {
+                lock (collected) { collected.Add(msg); }
+            }
+        };
+
+        EventHandler<int> onComplete = (_, n) =>
+        {
+            _logger.LogInformation("OnDemandHistorySync: HistorySyncCompleted fired ({N} msgs)", n);
+            tcs.TrySetResult(n);
+        };
+
+        HistoryMessageReceived += onMsg;
+        HistorySyncCompleted   += onComplete;
+
+        try
+        {
+            _logger.LogInformation("OnDemandHistorySync: sending peerDataOperationRequestMessage for {ChatJid} (requestJid={ReqJid})", normalizedJid, requestJid);
+            await SendPeerDataOperationRequestAsync(myJid, requestJid, count, ct);
+            // If LID and request JID differ, also try with the original LID (phone may accept either)
+            if (requestJid != normalizedJid)
+            {
+                await Task.Delay(1000, ct);
+                await SendPeerDataOperationRequestAsync(myJid, normalizedJid, count, ct);
+            }
+
+            // Wait up to 35 seconds for the phone to push the history sync notification
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(35));
+            using var linked  = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
+            using (linked.Token.Register(() => tcs.TrySetCanceled()))
+                await tcs.Task.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogInformation("OnDemandHistorySync: timed out / cancelled waiting for push notification");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "OnDemandHistorySync: error");
+        }
+        finally
+        {
+            HistoryMessageReceived -= onMsg;
+            HistorySyncCompleted   -= onComplete;
+        }
+
+        lock (collected) { return [.. collected]; }
+    }
+
+    private async Task SendPeerDataOperationRequestAsync(string myJid, string targetChatJid, int count, CancellationToken ct)
+    {
+        var myPhone = myJid.Split('@')[0].Split(':')[0];
+
+        // Get all our own devices
+        List<string> myDevices;
+        try { myDevices = await GetDeviceListAsync(myPhone, ct); }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "OnDemandHistorySync: failed to get own device list");
+            myDevices = [$"{myPhone}:0@s.whatsapp.net"];
+        }
+
+        _logger.LogInformation("OnDemandHistorySync: encrypting for {Count} own devices: {Jids}",
+            myDevices.Count, string.Join(", ", myDevices));
+
+        // Fetch pre-key bundles for devices without sessions
+        var needBundles = myDevices.Where(d => !_signalStore.HasSession(d)).ToList();
+        if (needBundles.Count > 0)
+        {
+            try
+            {
+                var bundles = await FetchPreKeyBundlesAsync(needBundles, ct);
+                foreach (var (deviceJid, bundle) in bundles)
+                    try { _signalStore.InitOutgoingSession(deviceJid, bundle, _auth); }
+                    catch (Exception ex2) { _logger.LogWarning(ex2, "OnDemandHistorySync: session init failed for {Jid}", deviceJid); }
+            }
+            catch (Exception ex) { _logger.LogWarning(ex, "OnDemandHistorySync: failed to fetch bundles"); }
+        }
+
+        // Build the PeerDataOperationRequestMessage proto
+        var msg = new WAMessage
+        {
+            PeerDataOperation = new Proto.PeerDataOperationRequestMessage
+            {
+                RequestType      = Proto.PeerDataOperationRequestMessage.TYPE_HISTORY_SYNC_ON_DEMAND,
+                ChatJid          = targetChatJid,
+                OnDemandMsgCount = count,
+            }
+        };
+        var protoBytes = PadMessage(msg.ToByteArrayWithPeerDataOperation());
+
+        // Encrypt for each of our own devices
+        var msgId    = GenerateMessageId();
+        var hasPkMsg = false;
+        var toNodes  = new List<BinaryNode>();
+        foreach (var deviceJid in myDevices)
+        {
+            var node = EncryptForDevice(deviceJid, protoBytes, ref hasPkMsg);
+            if (node != null) toNodes.Add(node);
+        }
+
+        if (toNodes.Count == 0)
+        {
+            _logger.LogWarning("OnDemandHistorySync: no devices encrypted to — cannot send request");
+            return;
+        }
+
+        var participantsNode = new BinaryNode("participants") { Content = toNodes };
+        var contentNodes     = new List<BinaryNode> { participantsNode };
+
+        if (hasPkMsg && _auth.Account != null)
+        {
+            var accountProto = ADVSignedDeviceIdentity.ParseFrom(_auth.Account);
+            contentNodes.Add(new BinaryNode("device-identity") { Content = accountProto.ToByteArray() });
+        }
+
+        var msgNode = new BinaryNode("message", new Dictionary<string, string>
+        {
+            ["id"]   = msgId,
+            ["type"] = "text",
+            ["to"]   = $"{myPhone}@s.whatsapp.net",
+        }) { Content = contentNodes };
+
+        await SendNodeAsync(msgNode, ct);
+        _logger.LogInformation("OnDemandHistorySync: sent peerDataOperationRequestMessage (msgId={Id}) to self", msgId);
+    }
+
     public async Task<List<IncomingMessage>> FetchMessageHistoryAsync(string jid, int count, CancellationToken ct)
     {
         // Normalize JID
@@ -2708,7 +2973,7 @@ public sealed class NoiseProcessor : IAsyncDisposable
     /// <summary>
     /// Handles a HistorySyncNotification message from the phone.
     /// Downloads the encrypted blob from WhatsApp CDN, decrypts it, parses the
-    /// HistorySync protobuf, and fires HistorySyncReceived + MessageReceived for each message.
+    /// HistorySync protobuf, and fires HistoryMessageReceived for each message and HistorySyncCompleted at the end.
     /// </summary>
     private async Task HandleHistorySyncAsync(
         Dawa.Proto.HistorySyncNotification notification,
@@ -2716,7 +2981,7 @@ public sealed class NoiseProcessor : IAsyncDisposable
     {
         _logger.LogInformation(
             "HistorySync: type={Type} chunkOrder={Chunk} directPath={Path} fileLen={Len}",
-            notification.SyncTypeName, notification.ChunkOrder, notification.DirectPath, notification.FileLength);
+            notification.SyncType, notification.Progress, notification.DirectPath, notification.FileLength);
 
         try
         {
@@ -2800,7 +3065,7 @@ public sealed class NoiseProcessor : IAsyncDisposable
             Dawa.Proto.HistorySync historySync;
             try
             {
-                historySync = Dawa.Proto.HistorySync.ParseFrom(protoBytes);
+                historySync = Dawa.Proto.HistorySync.Decode(protoBytes);
                 _logger.LogInformation("HistorySync: parsed {ConvCount} conversations, {NameCount} push names",
                     historySync.Conversations.Count, historySync.PushNames.Count);
             }
@@ -2818,19 +3083,21 @@ public sealed class NoiseProcessor : IAsyncDisposable
                     _pushNames.TryAdd(pn.Id, pn.PushName);
             }
 
-            // ── 6. Fire MessageReceived for each message in each conversation ──
+            // ── 6. Fire HistoryMessageReceived for each message ───────────────────
             var totalMessages = 0;
             foreach (var conv in historySync.Conversations)
             {
                 var chatJid = conv.Id;
                 if (string.IsNullOrEmpty(chatJid)) continue;
 
-                foreach (var wmi in conv.Messages)
+                foreach (var hm in conv.Messages)
                 {
+                    var wmi = hm.Message;
+                    if (wmi == null) continue;
                     var key = wmi.Key;
                     if (key == null) continue;
 
-                    var text = wmi.Message?.GetText();
+                    var text = wmi.MessageBody?.EffectiveText;
                     if (string.IsNullOrEmpty(text)) continue;
 
                     var msgFromMe = key.FromMe;
@@ -2838,7 +3105,7 @@ public sealed class NoiseProcessor : IAsyncDisposable
                         ? (_auth.Me?.Id ?? chatJid)
                         : (!string.IsNullOrEmpty(key.Participant) ? key.Participant : chatJid);
 
-                    MessageReceived?.Invoke(this, new IncomingMessage
+                    HistoryMessageReceived?.Invoke(this, new IncomingMessage
                     {
                         Id          = key.Id,
                         From        = msgFrom,
@@ -2846,7 +3113,7 @@ public sealed class NoiseProcessor : IAsyncDisposable
                         Participant = key.Participant.Length > 0 ? key.Participant : null,
                         Text        = text,
                         FromMe      = msgFromMe,
-                        Timestamp   = (long)wmi.MessageTimestamp,
+                        Timestamp   = (long)wmi.Timestamp,
                         PushName    = wmi.PushName,
                     });
                     totalMessages++;
@@ -2855,20 +3122,18 @@ public sealed class NoiseProcessor : IAsyncDisposable
                 // Update thread metadata with latest message timestamp
                 if (conv.Messages.Count > 0)
                 {
-                    var latest = conv.Messages.Max(m => (long)m.MessageTimestamp);
+                    var latest = conv.Messages
+                        .Where(m => m.Message != null)
+                        .Max(m => (long)m.Message!.Timestamp);
                     _threadMetadata.TryAdd(chatJid, latest);
                 }
             }
 
-            _logger.LogInformation("HistorySync: fired {Total} MessageReceived events across {Convs} conversations",
+            _logger.LogInformation("HistorySync: fired {Total} HistoryMessageReceived events across {Convs} conversations",
                 totalMessages, historySync.Conversations.Count);
 
-            // Fire the batch event so callers can persist the full sync
-            HistorySyncReceived?.Invoke(this, new HistorySyncBatch(
-                SyncType: notification.SyncTypeName,
-                ChunkOrder: notification.ChunkOrder,
-                ConversationCount: historySync.Conversations.Count,
-                MessageCount: totalMessages));
+            // Signal completion so callers can persist the full sync
+            HistorySyncCompleted?.Invoke(this, totalMessages);
 
             SaveCacheToDisk();
         }
@@ -3036,13 +3301,241 @@ public sealed class NoiseProcessor : IAsyncDisposable
         _keepAliveCts?.Dispose();
         await ValueTask.CompletedTask;
     }
+
+    // ─── History sync ────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Handles a PeerDataOperationResponseMessage (response to our ON_DEMAND history request).
+    /// Each result may contain inline compressed+encrypted history data.
+    /// </summary>
+    private Task ProcessPeerDataResponseAsync(Proto.PeerDataOperationResponseMessage response, CancellationToken ct)
+    {
+        _logger.LogInformation("PeerDataResponse: {Count} results", response.Results.Count);
+        foreach (var result in response.Results)
+        {
+            _logger.LogInformation("PeerDataResponse result: type={Type}, historyDataLen={Len}",
+                result.ResultType, result.HistoryData.Length);
+
+            if (result.ResultType != 0)
+            {
+                _logger.LogWarning("PeerDataResponse: non-OK result type {Type}", result.ResultType);
+                continue;
+            }
+
+            if (result.HistoryData.Length == 0)
+            {
+                _logger.LogInformation("PeerDataResponse: empty history data (no messages in requested range)");
+                HistorySyncCompleted?.Invoke(this, 0);
+                continue;
+            }
+
+            // History data is inline: zlib-compressed proto (same format as CDN blob after decryption)
+            // but WITHOUT the AES-CBC encryption layer — delivered inline in the response.
+            try
+            {
+                var protoBytes = ZlibInflate(result.HistoryData);
+                var sync       = Proto.HistorySync.Decode(protoBytes);
+
+                _logger.LogInformation("PeerDataResponse: decoded {Convs} conversations (syncType={Type})",
+                    sync.Conversations.Count, sync.SyncType);
+
+                // Reuse same emission logic
+                var myJidBase = _auth.Me?.Id?.Split(':')[0].Split('@')[0];
+                var pushNames = sync.PushNames.ToDictionary(p => p.Id, p => p.PushName);
+                var total = 0;
+                foreach (var conversation in sync.Conversations)
+                {
+                    foreach (var histMsg in conversation.Messages)
+                    {
+                        var wmi = histMsg.Message;
+                        if (wmi?.Key == null) continue;
+                        var text = wmi.MessageBody?.EffectiveText ?? "";
+                        var msgType = string.IsNullOrEmpty(text)
+                            ? Messages.MessageType.Unknown
+                            : Messages.MessageType.Text;
+                        // Skip unknown (no content at all) messages
+                        if (msgType == Messages.MessageType.Unknown) continue;
+
+                        var remoteJid = wmi.Key.RemoteJid ?? conversation.Id;
+                        var fromMe    = wmi.Key.FromMe;
+                        var senderJid = fromMe
+                            ? (myJidBase != null ? $"{myJidBase}@s.whatsapp.net" : remoteJid)
+                            : (wmi.Key.Participant.Length > 0 ? wmi.Key.Participant : remoteJid);
+
+                        pushNames.TryGetValue(senderJid.Split('@')[0], out var senderName);
+                        var msg = new Messages.IncomingMessage
+                        {
+                            Id        = wmi.Key.Id,
+                            From      = senderJid,
+                            RemoteJid = remoteJid,
+                            Type      = msgType,
+                            Text      = text,
+                            FromMe    = fromMe,
+                            Timestamp = (long)wmi.Timestamp,
+                            PushName  = wmi.PushName.Length > 0 ? wmi.PushName : senderName,
+                        };
+                        HistoryMessageReceived?.Invoke(this, msg);
+                        total++;
+                    }
+                }
+                _logger.LogInformation("PeerDataResponse: emitted {N} messages", total);
+                HistorySyncCompleted?.Invoke(this, total);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "PeerDataResponse: failed to decode history data ({Len} bytes)", result.HistoryData.Length);
+            }
+        }
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Downloads, decrypts, decompresses and parses a WhatsApp history sync blob,
+    /// then fires <see cref="HistoryMessageReceived"/> for every past message.
+    /// Called automatically when the server sends a HISTORY_SYNC_NOTIFICATION.
+    /// </summary>
+    private async Task ProcessHistorySyncAsync(Proto.HistorySyncNotification notif, CancellationToken ct)
+    {
+        try
+        {
+            var syncTypeName = notif.SyncType switch
+            {
+                Proto.HistorySyncNotification.INITIAL_BOOTSTRAP => "INITIAL_BOOTSTRAP",
+                Proto.HistorySyncNotification.RECENT            => "RECENT",
+                Proto.HistorySyncNotification.FULL              => "FULL",
+                Proto.HistorySyncNotification.PUSH_NAME         => "PUSH_NAME",
+                Proto.HistorySyncNotification.ON_DEMAND         => "ON_DEMAND",
+                _                                               => notif.SyncType.ToString(),
+            };
+            _logger.LogInformation("HistorySync: received {Type} notification, directPath={Path}",
+                syncTypeName, notif.DirectPath);
+
+            if (notif.MediaKey == null || notif.MediaKey.Length == 0 || string.IsNullOrEmpty(notif.DirectPath))
+            {
+                _logger.LogWarning("HistorySync: missing mediaKey or directPath — skipping");
+                return;
+            }
+
+            // 1. Download blob from CDN
+            var downloadUrl = $"https://mmg.whatsapp.net{notif.DirectPath}";
+            _logger.LogInformation("HistorySync: downloading from {Url}", downloadUrl);
+
+            byte[] encBlob;
+            using var resp = await _http.GetAsync(downloadUrl, ct);
+            resp.EnsureSuccessStatusCode();
+            encBlob = await resp.Content.ReadAsByteArrayAsync(ct);
+            _logger.LogInformation("HistorySync: downloaded {Bytes} encrypted bytes", encBlob.Length);
+
+            // 2. Decrypt: AES-CBC with keys derived from mediaKey via HKDF "WhatsApp History Keys"
+            byte[] compressed;
+            try
+            {
+                compressed = Crypto.MediaCrypto.Decrypt(encBlob, notif.MediaKey, "md-msg-hist");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "HistorySync: decryption failed");
+                return;
+            }
+            _logger.LogInformation("HistorySync: decrypted to {Bytes} compressed bytes", compressed.Length);
+
+            // 3. Decompress: zlib deflate (raw inflate, skip 2-byte zlib header)
+            byte[] protoBytes;
+            try
+            {
+                protoBytes = ZlibInflate(compressed);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "HistorySync: decompression failed");
+                return;
+            }
+            _logger.LogInformation("HistorySync: decompressed to {Bytes} proto bytes", protoBytes.Length);
+
+            // 4. Proto decode
+            Proto.HistorySync sync;
+            try
+            {
+                sync = Proto.HistorySync.Decode(protoBytes);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "HistorySync: proto decode failed");
+                return;
+            }
+
+            // 5. Build pushname lookup
+            var pushNames = sync.PushNames.ToDictionary(p => p.Id, p => p.PushName);
+
+            // 6. Emit all messages
+            var myJidBase = _auth.Me?.Id?.Split(':')[0].Split('@')[0];
+            var totalMsgs = 0;
+            foreach (var conversation in sync.Conversations)
+            {
+                var chatJid = conversation.Id;
+                foreach (var histMsg in conversation.Messages)
+                {
+                    var wmi = histMsg.Message;
+                    if (wmi?.Key == null) continue;
+
+                    var text = wmi.MessageBody?.EffectiveText ?? "";
+                    var msgType = string.IsNullOrEmpty(text)
+                        ? Messages.MessageType.Unknown
+                        : Messages.MessageType.Text;
+                    if (msgType == Messages.MessageType.Unknown) continue;
+
+                    var remoteJid  = wmi.Key.RemoteJid ?? chatJid;
+                    var fromMe     = wmi.Key.FromMe;
+                    var senderJid  = fromMe
+                        ? (myJidBase != null ? $"{myJidBase}@s.whatsapp.net" : remoteJid)
+                        : (wmi.Key.Participant.Length > 0 ? wmi.Key.Participant : remoteJid);
+
+                    pushNames.TryGetValue(senderJid.Split('@')[0], out var senderName);
+
+                    var msg = new Messages.IncomingMessage
+                    {
+                        Id          = wmi.Key.Id,
+                        From        = senderJid,
+                        RemoteJid   = remoteJid,
+                        Participant = wmi.Key.Participant.Length > 0 ? wmi.Key.Participant : null,
+                        Type        = msgType,
+                        Text        = text,
+                        FromMe      = fromMe,
+                        Timestamp   = (long)wmi.Timestamp,
+                        PushName    = wmi.PushName.Length > 0 ? wmi.PushName : senderName,
+                    };
+
+                    HistoryMessageReceived?.Invoke(this, msg);
+                    totalMsgs++;
+                }
+            }
+
+            _logger.LogInformation("HistorySync: emitted {Count} messages from {Convs} conversations ({Type})",
+                totalMsgs, sync.Conversations.Count, syncTypeName);
+
+            HistorySyncCompleted?.Invoke(this, totalMsgs);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "HistorySync: unhandled error");
+        }
+    }
+
+    /// <summary>Decompresses zlib-deflated data (strips 2-byte zlib header + 4-byte adler32 trailer).</summary>
+    private static byte[] ZlibInflate(byte[] data)
+    {
+        // zlib stream: 2-byte header + deflate data + 4-byte adler32
+        // System.IO.Compression.DeflateStream reads raw deflate (no header).
+        using var input  = new System.IO.MemoryStream(data, 2, data.Length - 2);
+        using var deflate = new System.IO.Compression.DeflateStream(input, System.IO.Compression.CompressionMode.Decompress);
+        using var output = new System.IO.MemoryStream();
+        deflate.CopyTo(output);
+        return output.ToArray();
+    }
 }
 
 public record GroupParticipant(string Jid, string LidJid, string Type);
 public record GroupMetadata(string Jid, string Subject, string Creator, long CreationTimestamp, List<GroupParticipant> Participants);
-
-/// <summary>Fired when a HistorySync blob has been fully downloaded, decrypted, and processed.</summary>
-public record HistorySyncBatch(string SyncType, uint ChunkOrder, int ConversationCount, int MessageCount);
 
 // PresenceInfo record — lives in Dawa.Noise namespace
 public record PresenceInfo(string Jid, string Status, DateTime LastSeen);
