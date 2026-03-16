@@ -307,6 +307,17 @@ public sealed class NoiseProcessor : IAsyncDisposable
             case "presence":
                 HandlePresenceNode(node);
                 break;
+            case "receipt":
+                HandleReceiptNode(node);
+                // Ack the receipt back to server
+                {
+                    var receiptId   = node.GetAttr("id") ?? "";
+                    var receiptFrom = node.GetAttr("from") ?? node.GetAttr("to") ?? "";
+                    var receiptT    = long.TryParse(node.GetAttr("t"), out var rt) ? rt : 0L;
+                    if (!string.IsNullOrEmpty(receiptId) && !string.IsNullOrEmpty(receiptFrom))
+                        _ = SendAckAsync(receiptId, receiptFrom, receiptT);
+                }
+                break;
             case "success":
                 if (!_sessionAuthenticated)
                 {
@@ -811,28 +822,34 @@ public sealed class NoiseProcessor : IAsyncDisposable
 
                     _logger.LogInformation("Participants path: {MsgType} message from {Jid}", msgType, senderJid);
 
+                    var (quotedId, quotedFrom, quotedText, quotedType) = waMsg.GetQuotedContext();
+
                     MessageReceived?.Invoke(this, new Messages.IncomingMessage
                     {
-                        Id              = id,
-                        From            = senderJid,
-                        RemoteJid       = from,
-                        Participant     = participant,
-                        Type            = msgType,
-                        Text            = text,
-                        FromMe          = fromMe,
-                        Timestamp       = timestamp,
-                        PushName        = pushName,
-                        MediaUrl        = mediaUrl,
-                        MimeType        = mimeType,
-                        FileName        = fileName,
-                        FileSize        = fileSize,
-                        Duration        = duration,
-                        Width           = width,
-                        Height          = height,
-                        MediaKey        = mediaKey,
-                        MediaSha256Enc  = mediaSha256Enc,
-                        ReactionEmoji   = reactionEmoji,
+                        Id               = id,
+                        From             = senderJid,
+                        RemoteJid        = from,
+                        Participant      = participant,
+                        Type             = msgType,
+                        Text             = text,
+                        FromMe           = fromMe,
+                        Timestamp        = timestamp,
+                        PushName         = pushName,
+                        MediaUrl         = mediaUrl,
+                        MimeType         = mimeType,
+                        FileName         = fileName,
+                        FileSize         = fileSize,
+                        Duration         = duration,
+                        Width            = width,
+                        Height           = height,
+                        MediaKey         = mediaKey,
+                        MediaSha256Enc   = mediaSha256Enc,
+                        ReactionEmoji    = reactionEmoji,
                         ReactionTargetId = reactionTargetId,
+                        QuotedMessageId  = quotedId,
+                        QuotedFrom       = quotedFrom,
+                        QuotedText       = quotedText,
+                        QuotedType       = quotedType,
                     });
 
                     _ = SendAckAsync(id, from, timestamp);
@@ -922,28 +939,33 @@ public sealed class NoiseProcessor : IAsyncDisposable
                 if (msgType != Messages.MessageType.Unknown)
                 {
                     _logger.LogInformation("Direct enc path: {MsgType} message from {Jid}", msgType, from);
+                    var (quotedId2, quotedFrom2, quotedText2, quotedType2) = waMsg.GetQuotedContext();
                     MessageReceived?.Invoke(this, new Messages.IncomingMessage
                     {
-                        Id              = id,
-                        From            = participant ?? from,
-                        RemoteJid       = from,
-                        Participant     = participant,
-                        Type            = msgType,
-                        Text            = text2,
-                        FromMe          = fromMe,
-                        Timestamp       = timestamp,
-                        PushName        = pushName,
-                        MediaUrl        = mediaUrl,
-                        MimeType        = mimeType,
-                        FileName        = fileName,
-                        FileSize        = fileSize,
-                        Duration        = duration,
-                        Width           = width,
-                        Height          = height,
-                        MediaKey        = mediaKey,
-                        MediaSha256Enc  = mediaSha256Enc,
-                        ReactionEmoji   = reactionEmoji,
+                        Id               = id,
+                        From             = participant ?? from,
+                        RemoteJid        = from,
+                        Participant      = participant,
+                        Type             = msgType,
+                        Text             = text2,
+                        FromMe           = fromMe,
+                        Timestamp        = timestamp,
+                        PushName         = pushName,
+                        MediaUrl         = mediaUrl,
+                        MimeType         = mimeType,
+                        FileName         = fileName,
+                        FileSize         = fileSize,
+                        Duration         = duration,
+                        Width            = width,
+                        Height           = height,
+                        MediaKey         = mediaKey,
+                        MediaSha256Enc   = mediaSha256Enc,
+                        ReactionEmoji    = reactionEmoji,
                         ReactionTargetId = reactionTargetId,
+                        QuotedMessageId  = quotedId2,
+                        QuotedFrom       = quotedFrom2,
+                        QuotedText       = quotedText2,
+                        QuotedType       = quotedType2,
                     });
                 }
                 else
@@ -3300,6 +3322,429 @@ public sealed class NoiseProcessor : IAsyncDisposable
         _keepAliveCts?.Cancel();
         _keepAliveCts?.Dispose();
         await ValueTask.CompletedTask;
+    }
+
+    // ─── Typing / presence (public API) ─────────────────────────────────────
+
+    /// <summary>
+    /// Sends a typing indicator (composing) or stops it (paused) for a specific chat.
+    /// </summary>
+    public async Task SendTypingAsync(string jid, bool isTyping, CancellationToken ct)
+    {
+        var normalizedJid = jid.Contains('@') ? jid : $"{jid.TrimStart('+')}@s.whatsapp.net";
+        var chatstate = new BinaryNode("chatstate",
+            new Dictionary<string, string> { ["to"] = normalizedJid },
+            isTyping
+                ? new List<BinaryNode> { new BinaryNode("composing") }
+                : new List<BinaryNode> { new BinaryNode("paused") });
+        await SendNodeAsync(chatstate, ct);
+        _logger.LogInformation("Sent typing={IsTyping} to {Jid}", isTyping, normalizedJid);
+    }
+
+    /// <summary>
+    /// Updates this device's presence to available or unavailable.
+    /// </summary>
+    public async Task SendUserPresenceAsync(bool isOnline, CancellationToken ct)
+    {
+        var presence = new BinaryNode("presence", new Dictionary<string, string>
+        {
+            ["type"] = isOnline ? "available" : "unavailable",
+        });
+        await SendNodeAsync(presence, ct);
+        _logger.LogInformation("Sent presence={Status}", isOnline ? "available" : "unavailable");
+    }
+
+    // ─── Message revoke ──────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Sends a ProtocolMessage REVOKE to delete a sent message for everyone.
+    /// </summary>
+    public async Task RevokeMessageAsync(string jid, string messageId, bool fromMe, long timestamp, CancellationToken ct)
+    {
+        var normalizedJid = jid.Contains('@') ? jid : $"{jid.TrimStart('+')}@s.whatsapp.net";
+        var phoneNumber   = normalizedJid.Split('@')[0].Split(':')[0];
+
+        List<string> recipientDeviceJids;
+        try { recipientDeviceJids = await GetDeviceListAsync(phoneNumber, ct); }
+        catch { recipientDeviceJids = [$"{phoneNumber}:0@s.whatsapp.net"]; }
+
+        var senderDeviceJids = new List<string>();
+        var myJid = _auth.Me?.Id;
+        if (myJid != null)
+        {
+            var myPhone = myJid.Split('@')[0].Split(':')[0];
+            try
+            {
+                var myDevices = await GetDeviceListAsync(myPhone, ct);
+                senderDeviceJids.AddRange(myDevices.Where(d => d != myJid));
+            }
+            catch { }
+        }
+
+        var revokeMsg = new Proto.WAMessage
+        {
+            ProtocolMsg = new Proto.ProtocolMessage
+            {
+                Type = Proto.ProtocolMessage.TYPE_REVOKE,
+                Key  = new Proto.MessageKey
+                {
+                    RemoteJid = normalizedJid,
+                    FromMe    = fromMe,
+                    Id        = messageId,
+                },
+            }
+        };
+
+        var msgBytes = revokeMsg.ToByteArrayWithRevoke();
+        var padded   = PadMessage(msgBytes);
+
+        await SendEncryptedMessageAsync(normalizedJid, messageId, timestamp,
+            recipientDeviceJids, senderDeviceJids, padded, ct);
+
+        _logger.LogInformation("Sent revoke for message {MsgId} in chat {Jid}", messageId, normalizedJid);
+    }
+
+    // ─── Message forwarding ──────────────────────────────────────────────────
+
+    /// <summary>
+    /// Forwards an already-received message to another chat.
+    /// The message content is re-sent with IsForwarded=true in ContextInfo.
+    /// </summary>
+    public async Task ForwardMessageAsync(string toJid, string text, CancellationToken ct)
+    {
+        // Simple implementation: forward as extended text with forwarded context
+        var normalizedJid = toJid.Contains('@') ? toJid : $"{toJid.TrimStart('+')}@s.whatsapp.net";
+        var phoneNumber   = normalizedJid.Split('@')[0].Split(':')[0];
+
+        List<string> recipientDeviceJids;
+        try { recipientDeviceJids = await GetDeviceListAsync(phoneNumber, ct); }
+        catch { recipientDeviceJids = [$"{phoneNumber}:0@s.whatsapp.net"]; }
+
+        var senderDeviceJids = new List<string>();
+        var myJid = _auth.Me?.Id;
+        if (myJid != null)
+        {
+            var myPhone = myJid.Split('@')[0].Split(':')[0];
+            try
+            {
+                var myDevices = await GetDeviceListAsync(myPhone, ct);
+                senderDeviceJids.AddRange(myDevices.Where(d => d != myJid));
+            }
+            catch { }
+        }
+
+        var fwdMsg = new Proto.WAMessage
+        {
+            ExtendedTextMessage = new Proto.ExtendedTextMessage
+            {
+                Text = text,
+                ContextInfo = new Proto.ContextInfo { IsForwarded = true, ForwardingScore = 1 },
+            }
+        };
+
+        var msgBytes = fwdMsg.ToByteArray();
+        var padded   = PadMessage(msgBytes);
+        var msgId    = GenerateMessageId();
+
+        await SendEncryptedMessageAsync(normalizedJid, msgId,
+            DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            recipientDeviceJids, senderDeviceJids, padded, ct);
+
+        _logger.LogInformation("Forwarded message to {Jid}", normalizedJid);
+    }
+
+    // ─── Group management ────────────────────────────────────────────────────
+
+    /// <summary>Creates a new WhatsApp group and returns its JID.</summary>
+    public async Task<string?> CreateGroupAsync(string subject, IEnumerable<string> participantJids, CancellationToken ct)
+    {
+        var participants = participantJids.Select(j =>
+        {
+            var jid = j.Contains('@') ? j : $"{j.TrimStart('+')}@s.whatsapp.net";
+            return new BinaryNode("participant", new Dictionary<string, string> { ["jid"] = jid });
+        }).ToList();
+
+        var iq = new BinaryNode("iq", new Dictionary<string, string>
+        {
+            ["id"]    = GenerateMessageId(),
+            ["type"]  = "set",
+            ["xmlns"] = "w:g2",
+            ["to"]    = "g.us",
+        })
+        {
+            Content = new List<BinaryNode>
+            {
+                new BinaryNode("create", new Dictionary<string, string> { ["subject"] = subject, ["key"] = GenerateMessageId() })
+                {
+                    Content = participants
+                }
+            }
+        };
+
+        try
+        {
+            var result = await SendIQAsync(iq, ct, timeoutMs: 15000);
+            var groupNode = result.FindChild("group") ?? result.FindChild("create");
+            var groupJid = groupNode?.GetAttr("jid");
+            _logger.LogInformation("Created group '{Subject}' → {Jid}", subject, groupJid ?? "(no jid in response)");
+            return groupJid;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "CreateGroupAsync failed for '{Subject}'", subject);
+            return null;
+        }
+    }
+
+    /// <summary>Leaves a WhatsApp group.</summary>
+    public async Task LeaveGroupAsync(string groupJid, CancellationToken ct)
+    {
+        var iq = new BinaryNode("iq", new Dictionary<string, string>
+        {
+            ["id"]    = GenerateMessageId(),
+            ["type"]  = "set",
+            ["xmlns"] = "w:g2",
+            ["to"]    = "g.us",
+        })
+        {
+            Content = new List<BinaryNode>
+            {
+                new BinaryNode("leave")
+                {
+                    Content = new List<BinaryNode>
+                    {
+                        new BinaryNode("group", new Dictionary<string, string> { ["id"] = groupJid })
+                    }
+                }
+            }
+        };
+
+        try { await SendIQAsync(iq, ct, timeoutMs: 10000); }
+        catch (Exception ex) { _logger.LogWarning(ex, "LeaveGroupAsync failed for {Group}", groupJid); }
+    }
+
+    /// <summary>Adds participants to a group. Returns per-JID result codes.</summary>
+    public async Task<Dictionary<string, string>> AddGroupParticipantsAsync(string groupJid, IEnumerable<string> jids, CancellationToken ct)
+        => await ModifyGroupParticipantsAsync(groupJid, jids, "add", ct);
+
+    /// <summary>Removes participants from a group. Returns per-JID result codes.</summary>
+    public async Task<Dictionary<string, string>> RemoveGroupParticipantsAsync(string groupJid, IEnumerable<string> jids, CancellationToken ct)
+        => await ModifyGroupParticipantsAsync(groupJid, jids, "remove", ct);
+
+    private async Task<Dictionary<string, string>> ModifyGroupParticipantsAsync(
+        string groupJid, IEnumerable<string> jids, string action, CancellationToken ct)
+    {
+        var participants = jids.Select(j =>
+        {
+            var jid = j.Contains('@') ? j : $"{j.TrimStart('+')}@s.whatsapp.net";
+            return new BinaryNode("participant", new Dictionary<string, string> { ["jid"] = jid });
+        }).ToList();
+
+        var iq = new BinaryNode("iq", new Dictionary<string, string>
+        {
+            ["id"]    = GenerateMessageId(),
+            ["type"]  = "set",
+            ["xmlns"] = "w:g2",
+            ["to"]    = groupJid,
+        })
+        {
+            Content = new List<BinaryNode>
+            {
+                new BinaryNode(action) { Content = participants }
+            }
+        };
+
+        var results = new Dictionary<string, string>();
+        try
+        {
+            var result = await SendIQAsync(iq, ct, timeoutMs: 15000);
+            // Result may have <participant jid="..." error="..." /> children
+            var resultNode = result.FindChild(action);
+            if (resultNode?.Content is List<BinaryNode> children)
+            {
+                foreach (var p in children)
+                {
+                    var jid = p.GetAttr("jid") ?? "";
+                    var err = p.GetAttr("error") ?? "200";
+                    results[jid] = err;
+                }
+            }
+        }
+        catch (Exception ex) { _logger.LogWarning(ex, "ModifyGroupParticipants({Action}) failed for {Group}", action, groupJid); }
+        return results;
+    }
+
+    /// <summary>Gets the group's invite link URL.</summary>
+    public async Task<string?> GetGroupInviteLinkAsync(string groupJid, CancellationToken ct)
+    {
+        var iq = new BinaryNode("iq", new Dictionary<string, string>
+        {
+            ["id"]    = GenerateMessageId(),
+            ["type"]  = "get",
+            ["xmlns"] = "w:g2",
+            ["to"]    = groupJid,
+        })
+        {
+            Content = new List<BinaryNode> { new BinaryNode("invite") }
+        };
+
+        try
+        {
+            var result = await SendIQAsync(iq, ct, timeoutMs: 10000);
+            var inviteNode = result.FindChild("invite");
+            var code = inviteNode?.GetAttr("code");
+            return code != null ? $"https://chat.whatsapp.com/{code}" : null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "GetGroupInviteLinkAsync failed for {Group}", groupJid);
+            return null;
+        }
+    }
+
+    /// <summary>Updates the group subject (name).</summary>
+    public async Task UpdateGroupSubjectAsync(string groupJid, string newSubject, CancellationToken ct)
+    {
+        var iq = new BinaryNode("iq", new Dictionary<string, string>
+        {
+            ["id"]    = GenerateMessageId(),
+            ["type"]  = "set",
+            ["xmlns"] = "w:g2",
+            ["to"]    = groupJid,
+        })
+        {
+            Content = new List<BinaryNode>
+            {
+                new BinaryNode("subject") { Content = System.Text.Encoding.UTF8.GetBytes(newSubject) }
+            }
+        };
+
+        try { await SendIQAsync(iq, ct, timeoutMs: 10000); }
+        catch (Exception ex) { _logger.LogWarning(ex, "UpdateGroupSubjectAsync failed for {Group}", groupJid); }
+    }
+
+    // ─── Media download ──────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Downloads and decrypts a WhatsApp media file from the CDN.
+    /// </summary>
+    /// <param name="mediaUrl">The CDN URL from IncomingMessage.MediaUrl.</param>
+    /// <param name="mediaKeyBase64">Base64-encoded media key from IncomingMessage.MediaKey.</param>
+    /// <param name="mimeType">MIME type (used to derive HKDF info string).</param>
+    /// <returns>Decrypted plaintext bytes.</returns>
+    public static async Task<byte[]> DownloadMediaAsync(string mediaUrl, string mediaKeyBase64, string mimeType)
+    {
+        var mediaKey = Convert.FromBase64String(mediaKeyBase64);
+        var mediaType = mimeType.Split('/')[0] switch
+        {
+            "image"    => "image",
+            "video"    => "video",
+            "audio"    => "audio",
+            "document" => "document",
+            _          => "image",
+        };
+
+        var encBytes = await _http.GetByteArrayAsync(mediaUrl);
+        return Crypto.MediaCrypto.Decrypt(encBytes, mediaKey, mediaType);
+    }
+
+    // ─── Delivery/read receipt tracking ─────────────────────────────────────
+
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, Messages.MessageStatus> _messageStatuses = new();
+
+    public event EventHandler<(string MessageId, Messages.MessageStatus Status)>? MessageStatusUpdated;
+
+    private void HandleReceiptNode(BinaryNode node)
+    {
+        var id   = node.GetAttr("id") ?? "";
+        var type = node.GetAttr("type") ?? "delivery";
+
+        var status = type switch
+        {
+            "read"     => Messages.MessageStatus.Read,
+            "played"   => Messages.MessageStatus.Played,
+            _          => Messages.MessageStatus.Delivered,
+        };
+
+        if (!string.IsNullOrEmpty(id))
+        {
+            _messageStatuses[id] = status;
+            MessageStatusUpdated?.Invoke(this, (id, status));
+            _logger.LogDebug("Receipt: msg {Id} → {Status}", id, status);
+        }
+    }
+
+    public Messages.MessageStatus? GetMessageStatus(string messageId)
+        => _messageStatuses.TryGetValue(messageId, out var s) ? s : null;
+
+    // ─── Helper: Send encrypted message to device list ───────────────────────
+
+    /// <summary>
+    /// Shared helper used by RevokeMessageAsync and ForwardMessageAsync to encrypt
+    /// and send a pre-built padded proto blob to a list of devices.
+    /// </summary>
+    private async Task SendEncryptedMessageAsync(
+        string toJid, string msgId, long timestamp,
+        List<string> recipientDeviceJids, List<string> senderDeviceJids,
+        byte[] paddedProto, CancellationToken ct)
+    {
+        var allDeviceJids = new List<string>(recipientDeviceJids);
+        allDeviceJids.AddRange(senderDeviceJids);
+
+        var needBundles = allDeviceJids.Where(d => !_signalStore.HasSession(d)).ToList();
+        if (needBundles.Count > 0)
+        {
+            try
+            {
+                var bundles = await FetchPreKeyBundlesAsync(needBundles, ct);
+                foreach (var (deviceJid, bundle) in bundles)
+                {
+                    try { _signalStore.InitOutgoingSession(deviceJid, bundle, _auth); }
+                    catch (Exception ex2) { _logger.LogWarning(ex2, "Failed to init session for {Jid}", deviceJid); }
+                }
+            }
+            catch (Exception ex) { _logger.LogWarning(ex, "Failed to fetch pre-key bundles"); }
+        }
+
+        bool hasPkMsg = false;
+        var participantNodes = new List<BinaryNode>();
+        foreach (var deviceJid in recipientDeviceJids)
+        {
+            var node = EncryptForDevice(deviceJid, paddedProto, ref hasPkMsg);
+            if (node != null) participantNodes.Add(node);
+        }
+
+        var senderNodes = new List<BinaryNode>();
+        foreach (var deviceJid in senderDeviceJids)
+        {
+            var node = EncryptForDevice(deviceJid, paddedProto, ref hasPkMsg);
+            if (node != null) senderNodes.Add(node);
+        }
+
+        var attrs = new Dictionary<string, string>
+        {
+            ["id"]   = msgId,
+            ["type"] = "text",
+            ["to"]   = toJid,
+            ["t"]    = timestamp.ToString(),
+        };
+
+        var msgNode = new BinaryNode("message", attrs);
+        var content = new List<BinaryNode>();
+
+        if (participantNodes.Count > 0 || senderNodes.Count > 0)
+        {
+            var pNode = new BinaryNode("participants") { Content = new List<BinaryNode>(participantNodes) };
+            content.Add(pNode);
+            if (senderNodes.Count > 0)
+            {
+                var sNode = new BinaryNode("device-sent-message") { Content = senderNodes };
+                content.Add(sNode);
+            }
+        }
+
+        msgNode.Content = content;
+        await SendNodeAsync(msgNode, ct);
     }
 
     // ─── History sync ────────────────────────────────────────────────────────

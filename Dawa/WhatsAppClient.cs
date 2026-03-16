@@ -292,15 +292,106 @@ public sealed class WhatsAppClient : IAsyncDisposable
     /// <summary>
     /// Sends an emoji reaction to a specific message.
     /// </summary>
-    /// <param name="targetJid">JID of the chat containing the target message.</param>
-    /// <param name="targetMessageId">ID of the message being reacted to.</param>
-    /// <param name="targetFromMe">Whether the target message was sent by us.</param>
-    /// <param name="emoji">The reaction emoji (e.g. "👍"). Pass "" to remove.</param>
     public Task SendReactionAsync(string targetJid, string targetMessageId, bool targetFromMe, string emoji, CancellationToken ct)
     {
         if (_noiseProcessor == null || _state != ConnectionState.Connected)
             throw new InvalidOperationException("Client is not connected.");
         return _noiseProcessor.SendReactionAsync(targetJid, targetMessageId, targetFromMe, emoji, ct);
+    }
+
+    /// <summary>Sends a typing indicator (composing) or stops it (paused) for a specific chat.</summary>
+    public Task SendTypingAsync(string jid, bool isTyping, CancellationToken ct)
+    {
+        if (_noiseProcessor == null || _state != ConnectionState.Connected)
+            throw new InvalidOperationException("Client is not connected.");
+        return _noiseProcessor.SendTypingAsync(jid, isTyping, ct);
+    }
+
+    /// <summary>Updates this device's presence to available or unavailable.</summary>
+    public Task SendUserPresenceAsync(bool isOnline, CancellationToken ct)
+    {
+        if (_noiseProcessor == null || _state != ConnectionState.Connected)
+            throw new InvalidOperationException("Client is not connected.");
+        return _noiseProcessor.SendUserPresenceAsync(isOnline, ct);
+    }
+
+    /// <summary>Deletes a sent message for everyone (delete for everyone).</summary>
+    public Task RevokeMessageAsync(string jid, string messageId, bool fromMe, long timestamp, CancellationToken ct)
+    {
+        if (_noiseProcessor == null || _state != ConnectionState.Connected)
+            throw new InvalidOperationException("Client is not connected.");
+        return _noiseProcessor.RevokeMessageAsync(jid, messageId, fromMe, timestamp, ct);
+    }
+
+    /// <summary>Forwards a message (as text) to another chat.</summary>
+    public Task ForwardMessageAsync(string toJid, string text, CancellationToken ct)
+    {
+        if (_noiseProcessor == null || _state != ConnectionState.Connected)
+            throw new InvalidOperationException("Client is not connected.");
+        return _noiseProcessor.ForwardMessageAsync(toJid, text, ct);
+    }
+
+    /// <summary>Creates a new WhatsApp group. Returns the group JID or null on failure.</summary>
+    public Task<string?> CreateGroupAsync(string subject, IEnumerable<string> participantJids, CancellationToken ct)
+    {
+        if (_noiseProcessor == null || _state != ConnectionState.Connected)
+            throw new InvalidOperationException("Client is not connected.");
+        return _noiseProcessor.CreateGroupAsync(subject, participantJids, ct);
+    }
+
+    /// <summary>Leaves a WhatsApp group.</summary>
+    public Task LeaveGroupAsync(string groupJid, CancellationToken ct)
+    {
+        if (_noiseProcessor == null || _state != ConnectionState.Connected)
+            throw new InvalidOperationException("Client is not connected.");
+        return _noiseProcessor.LeaveGroupAsync(groupJid, ct);
+    }
+
+    /// <summary>Adds participants to a group.</summary>
+    public Task<Dictionary<string, string>> AddGroupParticipantsAsync(string groupJid, IEnumerable<string> jids, CancellationToken ct)
+    {
+        if (_noiseProcessor == null || _state != ConnectionState.Connected)
+            throw new InvalidOperationException("Client is not connected.");
+        return _noiseProcessor.AddGroupParticipantsAsync(groupJid, jids, ct);
+    }
+
+    /// <summary>Removes participants from a group.</summary>
+    public Task<Dictionary<string, string>> RemoveGroupParticipantsAsync(string groupJid, IEnumerable<string> jids, CancellationToken ct)
+    {
+        if (_noiseProcessor == null || _state != ConnectionState.Connected)
+            throw new InvalidOperationException("Client is not connected.");
+        return _noiseProcessor.RemoveGroupParticipantsAsync(groupJid, jids, ct);
+    }
+
+    /// <summary>Gets the group invite link URL.</summary>
+    public Task<string?> GetGroupInviteLinkAsync(string groupJid, CancellationToken ct)
+    {
+        if (_noiseProcessor == null || _state != ConnectionState.Connected)
+            throw new InvalidOperationException("Client is not connected.");
+        return _noiseProcessor.GetGroupInviteLinkAsync(groupJid, ct);
+    }
+
+    /// <summary>Updates the group subject (name).</summary>
+    public Task UpdateGroupSubjectAsync(string groupJid, string newSubject, CancellationToken ct)
+    {
+        if (_noiseProcessor == null || _state != ConnectionState.Connected)
+            throw new InvalidOperationException("Client is not connected.");
+        return _noiseProcessor.UpdateGroupSubjectAsync(groupJid, newSubject, ct);
+    }
+
+    /// <summary>Downloads and decrypts a media file from the WhatsApp CDN.</summary>
+    public static Task<byte[]> DownloadMediaAsync(string mediaUrl, string mediaKeyBase64, string mimeType)
+        => Noise.NoiseProcessor.DownloadMediaAsync(mediaUrl, mediaKeyBase64, mimeType);
+
+    /// <summary>Gets the delivery/read status of a sent message.</summary>
+    public Messages.MessageStatus? GetMessageStatus(string messageId)
+        => _noiseProcessor?.GetMessageStatus(messageId);
+
+    /// <summary>Fired when a message delivery/read receipt is received.</summary>
+    public event EventHandler<(string MessageId, Messages.MessageStatus Status)>? MessageStatusUpdated
+    {
+        add    { if (_noiseProcessor != null) _noiseProcessor.MessageStatusUpdated += value; }
+        remove { if (_noiseProcessor != null) _noiseProcessor.MessageStatusUpdated -= value; }
     }
 
     // ─── Disconnection ───────────────────────────────────────────────────────
