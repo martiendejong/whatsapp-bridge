@@ -467,9 +467,19 @@ public sealed class SignalKeyStore
                     resolvedJid = mapped;
             }
 
-            // Only initialize session on the FIRST pkmsg from this JID.
-            // Subsequent pkmsgs reuse the existing session (sender advances chain counter).
-            if (!_sessions.ContainsKey(resolvedJid))
+            // Mirrors libsignal's initIncoming logic:
+            // Each distinct pkmsg session is identified by its base key.
+            // - Same base key as existing session → this is a retry of the same pkmsg, reuse session
+            // - Different/no base key → new X3DH session establishment, reinitialize
+            // This correctly handles:
+            //   (a) Multiple pkmsgs from same JID with different base keys (different messages/sessions)
+            //   (b) Retries of the same pkmsg
+            //   (c) Stale bad sessions from a previous failed decrypt
+            var existingSession = _sessions.TryGetValue(resolvedJid, out var es) ? es : null;
+            var incomingBaseKey = pkProto.BaseKey; // 33-byte prefixed
+            bool shouldReinit = existingSession == null ||
+                                !existingSession.BaseKey.SequenceEqual(incomingBaseKey);
+            if (shouldReinit)
                 InitIncomingSession(resolvedJid, pkProto, auth);
 
             // The inner message is in pkProto.Message

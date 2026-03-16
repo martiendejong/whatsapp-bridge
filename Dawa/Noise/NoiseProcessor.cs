@@ -412,6 +412,28 @@ public sealed class NoiseProcessor : IAsyncDisposable
                     _logger.LogInformation("Received edge_routing ({Len} bytes) — stored for next reconnect.", routingBytes.Length);
                 }
             }
+            else if (child.Tag == "offline_preview")
+            {
+                // WA sends offline_preview to tell us there are queued offline messages.
+                // Baileys responds with <ib><offline_batch count="100"/></ib> to trigger delivery.
+                // Without this, WA never delivers the offline messages.
+                var msgCount = child.GetAttr("message") ?? "0";
+                _logger.LogInformation("offline_preview: {Count} queued messages — requesting offline_batch", msgCount);
+                var offlineBatch = new BinaryNode("ib")
+                {
+                    Content = new List<BinaryNode>
+                    {
+                        new("offline_batch", new Dictionary<string, string> { ["count"] = "100" }),
+                    },
+                };
+                await SendNodeAsync(offlineBatch, ct);
+            }
+            else if (child.Tag == "offline")
+            {
+                // WA sends this after delivering all offline messages.
+                var offlineCount = child.GetAttr("count") ?? "0";
+                _logger.LogInformation("offline delivery complete: {Count} items received", offlineCount);
+            }
             else if (child.Tag == "thread_metadata")
             {
                 // WhatsApp pushes the chat list on startup as <thread_metadata> items.
@@ -784,21 +806,23 @@ public sealed class NoiseProcessor : IAsyncDisposable
                     }
 
                     var text      = waMsg.GetText();
-                    if (string.IsNullOrEmpty(text)) continue;
-
-                    MessageReceived?.Invoke(this, new IncomingMessage
+                    if (!string.IsNullOrEmpty(text))
                     {
-                        Id          = id,
-                        From        = senderJid,
-                        RemoteJid   = from,
-                        Participant = participant,
-                        Text        = text,
-                        FromMe      = fromMe,
-                        Timestamp   = timestamp,
-                        PushName    = pushName,
-                    });
+                        MessageReceived?.Invoke(this, new IncomingMessage
+                        {
+                            Id          = id,
+                            From        = senderJid,
+                            RemoteJid   = from,
+                            Participant = participant,
+                            Text        = text,
+                            FromMe      = fromMe,
+                            Timestamp   = timestamp,
+                            PushName    = pushName,
+                        });
+                    }
 
-                    // ACK
+                    // ACK all successfully decrypted messages (not just text ones).
+                    // Without this, WA re-delivers media/voip/unknown messages on every reconnect.
                     _ = SendAckAsync(id, from, timestamp);
                 }
                 catch (Exception ex)
@@ -1131,9 +1155,9 @@ public sealed class NoiseProcessor : IAsyncDisposable
         });
     }
 
-    /// Builds the <keys> node for retry receipts. Includes our identity key, signed pre-key,
-    /// and a fresh one-time pre-key. The one-time pre-key is REQUIRED — without it the phone
-    /// ACKs the retry but never re-encrypts the message. (Baileys includes preKeys[retryCount+1])
+    /// Builds the <keys> node for retry receipts.
+    /// Node order matches Baileys: type, identity, key (one-time), skey (signed), device-identity.
+    /// The device-identity is REQUIRED for the phone to trust and process the retry receipt.
     /// Uses _retryPreKeyIndex to assign a unique pre-key per message so that if multiple
     /// re-encrypted pkmsg responses arrive they can each be decrypted independently.
     private BinaryNode BuildRetryKeysNode(Auth.AuthState auth)
@@ -1144,7 +1168,6 @@ public sealed class NoiseProcessor : IAsyncDisposable
         {
             new("type",     null, new byte[] { 5 }),   // DJB_TYPE = 0x05
             new("identity", null, auth.SignedIdentityKeyPublic),
-            BuildSignedPreKeyNode(auth),
         };
 
         // Pick a unique one-time pre-key for each retry receipt. _retryPreKeyIndex increments
@@ -1154,11 +1177,22 @@ public sealed class NoiseProcessor : IAsyncDisposable
         var otpk = keyIndex < auth.PreKeys.Count ? auth.PreKeys[keyIndex] : auth.PreKeys.LastOrDefault();
         if (otpk != null)
         {
+            // <key> comes BEFORE <skey> — this matches Baileys xmppPreKey / xmppSignedPreKey order
             children.Add(new BinaryNode("key", null, new List<BinaryNode>
             {
                 new("id",    null, Be3(otpk.Id)),
                 new("value", null, otpk.Public),
             }));
+        }
+
+        // <skey> (signed pre-key) AFTER <key>
+        children.Add(BuildSignedPreKeyNode(auth));
+
+        // device-identity — REQUIRED! Phone uses this to verify our device and re-establish session.
+        // Without it the phone ACKs the retry receipt but never re-encrypts the message.
+        if (auth.Account != null)
+        {
+            children.Add(new BinaryNode("device-identity") { Content = auth.Account });
         }
 
         return new BinaryNode("keys", null, children);
@@ -1462,11 +1496,11 @@ public sealed class NoiseProcessor : IAsyncDisposable
                     RequestType = 3,  // HISTORY_SYNC_ON_DEMAND
                     HistorySyncRequest = new Dawa.Proto.HistorySyncOnDemandRequest
                     {
-                        ChatJid               = chatJid,
-                        OldestMsgId          = oldestMsgId,
-                        OldestMsgFromMe      = oldestMsgFromMe,
-                        OnDemandMsgCount     = count,
-                        OldestMsgTimestampMs = oldestMsgTimestampMs,
+                        ChatJid                    = chatJid,
+                        OldestMsgId               = oldestMsgId,
+                        OldestMsgFromMe           = oldestMsgFromMe,
+                        OnDemandMsgCount          = count,
+                        OldestMsgTimestampSeconds = oldestMsgTimestampMs / 1000,  // proto uses seconds
                     },
                 },
             },

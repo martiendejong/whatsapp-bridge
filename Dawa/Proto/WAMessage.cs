@@ -756,26 +756,26 @@ public sealed class WebMessageKey
 public sealed class PeerDataOperationRequestMessage
 {
     public int RequestType { get; set; }                          // field 1: PeerDataOperationRequestType enum
-    public HistorySyncOnDemandRequest? HistorySyncRequest { get; set; } // field 4 (single, not repeated)
+    public HistorySyncOnDemandRequest? HistorySyncRequest { get; set; } // field 2 (repeated in proto, we send one)
 
     public byte[] ToByteArray()
     {
         var buf = new List<byte>();
         if (RequestType != 0) ProtoEncoder.WriteInt32(buf, 1, RequestType);
         if (HistorySyncRequest != null)
-            ProtoEncoder.WriteMessage(buf, 4, HistorySyncRequest.ToByteArray());
+            ProtoEncoder.WriteMessage(buf, 2, HistorySyncRequest.ToByteArray());  // field 2: historySyncOnDemandRequestMessages
         return [.. buf];
     }
 }
 
-/// <summary>Embedded in PeerDataOperationRequestMessage field 3.</summary>
+/// <summary>Embedded in PeerDataOperationRequestMessage field 2 (historySyncOnDemandRequestMessages).</summary>
 public sealed class HistorySyncOnDemandRequest
 {
-    public string  ChatJid               { get; set; } = "";  // field 1: target chat JID
-    public string? OldestMsgId          { get; set; }         // field 2: start from this message
-    public bool    OldestMsgFromMe      { get; set; }         // field 3: was oldest msg sent by us?
-    public int     OnDemandMsgCount     { get; set; } = 50;   // field 4: how many messages to request
-    public long    OldestMsgTimestampMs { get; set; }         // field 5: timestamp of oldest msg (ms)
+    public string  ChatJid                    { get; set; } = "";  // field 1: target chat JID
+    public string? OldestMsgId               { get; set; }         // field 2: start from this message
+    public bool    OldestMsgFromMe           { get; set; }         // field 3: was oldest msg sent by us?
+    public int     OnDemandMsgCount          { get; set; } = 50;   // field 4: how many messages to request
+    public long    OldestMsgTimestampSeconds { get; set; }         // field 5: timestamp of oldest msg (SECONDS, not ms)
 
     public byte[] ToByteArray()
     {
@@ -787,10 +787,10 @@ public sealed class HistorySyncOnDemandRequest
             ProtoEncoder.WriteBool(buf, 3, true);
         if (OnDemandMsgCount != 0)
             ProtoEncoder.WriteInt32(buf, 4, OnDemandMsgCount);
-        if (OldestMsgTimestampMs != 0)
+        if (OldestMsgTimestampSeconds != 0)
         {
             ProtoEncoder.WriteTag(buf, 5, 0);  // wire type 0 = varint (int64)
-            ProtoEncoder.WriteVarint(buf, (ulong)OldestMsgTimestampMs);
+            ProtoEncoder.WriteVarint(buf, (ulong)OldestMsgTimestampSeconds);
         }
         return [.. buf];
     }
