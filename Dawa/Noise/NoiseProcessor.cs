@@ -3994,47 +3994,66 @@ public sealed class NoiseProcessor : IAsyncDisposable
             _logger.LogInformation("HistorySync: received {Type} notification, directPath={Path}",
                 syncTypeName, notif.DirectPath);
 
-            if (notif.MediaKey == null || notif.MediaKey.Length == 0 || string.IsNullOrEmpty(notif.DirectPath))
-            {
-                _logger.LogWarning("HistorySync: missing mediaKey or directPath — skipping");
-                return;
-            }
-
-            // 1. Download blob from CDN
-            var downloadUrl = $"https://mmg.whatsapp.net{notif.DirectPath}";
-            _logger.LogInformation("HistorySync: downloading from {Url}", downloadUrl);
-
-            byte[] encBlob;
-            using var resp = await _http.GetAsync(downloadUrl, ct);
-            resp.EnsureSuccessStatusCode();
-            encBlob = await resp.Content.ReadAsByteArrayAsync(ct);
-            _logger.LogInformation("HistorySync: downloaded {Bytes} encrypted bytes", encBlob.Length);
-
-            // 2. Decrypt: AES-CBC with keys derived from mediaKey via HKDF "WhatsApp History Keys"
-            byte[] compressed;
-            try
-            {
-                compressed = Crypto.MediaCrypto.Decrypt(encBlob, notif.MediaKey, "md-msg-hist");
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "HistorySync: decryption failed");
-                return;
-            }
-            _logger.LogInformation("HistorySync: decrypted to {Bytes} compressed bytes", compressed.Length);
-
-            // 3. Decompress: zlib deflate (raw inflate, skip 2-byte zlib header)
+            // Newer WA versions send InlineBlob (field 10): zlib-compressed proto, no CDN download or decryption needed.
+            // Older versions use DirectPath + MediaKey for CDN download + AES decryption.
             byte[] protoBytes;
-            try
+
+            if (notif.InlineBlob != null && notif.InlineBlob.Length > 0)
             {
-                protoBytes = ZlibInflate(compressed);
+                _logger.LogInformation("HistorySync: InlineBlob path ({Bytes} bytes)", notif.InlineBlob.Length);
+                try
+                {
+                    protoBytes = ZlibInflate(notif.InlineBlob);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "HistorySync: InlineBlob decompression failed");
+                    return;
+                }
+                _logger.LogInformation("HistorySync: InlineBlob decompressed to {Bytes} proto bytes", protoBytes.Length);
             }
-            catch (Exception ex)
+            else if (notif.MediaKey != null && notif.MediaKey.Length > 0 && !string.IsNullOrEmpty(notif.DirectPath))
             {
-                _logger.LogError(ex, "HistorySync: decompression failed");
+                // 1. Download blob from CDN
+                var downloadUrl = $"https://mmg.whatsapp.net{notif.DirectPath}";
+                _logger.LogInformation("HistorySync: downloading from {Url}", downloadUrl);
+
+                byte[] encBlob;
+                using var resp = await _http.GetAsync(downloadUrl, ct);
+                resp.EnsureSuccessStatusCode();
+                encBlob = await resp.Content.ReadAsByteArrayAsync(ct);
+                _logger.LogInformation("HistorySync: downloaded {Bytes} encrypted bytes", encBlob.Length);
+
+                // 2. Decrypt: AES-CBC with keys derived from mediaKey via HKDF "WhatsApp History Keys"
+                byte[] compressed;
+                try
+                {
+                    compressed = Crypto.MediaCrypto.Decrypt(encBlob, notif.MediaKey, "md-msg-hist");
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "HistorySync: decryption failed");
+                    return;
+                }
+                _logger.LogInformation("HistorySync: decrypted to {Bytes} compressed bytes", compressed.Length);
+
+                // 3. Decompress
+                try
+                {
+                    protoBytes = ZlibInflate(compressed);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "HistorySync: decompression failed");
+                    return;
+                }
+                _logger.LogInformation("HistorySync: decompressed to {Bytes} proto bytes", protoBytes.Length);
+            }
+            else
+            {
+                _logger.LogWarning("HistorySync: no InlineBlob, no MediaKey/DirectPath — skipping");
                 return;
             }
-            _logger.LogInformation("HistorySync: decompressed to {Bytes} proto bytes", protoBytes.Length);
 
             // 4. Proto decode
             Proto.HistorySync sync;
