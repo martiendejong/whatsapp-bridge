@@ -560,16 +560,16 @@ public sealed class SignalKeyStore
         var macKey = keyMaterial[32..64];
         var iv     = keyMaterial[64..80];
 
-        // Verify MAC — Signal Protocol requires identity keys in MAC input:
-        // MAC = HMAC-SHA256(macKey, senderIdentityPub_33 || receiverIdentityPub_33 || versionByte || protoBytes)
+        // Verify MAC — Signal Protocol v3+ requires identity keys in MAC input:
+        // MAC = HMAC-SHA256(macKey, senderIdentityPub_33 || receiverIdentityPub_33 || protoBytes)
         // Identity keys use 33-byte format: 0x05 prefix + 32-byte raw key
+        // NOTE: No version byte in MAC input (per libsignal-protocol spec for v3+)
         var senderIdentity33   = new byte[] { 0x05 }.Concat(session.TheirIdentityPublic).ToArray();
         var receiverIdentity33 = new byte[] { 0x05 }.Concat(auth.SignedIdentityKeyPublic).ToArray();
-        var macInput = new byte[33 + 33 + 1 + protoBytes.Length];
+        var macInput = new byte[33 + 33 + protoBytes.Length];
         senderIdentity33.CopyTo(macInput, 0);
         receiverIdentity33.CopyTo(macInput, 33);
-        macInput[66] = 0x33;
-        protoBytes.CopyTo(macInput, 67);
+        protoBytes.CopyTo(macInput, 66);
         var expectedMac = HMACSHA256.HashData(macKey, macInput)[..8];
         if (!expectedMac.AsSpan().SequenceEqual(receivedMac))
         {

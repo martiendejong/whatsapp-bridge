@@ -183,19 +183,37 @@ public sealed class HistoryMessageKey
     }
 }
 
-/// <summary>Minimal Message decode — plain text + captions.</summary>
+/// <summary>Minimal Message decode — plain text, captions, and media metadata.</summary>
 public sealed class HistoryWaMessage
 {
     public string Conversation { get; set; } = ""; // field 1 — plain text
     public string ExtendedText { get; set; } = ""; // field 6 → ExtendedTextMessage.text (field 1)
-    public string ImageCaption { get; set; } = ""; // field 4 → ImageMessage.caption (field 7)
-    public string VideoCaption { get; set; } = ""; // field 13→ VideoMessage.caption (field 7)
+    public string ImageCaption    { get; set; } = ""; // field 4 → ImageMessage.caption (field 7)
+    public string ImageDirectPath { get; set; } = ""; // field 4 → ImageMessage.directPath (field 10)
+    public byte[] ImageMediaKey   { get; set; } = []; // field 4 → ImageMessage.mediaKey (field 19)
+    public string VideoCaption    { get; set; } = ""; // field 13→ VideoMessage.caption (field 7)
+    public string VideoDirectPath { get; set; } = ""; // field 13→ VideoMessage.directPath (field 10)
+    public byte[] VideoMediaKey   { get; set; } = []; // field 13→ VideoMessage.mediaKey (field 19)
+    public string AudioDirectPath { get; set; } = ""; // field 26→ AudioMessage.directPath (field 10)
+    public byte[] AudioMediaKey   { get; set; } = []; // field 26→ AudioMessage.mediaKey (field 19)
+    public string DocumentFileName   { get; set; } = ""; // field 8 → DocumentMessage.fileName (field 4)
+    public string DocumentDirectPath { get; set; } = ""; // field 8 → DocumentMessage.directPath (field 10)
+    public byte[] DocumentMediaKey   { get; set; } = []; // field 8 → DocumentMessage.mediaKey (field 19)
+
+    // Media type detected
+    public string MediaType =>
+        ImageDirectPath.Length > 0 || ImageMediaKey.Length > 0 ? "image" :
+        VideoDirectPath.Length > 0 || VideoMediaKey.Length > 0 ? "video" :
+        AudioDirectPath.Length > 0 || AudioMediaKey.Length > 0 ? "audio" :
+        DocumentDirectPath.Length > 0 ? "document" :
+        "";
 
     public string EffectiveText =>
         Conversation.Length > 0 ? Conversation :
         ExtendedText.Length  > 0 ? ExtendedText :
         ImageCaption.Length  > 0 ? $"[image] {ImageCaption}".Trim() :
         VideoCaption.Length  > 0 ? $"[video] {VideoCaption}".Trim() :
+        MediaType.Length > 0 ? $"[{MediaType}]" :
         "";
 
     public static HistoryWaMessage Decode(byte[] data)
@@ -207,11 +225,13 @@ public sealed class HistoryWaMessage
             var (field, wt) = r.ReadTag();
             switch (field)
             {
-                case 1:  obj.Conversation = r.ReadString();                        break;
-                case 4:  obj.ImageCaption = ReadCaptionField7(r.ReadBytes());     break; // ImageMessage
-                case 6:  obj.ExtendedText = ReadTextField1(r.ReadBytes());        break; // ExtendedTextMessage
-                case 13: obj.VideoCaption = ReadCaptionField7(r.ReadBytes());     break; // VideoMessage
-                default: r.Skip(wt);                                               break;
+                case 1:  obj.Conversation = r.ReadString();                                  break;
+                case 4:  ReadImageMessage(r.ReadBytes(), obj);                               break; // ImageMessage
+                case 6:  obj.ExtendedText = ReadTextField1(r.ReadBytes());                   break; // ExtendedTextMessage
+                case 8:  ReadDocumentMessage(r.ReadBytes(), obj);                            break; // DocumentMessage
+                case 13: ReadVideoMessage(r.ReadBytes(), obj);                               break; // VideoMessage
+                case 26: ReadAudioMessage(r.ReadBytes(), obj);                               break; // AudioMessage (field 26)
+                default: r.Skip(wt);                                                          break;
             }
         }
         return obj;
@@ -229,16 +249,67 @@ public sealed class HistoryWaMessage
         return "";
     }
 
-    private static string ReadCaptionField7(byte[] data)
+    private static void ReadImageMessage(byte[] data, HistoryWaMessage obj)
     {
         var r = ProtoEncoder.CreateReader(data);
         while (r.HasMore)
         {
             var (f, wt) = r.ReadTag();
-            if (f == 7) return r.ReadString();
-            r.Skip(wt);
+            switch (f)
+            {
+                case 7:  obj.ImageCaption    = r.ReadString(); break; // caption
+                case 10: obj.ImageDirectPath = r.ReadString(); break; // directPath
+                case 19: obj.ImageMediaKey   = r.ReadBytes();  break; // mediaKey
+                default: r.Skip(wt);                           break;
+            }
         }
-        return "";
+    }
+
+    private static void ReadVideoMessage(byte[] data, HistoryWaMessage obj)
+    {
+        var r = ProtoEncoder.CreateReader(data);
+        while (r.HasMore)
+        {
+            var (f, wt) = r.ReadTag();
+            switch (f)
+            {
+                case 7:  obj.VideoCaption    = r.ReadString(); break; // caption
+                case 10: obj.VideoDirectPath = r.ReadString(); break; // directPath
+                case 19: obj.VideoMediaKey   = r.ReadBytes();  break; // mediaKey
+                default: r.Skip(wt);                           break;
+            }
+        }
+    }
+
+    private static void ReadAudioMessage(byte[] data, HistoryWaMessage obj)
+    {
+        var r = ProtoEncoder.CreateReader(data);
+        while (r.HasMore)
+        {
+            var (f, wt) = r.ReadTag();
+            switch (f)
+            {
+                case 10: obj.AudioDirectPath = r.ReadString(); break; // directPath
+                case 19: obj.AudioMediaKey   = r.ReadBytes();  break; // mediaKey
+                default: r.Skip(wt);                           break;
+            }
+        }
+    }
+
+    private static void ReadDocumentMessage(byte[] data, HistoryWaMessage obj)
+    {
+        var r = ProtoEncoder.CreateReader(data);
+        while (r.HasMore)
+        {
+            var (f, wt) = r.ReadTag();
+            switch (f)
+            {
+                case 4:  obj.DocumentFileName    = r.ReadString(); break; // fileName
+                case 10: obj.DocumentDirectPath  = r.ReadString(); break; // directPath
+                case 19: obj.DocumentMediaKey    = r.ReadBytes();  break; // mediaKey
+                default: r.Skip(wt);                               break;
+            }
+        }
     }
 }
 
