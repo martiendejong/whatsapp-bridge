@@ -615,28 +615,8 @@ public class WhatsAppController : ControllerBase
         });
     }
 
-    /// <summary>
-    /// Debug: return all stored messages for a chat JID from the in-memory message store.
-    /// Example: GET /api/WhatsApp/test-stored-messages/{sessionId}/261542083862683%40lid
-    /// </summary>
-    [AllowAnonymous]
-    [HttpGet("test-stored-messages/{sessionId}/{chatId}")]
-    public async Task<IActionResult> TestStoredMessages(string sessionId, string chatId)
-    {
-        var messages = await _whatsappService.GetMessagesAsync(sessionId, chatId, 100);
-        return Ok(new
-        {
-            chatId,
-            count = messages?.Count ?? 0,
-            messages,
-        });
-    }
-
-    /// <summary>
-    /// Debug: attempt to fetch message history for a JID by sending a w:msg sync IQ.
-    /// Also resolves LID JIDs to phone JIDs first via usync before fetching.
-    /// Example: POST /api/WhatsApp/test-fetch-history/{sessionId}/261542083862683%40lid
-    /// </summary>
+    // NOTE: test-stored-messages and test-fetch-history moved to lines ~392 and ~376 respectively
+    // (removed duplicates that caused AmbiguousMatchException)
     /// <summary>
     /// Sends a PeerDataOperationRequestMessage (ON_DEMAND) to the primary phone,
     /// asking it to push older messages for the given chat as a HistorySync blob.
@@ -682,30 +662,7 @@ public class WhatsAppController : ControllerBase
         return Ok(new { success = true, message = $"Retry receipt sent for {body.MsgId} to {body.SenderJid}" });
     }
 
-    [AllowAnonymous]
-    [HttpPost("test-fetch-history/{sessionId}/{chatId}")]
-    public async Task<IActionResult> TestFetchHistory(string sessionId, string chatId)
-    {
-        // If it's a LID, resolve to phone JID first
-        var resolvedJid = chatId;
-        if (chatId.EndsWith("@lid"))
-        {
-            var phoneJid = await _whatsappService.ResolveLidAsync(sessionId, chatId);
-            if (phoneJid != null)
-            {
-                resolvedJid = phoneJid;
-            }
-        }
-
-        var messages = await _whatsappService.FetchMessageHistoryAsync(sessionId, resolvedJid, 50);
-        return Ok(new
-        {
-            requestedJid = chatId,
-            resolvedJid,
-            count = messages?.Count ?? 0,
-            messages,
-        });
-    }
+    // NOTE: duplicate TestFetchHistory removed (see line ~376)
 
     /// <summary>
     /// Debug: disconnect and immediately reconnect a session.
