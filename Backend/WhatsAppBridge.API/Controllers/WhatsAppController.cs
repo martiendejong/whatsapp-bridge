@@ -367,34 +367,8 @@ public class WhatsAppController : ControllerBase
         }
     }
 
-    /// <summary>
-    /// Test: Trigger ON_DEMAND history sync (fire-and-forget) then return current stored messages.
-    /// The phone will push the HISTORY_SYNC_NOTIFICATION asynchronously (may take 10-120s).
-    /// Poll /test-messages/{sessionId}/{chatId} to see when messages arrive.
-    /// </summary>
-    [AllowAnonymous]
-    [HttpPost("test-fetch-history/{sessionId}/{chatId}")]
-    public async Task<IActionResult> TestFetchHistory(string sessionId, string chatId, [FromQuery] int count = 100)
-    {
-        try
-        {
-            var messages = await _whatsappService.FetchAndStoreChatHistoryAsync(sessionId, chatId, count);
-            return Ok(new { triggered = true, currentStored = messages.Count, messages, note = "ON_DEMAND request sent to phone. Poll /test-messages/{sessionId}/{chatId} for results." });
-        }
-        catch (Exception ex)
-        {
-            return StatusCode(500, new { error = ex.Message });
-        }
-    }
-
-    /// <summary>Test: Get currently stored messages for a chat (anonymous, dev only).</summary>
-    [AllowAnonymous]
-    [HttpGet("test-stored-messages/{sessionId}/{chatId}")]
-    public async Task<IActionResult> TestGetMessages(string sessionId, string chatId, [FromQuery] int limit = 200)
-    {
-        var messages = await _whatsappService.GetMessagesAsync(sessionId, chatId, limit);
-        return Ok(new { count = messages?.Count ?? 0, messages });
-    }
+    // NOTE: Old test endpoints removed to eliminate duplicate route warnings.
+    // Use the newer LID-aware endpoints below (lines 686 and 623) which handle LID resolution.
 
     [HttpGet("sessions/{sessionId}/groups")]
     public async Task<IActionResult> GetGroups(string sessionId)
