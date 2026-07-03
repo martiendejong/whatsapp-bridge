@@ -724,28 +724,41 @@ public sealed class NoiseProcessor : IAsyncDisposable
         var from           = node.GetAttr("from") ?? "";
         var id             = node.GetAttr("id") ?? "";
         var participant    = node.GetAttr("participant");
-        var participantPn  = node.GetAttr("participant_pn"); // e.g. "31633984381@s.whatsapp.net"
-        var senderLid      = node.GetAttr("sender_lid");     // e.g. "70068130029702@lid" (when from= is a phone JID)
+        var participantPn  = node.GetAttr("participant_pn");  // phone JID when participant is a LID
+        var participantLid = node.GetAttr("participant_lid"); // LID when participant/from is a phone JID
+        var senderLid      = node.GetAttr("sender_lid");      // LID when from= is a phone JID
+        var senderPn       = node.GetAttr("sender_pn");       // phone JID when from= is a LID
         var pushName       = node.GetAttr("notify");
 
-        // Populate LID→phone map from participant_pn attribute
-        // participant is the LID JID, participant_pn is the actual phone JID
+        // ── Learn lid↔phone mappings from ALL addressing attributes, and CRITICALLY
+        //    propagate each one into the Signal store so the decrypt path resolves the
+        //    LID to the same session. Without this the two maps drift and MAC verification
+        //    fails for LID senders (root cause, 2026-07-03). Registering also collapses any
+        //    split lid-keyed session onto the canonical phone slot before we decrypt below.
         var cacheUpdated = false;
-        if (!string.IsNullOrEmpty(participant) && !string.IsNullOrEmpty(participantPn)
-            && !_lidToPhone.ContainsKey(participant))
+        void LearnMapping(string? lid, string? phone)
         {
-            _lidToPhone[participant] = participantPn;
-            cacheUpdated = true;
+            if (string.IsNullOrEmpty(lid) || string.IsNullOrEmpty(phone)) return;
+            if (!lid.EndsWith("@lid") || !phone.EndsWith("@s.whatsapp.net")) return;
+            if (!_lidToPhone.TryGetValue(lid, out var ex) || ex != phone)
+            {
+                _lidToPhone[lid] = phone;
+                cacheUpdated = true;
+            }
+            // Propagate to the Signal session store (map + session migration).
+            try { _signalStore.RegisterLidMapping(lid, phone); } catch { /* best effort */ }
         }
 
-        // Populate LID→phone map from sender_lid attribute (reverse: from=phone JID, sender_lid=LID)
-        // This captures messages where the phone JID is in `from` and LID is in `sender_lid`
-        if (!string.IsNullOrEmpty(senderLid) && !string.IsNullOrEmpty(from) && from.EndsWith("@s.whatsapp.net")
-            && !_lidToPhone.ContainsKey(senderLid))
-        {
-            _lidToPhone[senderLid] = from;
-            cacheUpdated = true;
-        }
+        LearnMapping(participant, participantPn);                       // participant=LID, participant_pn=phone
+        if (from.EndsWith("@s.whatsapp.net")) LearnMapping(senderLid, from);        // from=phone, sender_lid=LID
+        if (from.EndsWith("@lid"))            LearnMapping(from, senderPn);          // from=LID, sender_pn=phone
+        if (!string.IsNullOrEmpty(participant) && participant.EndsWith("@s.whatsapp.net"))
+            LearnMapping(participantLid, participant);                  // participant=phone, participant_lid=LID
+
+        // Chat address for storage/display: normalize a LID `from` to its phone JID when
+        // known, so the message is stored under a phone key that getMessages(phone) finds.
+        var remoteJid = from.EndsWith("@lid") && _lidToPhone.TryGetValue(from, out var fromPhone)
+            ? fromPhone : from;
 
         // Also store push names keyed by sender JID (may be LID or phone JID)
         if (!string.IsNullOrEmpty(pushName))
@@ -851,7 +864,7 @@ public sealed class NoiseProcessor : IAsyncDisposable
                     {
                         Id               = id,
                         From             = senderJid,
-                        RemoteJid        = from,
+                        RemoteJid        = remoteJid,
                         Participant      = participant,
                         Type             = msgType,
                         Text             = text,
@@ -967,7 +980,7 @@ public sealed class NoiseProcessor : IAsyncDisposable
                     {
                         Id               = id,
                         From             = participant ?? from,
-                        RemoteJid        = from,
+                        RemoteJid        = remoteJid,
                         Participant      = participant,
                         Type             = msgType,
                         Text             = text2,
@@ -1013,7 +1026,7 @@ public sealed class NoiseProcessor : IAsyncDisposable
         {
             Id          = id,
             From        = participant ?? from,
-            RemoteJid   = from,
+            RemoteJid   = remoteJid,
             Text        = plainText,
             FromMe      = fromMe,
             Timestamp   = timestamp,

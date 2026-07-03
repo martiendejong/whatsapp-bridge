@@ -58,24 +58,104 @@ public sealed class SignalKeyStore
 
     /// <summary>
     /// Registers a mapping from a LID JID (e.g. "824767959274@lid") to a phone JID
-    /// (e.g. "31633984381@s.whatsapp.net"). Both formats refer to the same device
-    /// and share the same Signal session.
+    /// (e.g. "31633984381@s.whatsapp.net"). Both formats refer to the same user/device
+    /// and MUST share one Signal session. Registering also collapses (migrates) any
+    /// existing lid-keyed session onto the canonical phone slot so the Double-Ratchet
+    /// state is not split across two records — the primary cause of MAC failures on
+    /// LID senders. Phone-canonical: the phone slot is the survivor.
     /// </summary>
     public void RegisterLidMapping(string lidJid, string phoneJid)
     {
-        _lidToPhone[lidJid] = phoneJid;
-        SaveLidMappings();
+        if (string.IsNullOrEmpty(lidJid) || string.IsNullOrEmpty(phoneJid)) return;
+        if (!lidJid.Contains("@lid") || !phoneJid.Contains("@s.whatsapp.net")) return;
+
+        var changed = !_lidToPhone.TryGetValue(lidJid, out var existing) || existing != phoneJid;
+        if (changed)
+        {
+            _lidToPhone[lidJid] = phoneJid;
+            SaveLidMappings();
+        }
+
+        // Collapse any lid-keyed session(s) for this user onto the canonical phone slot.
+        MigrateLidSessionsToPhone(UserPart(lidJid), UserPart(phoneJid));
     }
 
     /// <summary>
-    /// Resolves a JID: if it's a known LID, returns the mapped phone JID.
-    /// Otherwise returns the JID as-is.
+    /// Resolves a JID to its canonical Signal session address (phone-canonical).
+    /// If it's a known LID — matched exactly or by user part (device-insensitive) —
+    /// returns the phone JID preserving the device id. Otherwise returns the JID as-is
+    /// (an unmapped pure-LID contact keeps its own consistent lid-keyed session).
     /// </summary>
     public string ResolveJid(string jid)
     {
-        if (jid.Contains("@lid") && _lidToPhone.TryGetValue(jid, out var phoneJid))
-            return phoneJid;
+        if (!jid.Contains("@lid")) return jid;
+
+        // Exact match first (fast path, handles legacy full-JID mappings)
+        if (_lidToPhone.TryGetValue(jid, out var exact)) return exact;
+
+        // User-part match: reconstruct the phone JID with the SAME device id.
+        var lidUser = UserPart(jid);
+        var device  = DevicePart(jid);
+        foreach (var (k, v) in _lidToPhone)
+        {
+            if (UserPart(k) == lidUser)
+            {
+                var pnUser = UserPart(v);
+                return device.Length > 0
+                    ? $"{pnUser}:{device}@s.whatsapp.net"
+                    : $"{pnUser}@s.whatsapp.net";
+            }
+        }
         return jid;
+    }
+
+    /// <summary>User part of a JID: "31633984381:78@s.whatsapp.net" → "31633984381".</summary>
+    private static string UserPart(string jid)
+    {
+        var at = jid.IndexOf('@');
+        var s  = at >= 0 ? jid[..at] : jid;
+        var colon = s.IndexOf(':');
+        return colon >= 0 ? s[..colon] : s;
+    }
+
+    /// <summary>Device part of a JID: "31633984381:78@s.whatsapp.net" → "78" ("" if none).</summary>
+    private static string DevicePart(string jid)
+    {
+        var at = jid.IndexOf('@');
+        var s  = at >= 0 ? jid[..at] : jid;
+        var colon = s.IndexOf(':');
+        return colon >= 0 ? s[(colon + 1)..] : "";
+    }
+
+    /// <summary>
+    /// Moves every lid-keyed session for <paramref name="lidUser"/> onto the matching
+    /// phone slot (same device id). Phone slot wins if it already exists (keep the
+    /// canonical ratchet); otherwise the lid session is retagged to the phone JID.
+    /// The lid slot is always removed afterwards so future lookups converge on one record.
+    /// </summary>
+    private void MigrateLidSessionsToPhone(string lidUser, string pnUser)
+    {
+        var lidKeys = _sessions.Keys
+            .Where(k => k.Contains("@lid") && UserPart(k) == lidUser)
+            .ToList();
+        if (lidKeys.Count == 0) return;
+
+        foreach (var lidKey in lidKeys)
+        {
+            var device   = DevicePart(lidKey);
+            var phoneJid = device.Length > 0
+                ? $"{pnUser}:{device}@s.whatsapp.net"
+                : $"{pnUser}@s.whatsapp.net";
+
+            if (!_sessions.ContainsKey(phoneJid))
+            {
+                var sess = _sessions[lidKey];
+                sess.RemoteJid = phoneJid;
+                _sessions[phoneJid] = sess;
+            }
+            _sessions.Remove(lidKey);
+        }
+        SaveSessions();
     }
 
     /// <summary>
