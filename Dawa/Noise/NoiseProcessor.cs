@@ -893,7 +893,7 @@ public sealed class NoiseProcessor : IAsyncDisposable
                 catch (Exception ex)
                 {
                     _logger.LogError(ex, "Participants path: failed to decrypt encType={EncType} from {Jid}", encType, from);
-                    _ = SendRetryReceiptAsync(id, from, timestamp);
+                    _ = HandleUndecryptableAsync(id, from, timestamp);
                 }
             }
             return;
@@ -915,7 +915,7 @@ public sealed class NoiseProcessor : IAsyncDisposable
                 catch (Exception decEx)
                 {
                     _logger.LogWarning(decEx, "Failed to decrypt direct enc message from {Jid}", from);
-                    _ = SendRetryReceiptAsync(id, from, timestamp);
+                    _ = HandleUndecryptableAsync(id, from, timestamp);
                     return;
                 }
 
@@ -1156,6 +1156,30 @@ public sealed class NoiseProcessor : IAsyncDisposable
     /// a fresh pre-key bundle. Called when we receive a message we cannot decrypt
     /// (e.g. our session state was lost after a restart).
     /// </summary>
+    /// <summary>
+    /// Decides how to handle a message we could not decrypt. For a RECENT (live) message we
+    /// send a retry receipt so the sender re-keys and we recover it. For an OLD message from
+    /// the offline backlog (a dead ratchet chain that will never decrypt) we simply ACK it so
+    /// WhatsApp stops resending it and the offline queue drains quickly to current messages,
+    /// instead of looping forever on undecryptable history. Old messages are already on every
+    /// participant's phone, so nothing important is lost. This keeps the bridge current — the
+    /// behaviour a healthy client (e.g. Baileys) gets for free by never accumulating a backlog.
+    /// </summary>
+    private async Task HandleUndecryptableAsync(string id, string from, long timestamp)
+    {
+        const long BacklogThresholdSeconds = 2 * 3600; // messages older than 2h = offline backlog
+        var ageSeconds = DateTimeOffset.UtcNow.ToUnixTimeSeconds() - timestamp;
+        if (timestamp > 0 && ageSeconds > BacklogThresholdSeconds)
+        {
+            _logger.LogInformation("Undecryptable BACKLOG message {Id} from {From} (age {Hours}h) — ACK to drain queue, no retry.", id, from, ageSeconds / 3600);
+            await SendAckAsync(id, from, timestamp);
+        }
+        else
+        {
+            await SendRetryReceiptAsync(id, from, timestamp);
+        }
+    }
+
     public Task SendManualRetryReceiptAsync(string to, string msgId, long timestamp, CancellationToken ct) =>
         SendRetryReceiptAsync(msgId, to, timestamp);
 
