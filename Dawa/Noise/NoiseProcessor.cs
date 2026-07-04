@@ -423,13 +423,18 @@ public sealed class NoiseProcessor : IAsyncDisposable
                 // WA sends offline_preview to tell us there are queued offline messages.
                 // Baileys responds with <ib><offline_batch count="100"/></ib> to trigger delivery.
                 // Without this, WA never delivers the offline messages.
-                var msgCount = child.GetAttr("message") ?? "0";
-                _logger.LogInformation("offline_preview: {Count} queued messages — requesting offline_batch", msgCount);
+                var msgCount = child.GetAttr("message") ?? child.GetAttr("count") ?? "0";
+                // Request the FULL pending count (not a fixed 100) so the entire offline queue
+                // drains in one reconnect instead of 100-at-a-time across many. A healthy client
+                // (Baileys) drains the whole queue; combined with ACK-and-skip of dead backlog
+                // this keeps the bridge current. Cap high as a sanity bound.
+                var batchCount = (int.TryParse(msgCount, out var mc) && mc > 0) ? Math.Min(mc, 100000) : 5000;
+                _logger.LogInformation("offline_preview: {Count} queued — requesting full offline_batch of {Batch}", msgCount, batchCount);
                 var offlineBatch = new BinaryNode("ib")
                 {
                     Content = new List<BinaryNode>
                     {
-                        new("offline_batch", new Dictionary<string, string> { ["count"] = "100" }),
+                        new("offline_batch", new Dictionary<string, string> { ["count"] = batchCount.ToString() }),
                     },
                 };
                 await SendNodeAsync(offlineBatch, ct);
