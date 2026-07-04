@@ -322,20 +322,6 @@ public sealed class SignalKeyStore
             }
         }
 
-        // Debug: log X3DH details
-        try
-        {
-            var logDir = Path.Combine(AppContext.BaseDirectory, "logs");
-            Directory.CreateDirectory(logDir);
-            File.AppendAllText(Path.Combine(logDir, "signal-debug.log"),
-                $"[{DateTime.UtcNow:HH:mm:ss}] InitIncomingSession for {jid}\n" +
-                $"  preKeyId={pkmsg.PreKeyId} signedPreKeyId={pkmsg.SignedPreKeyId}\n" +
-                $"  preKeyFound={dh4 != null} preKeysRemaining={auth.PreKeys.Count}\n" +
-                $"  identityKey len={pkmsg.IdentityKey.Length} baseKey len={pkmsg.BaseKey.Length}\n" +
-                $"  theirIdentity={Convert.ToHexString(theirIdentityPub[..4])}\n\n");
-        }
-        catch { /* best effort */ }
-
         var f = new byte[32];
         Array.Fill(f, (byte)0xFF);
 
@@ -346,44 +332,64 @@ public sealed class SignalKeyStore
         var zeroSalt = new byte[32];
         var info     = Encoding.UTF8.GetBytes("WhisperText");
         var derived  = DawaHKDF.DeriveKey(masterSecret, zeroSalt, info, 64);
-        var rootKey0 = derived[..32];
 
-        // DH ratchet to initialize receive chain using the ratchet key from the WhisperMessage header
-        // The inner WhisperMessage is embedded in pkmsg.Message — parse it to get the ratchet key
-        // pkmsg.Message = [0x33] + proto_bytes + mac  (the full whisper frame)
-        // We only need the ratchet key from the proto to set up the receive chain
-        byte[] theirRatchetPub;
-        if (pkmsg.Message.Length > 1)
+        // Signal protocol: X3DH HKDF(64 bytes) gives us:
+        //   derived[0..32]  = root key
+        //   derived[32..64] = NOT directly used as receive chain key
+        //
+        // The receive chain key is computed via a DH ratchet step on the FIRST decrypt:
+        //   DH(ourSPKPriv, senderRatchetKey) + rootKey → (newRootKey, receiveChainKey)
+        // where senderRatchetKey is the ephemeralKey in the inner WhisperMessage —
+        // always a freshly generated key, DIFFERENT from the outer baseKey.
+        //
+        // To trigger this ratchet step on first decrypt, we store the outer baseKey as
+        // TheirCurrentRatchetPublic (not the inner ratchet key). Since they differ,
+        // ratchetMatched=false and the ratchet step runs correctly.
+        var rootKey = derived[..32];
+
+        // Debug: log X3DH details + key consistency check
+        try
         {
-            // Strip version byte, then try to parse the proto (ignore MAC for key extraction)
-            try
-            {
-                var protoBytes = pkmsg.Message[1..Math.Max(1, pkmsg.Message.Length - 8)];
-                var innerMsg = WhisperMessageProto.ParseFrom(protoBytes);
-                theirRatchetPub = innerMsg.RatchetKey.Length > 0 ? StripKeyPrefix(innerMsg.RatchetKey) : StripKeyPrefix(pkmsg.BaseKey);
-            }
-            catch
-            {
-                theirRatchetPub = StripKeyPrefix(pkmsg.BaseKey);
-            }
-        }
-        else
-        {
-            theirRatchetPub = StripKeyPrefix(pkmsg.BaseKey);
-        }
+            // Verify private→public consistency (derived pub should match stored pub)
+            var spkPrivParam = new Org.BouncyCastle.Crypto.Parameters.X25519PrivateKeyParameters(auth.SignedPreKeyPrivate, 0);
+            var spkPubDerived = new byte[32]; spkPrivParam.GeneratePublicKey().Encode(spkPubDerived, 0);
+            var idPrivParam  = new Org.BouncyCastle.Crypto.Parameters.X25519PrivateKeyParameters(auth.SignedIdentityKeyPrivate, 0);
+            var idPubDerived = new byte[32];  idPrivParam.GeneratePublicKey().Encode(idPubDerived, 0);
+            bool spkOk = spkPubDerived.SequenceEqual(auth.SignedPreKeyPublic);
+            bool idOk  = idPubDerived.SequenceEqual(auth.SignedIdentityKeyPublic);
 
-        var (rootKey2, receiveChainKey) = HkdfRatchetStep(rootKey0, Curve25519Helper.DH(auth.SignedPreKeyPrivate, theirRatchetPub));
+            var logDir = Path.Combine(AppContext.BaseDirectory, "logs");
+            Directory.CreateDirectory(logDir);
+            File.AppendAllText(Path.Combine(logDir, "signal-debug.log"),
+                $"[{DateTime.UtcNow:HH:mm:ss}] InitIncomingSession for {jid}\n" +
+                $"  preKeyId={pkmsg.PreKeyId} signedPreKeyId={pkmsg.SignedPreKeyId}\n" +
+                $"  preKeyFound={dh4 != null} preKeysRemaining={auth.PreKeys.Count}\n" +
+                $"  KEY CONSISTENCY: spkPriv→pub={spkOk} (stored={Convert.ToHexString(auth.SignedPreKeyPublic[..4])} derived={Convert.ToHexString(spkPubDerived[..4])})\n" +
+                $"  KEY CONSISTENCY: idPriv→pub={idOk}  (stored={Convert.ToHexString(auth.SignedIdentityKeyPublic[..4])} derived={Convert.ToHexString(idPubDerived[..4])})\n" +
+                $"  theirIdentity={Convert.ToHexString(theirIdentityPub[..4])}\n" +
+                $"  dh1={Convert.ToHexString(dh1)} dh2={Convert.ToHexString(dh2)} dh3={Convert.ToHexString(dh3)}" +
+                (dh4 != null ? $"\n  dh4={Convert.ToHexString(dh4)}" : "") + "\n" +
+                $"  masterSecret[..8]={Convert.ToHexString(masterSecret[..8])}\n" +
+                $"  rootKey={Convert.ToHexString(rootKey)}\n" +
+                $"  NOTE: ReceiveChainKey will be computed on first decrypt via DH ratchet step\n\n");
+        }
+        catch { /* best effort */ }
 
+        // Use the OUTER baseKey as the initial TheirCurrentRatchetPublic.
+        // The inner WhisperMessage's ephemeralKey (ratchet key) is always a DIFFERENT,
+        // freshly-generated key from the sender. Storing baseKey here ensures
+        // ratchetMatched=false on the first decrypt, triggering the correct DH ratchet step
+        // that derives the actual receive chain key.
         var session = new SignalSession
         {
             RemoteJid                = jid,
-            RootKey                  = rootKey2,
+            RootKey                  = rootKey,
             SendChainKey             = [],
-            ReceiveChainKey          = receiveChainKey,
+            ReceiveChainKey          = [],  // Empty — computed via ratchet step on first decrypt
             SendCounter              = 0,
             ReceiveCounter           = 0,
             PrevSendCounter          = 0,
-            TheirCurrentRatchetPublic = theirRatchetPub,
+            TheirCurrentRatchetPublic = StripKeyPrefix(pkmsg.BaseKey),  // Outer baseKey, NOT inner ratchet key
             OurRatchetPrivate        = auth.SignedPreKeyPrivate,
             OurRatchetPublic         = auth.SignedPreKeyPublic,
             TheirIdentityPublic      = theirIdentityPub,
@@ -594,45 +600,60 @@ public sealed class SignalKeyStore
         var session = _sessions.TryGetValue(jid, out var s) ? s
             : throw new InvalidOperationException($"No Signal session for {jid}.");
 
+        // IMPORTANT: Work on cloned state so MAC failure does NOT corrupt the live session.
+        // Only commit the updated state after MAC verification succeeds.
+        // Without this, a single MAC failure corrupts the chain and cascades into all future failures.
+        byte[] wRootKey                   = session.RootKey;
+        byte[] wReceiveChainKey           = session.ReceiveChainKey;
+        byte[] wSendChainKey              = session.SendChainKey;
+        uint   wReceiveCounter            = session.ReceiveCounter;
+        uint   wSendCounter               = session.SendCounter;
+        uint   wPrevSendCounter           = session.PrevSendCounter;
+        byte[] wTheirCurrentRatchetPublic = session.TheirCurrentRatchetPublic;
+        byte[] wOurRatchetPrivate         = session.OurRatchetPrivate;
+        byte[] wOurRatchetPublic          = session.OurRatchetPublic;
+
         // Check if we need to do a DH ratchet step (their ratchet key changed)
         var theirRatchetPub = StripKeyPrefix(innerMsg.RatchetKey);
-        if (!theirRatchetPub.SequenceEqual(session.TheirCurrentRatchetPublic))
+        var ratchetMatched = theirRatchetPub.SequenceEqual(wTheirCurrentRatchetPublic);
+        if (!ratchetMatched)
         {
             // DH ratchet: advance receive chain with new ratchet key
             var (newRootKey, newReceiveChainKey) = HkdfRatchetStep(
-                session.RootKey,
-                Curve25519Helper.DH(session.OurRatchetPrivate, theirRatchetPub));
+                wRootKey,
+                Curve25519Helper.DH(wOurRatchetPrivate, theirRatchetPub));
 
-            session.PrevSendCounter          = session.SendCounter;
-            session.TheirCurrentRatchetPublic = theirRatchetPub;
-            session.RootKey                  = newRootKey;
-            session.ReceiveChainKey          = newReceiveChainKey;
-            session.ReceiveCounter           = 0;
+            wPrevSendCounter          = wSendCounter;
+            wTheirCurrentRatchetPublic = theirRatchetPub;
+            wRootKey                  = newRootKey;
+            wReceiveChainKey          = newReceiveChainKey;
+            wReceiveCounter           = 0;
 
             // Generate new ratchet key pair for next send
             var (newRatchPriv, newRatchPub) = Curve25519Helper.GenerateKeyPair();
             var (newRootKey2, newSendChainKey) = HkdfRatchetStep(
                 newRootKey,
                 Curve25519Helper.DH(newRatchPriv, theirRatchetPub));
-            session.OurRatchetPrivate = newRatchPriv;
-            session.OurRatchetPublic  = newRatchPub;
-            session.RootKey           = newRootKey2;
-            session.SendChainKey      = newSendChainKey;
-            session.SendCounter       = 0;
+            wOurRatchetPrivate = newRatchPriv;
+            wOurRatchetPublic  = newRatchPub;
+            wRootKey           = newRootKey2;
+            wSendChainKey      = newSendChainKey;
+            wSendCounter       = 0;
         }
 
         // Advance chain to match the sender's counter (handles out-of-order / batched messages)
         var targetCounter = innerMsg.Counter;
-        while (session.ReceiveCounter < targetCounter)
+        while (wReceiveCounter < targetCounter)
         {
-            var (_, skip) = DeriveMessageKeys(session.ReceiveChainKey);
-            session.ReceiveChainKey = skip;
-            session.ReceiveCounter++;
+            var (_, skip) = DeriveMessageKeys(wReceiveChainKey);
+            wReceiveChainKey = skip;
+            wReceiveCounter++;
         }
 
         // Derive message key
-        var (messageKey, nextChainKey) = DeriveMessageKeys(session.ReceiveChainKey);
-        session.ReceiveChainKey = nextChainKey;
+        var chainKeyBeforeDerive = wReceiveChainKey;
+        var (messageKey, nextChainKey) = DeriveMessageKeys(wReceiveChainKey);
+        wReceiveChainKey = nextChainKey;
 
         // Expand message key — Signal spec requires info="WhisperMessageKeys"
         var keyMaterial = DawaHKDF.DeriveKey(messageKey, new byte[32], Encoding.UTF8.GetBytes("WhisperMessageKeys"), 80);
@@ -640,37 +661,61 @@ public sealed class SignalKeyStore
         var macKey = keyMaterial[32..64];
         var iv     = keyMaterial[64..80];
 
-        // Verify MAC — Signal Protocol requires identity keys in MAC input:
+        // Verify MAC — Signal Protocol MAC includes the version byte:
         // MAC = HMAC-SHA256(macKey, senderIdentityPub_33 || receiverIdentityPub_33 || versionByte || protoBytes)
+        // This matches libsignal-java WhisperMessage.getMac() which feeds:
+        //   sender_identity_key (33 bytes) + receiver_identity_key (33 bytes) + versionByte + serializedProto
         // Identity keys use 33-byte format: 0x05 prefix + 32-byte raw key
         var senderIdentity33   = new byte[] { 0x05 }.Concat(session.TheirIdentityPublic).ToArray();
         var receiverIdentity33 = new byte[] { 0x05 }.Concat(auth.SignedIdentityKeyPublic).ToArray();
+        var versionByte = whisperFrame[0]; // = 0x33 for Signal v3
         var macInput = new byte[33 + 33 + 1 + protoBytes.Length];
         senderIdentity33.CopyTo(macInput, 0);
         receiverIdentity33.CopyTo(macInput, 33);
-        macInput[66] = 0x33;
+        macInput[66] = versionByte;
         protoBytes.CopyTo(macInput, 67);
         var expectedMac = HMACSHA256.HashData(macKey, macInput)[..8];
         if (!expectedMac.AsSpan().SequenceEqual(receivedMac))
         {
-            // Debug: log key details to help diagnose
+            // MAC failed — do NOT commit any working state changes to the live session.
+            // The live session remains at its last known-good state.
             var logDir = Path.Combine(AppContext.BaseDirectory, "logs");
             try { Directory.CreateDirectory(logDir); } catch { /* best effort */ }
             try { File.AppendAllText(Path.Combine(logDir, "signal-debug.log"),
                 $"[{DateTime.UtcNow:HH:mm:ss}] MAC FAIL for {jid}\n" +
-                $"  ratchetKey raw len={innerMsg.RatchetKey.Length} stripped len={theirRatchetPub.Length}\n" +
-                $"  theirIdentity len={session.TheirIdentityPublic.Length} first={Convert.ToHexString(session.TheirIdentityPublic[..Math.Min(4, session.TheirIdentityPublic.Length)])}\n" +
-                $"  ourIdentity len={auth.SignedIdentityKeyPublic.Length} first={Convert.ToHexString(auth.SignedIdentityKeyPublic[..Math.Min(4, auth.SignedIdentityKeyPublic.Length)])}\n" +
+                $"  ratchetMatched={ratchetMatched} ratchetKey len={innerMsg.RatchetKey.Length}\n" +
+                $"  theirIdentity={Convert.ToHexString(session.TheirIdentityPublic[..Math.Min(4, session.TheirIdentityPublic.Length)])}\n" +
+                $"  ourIdentity={Convert.ToHexString(auth.SignedIdentityKeyPublic[..Math.Min(4, auth.SignedIdentityKeyPublic.Length)])}\n" +
+                $"  chainKey(used)={Convert.ToHexString(chainKeyBeforeDerive[..Math.Min(8, chainKeyBeforeDerive.Length)])}\n" +
+                $"  messageKey={Convert.ToHexString(messageKey[..8])}\n" +
                 $"  macKey={Convert.ToHexString(macKey[..8])}\n" +
                 $"  expected={Convert.ToHexString(expectedMac)} received={Convert.ToHexString(receivedMac)}\n" +
-                $"  whisperFrame[0]=0x{whisperFrame[0]:X2} protoLen={protoBytes.Length}\n\n");
+                $"  whisperFrame[0]=0x{whisperFrame[0]:X2} protoLen={protoBytes.Length}\n" +
+                $"  counter={innerMsg.Counter} receiveCounter={session.ReceiveCounter}\n\n");
             } catch { /* best effort logging */ }
             throw new CryptographicException("WhisperMessage MAC verification failed.");
         }
 
-        session.ReceiveCounter++;
+        // MAC verified — commit working state to live session
+        wReceiveCounter++;
+        session.RootKey                  = wRootKey;
+        session.ReceiveChainKey          = wReceiveChainKey;
+        session.SendChainKey             = wSendChainKey;
+        session.ReceiveCounter           = wReceiveCounter;
+        session.SendCounter              = wSendCounter;
+        session.PrevSendCounter          = wPrevSendCounter;
+        session.TheirCurrentRatchetPublic = wTheirCurrentRatchetPublic;
+        session.OurRatchetPrivate        = wOurRatchetPrivate;
+        session.OurRatchetPublic         = wOurRatchetPublic;
 
         var plaintext = MessageCipher.AesCbcDecrypt(encKey, iv, innerMsg.Ciphertext);
+        // Log success
+        var logDir2 = Path.Combine(AppContext.BaseDirectory, "logs");
+        try { Directory.CreateDirectory(logDir2); } catch { }
+        try { File.AppendAllText(Path.Combine(logDir2, "signal-debug.log"),
+            $"[{DateTime.UtcNow:HH:mm:ss}] MAC OK for {jid}\n" +
+            $"  ratchetMatched={ratchetMatched} counter={innerMsg.Counter} plaintextLen={plaintext.Length}\n\n");
+        } catch { }
         SaveSessions();
         return plaintext;
     }

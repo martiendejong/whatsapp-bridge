@@ -351,14 +351,14 @@ public sealed class WAMessage
         var text = GetText();
 
         if (ImageMessage != null)
-            return (type, text,
+            return (type, text ?? ImageMessage.Caption,
                 mediaUrl:      ImageMessage.Url,
                 mimeType:      ImageMessage.MimeType,
                 fileName:      null,
                 fileSize:      (long?)ImageMessage.FileLength,
                 duration:      null,
-                width:         null,
-                height:        null,
+                width:         ImageMessage.Width,
+                height:        ImageMessage.Height,
                 mediaKey:      Convert.ToBase64String(ImageMessage.MediaKey),
                 mediaSha256Enc:Convert.ToBase64String(ImageMessage.FileEncSha256),
                 null, null);
@@ -565,28 +565,35 @@ public sealed class ImageMessage
 {
     public string Url { get; set; } = "";           // field 1
     public string MimeType { get; set; } = "";      // field 2
-    public byte[] FileSha256 { get; set; } = [];    // field 3
-    public ulong FileLength { get; set; }            // field 4
-    public byte[] MediaKey { get; set; } = [];      // field 7
-    public byte[] FileEncSha256 { get; set; } = []; // field 8
-    public string DirectPath { get; set; } = "";    // field 10
-    public string Caption { get; set; } = "";       // field 16
+    public string Caption { get; set; } = "";       // field 3
+    public byte[] FileSha256 { get; set; } = [];    // field 4
+    public ulong FileLength { get; set; }            // field 5
+    public uint Height { get; set; }                // field 6
+    public uint Width { get; set; }                 // field 7
+    public byte[] MediaKey { get; set; } = [];      // field 8
+    public byte[] FileEncSha256 { get; set; } = []; // field 9
+    public string DirectPath { get; set; } = "";    // field 11
+    public long MediaKeyTimestamp { get; set; }      // field 12
+    public byte[] JpegThumbnail { get; set; } = []; // field 16
     public ContextInfo? ContextInfo { get; set; }   // field 17
-    public long MediaKeyTimestamp { get; set; }      // field 25
+    public bool ViewOnce { get; set; }              // field 25
 
     public byte[] ToByteArray()
     {
         var buf = new List<byte>();
         ProtoEncoder.WriteString(buf, 1, Url);
         ProtoEncoder.WriteString(buf, 2, MimeType);
-        if (FileSha256.Length > 0)    ProtoEncoder.WriteBytes(buf, 3, FileSha256);
-        if (FileLength > 0)           ProtoEncoder.WriteUInt64(buf, 4, FileLength);
-        if (MediaKey.Length > 0)      ProtoEncoder.WriteBytes(buf, 7, MediaKey);
-        if (FileEncSha256.Length > 0) ProtoEncoder.WriteBytes(buf, 8, FileEncSha256);
-        ProtoEncoder.WriteString(buf, 10, DirectPath);
-        if (!string.IsNullOrEmpty(Caption)) ProtoEncoder.WriteString(buf, 16, Caption);
+        if (!string.IsNullOrEmpty(Caption)) ProtoEncoder.WriteString(buf, 3, Caption);
+        if (FileSha256.Length > 0)    ProtoEncoder.WriteBytes(buf, 4, FileSha256);
+        if (FileLength > 0)           ProtoEncoder.WriteUInt64(buf, 5, FileLength);
+        if (Height > 0)               ProtoEncoder.WriteUInt32(buf, 6, Height);
+        if (Width > 0)                ProtoEncoder.WriteUInt32(buf, 7, Width);
+        if (MediaKey.Length > 0)      ProtoEncoder.WriteBytes(buf, 8, MediaKey);
+        if (FileEncSha256.Length > 0) ProtoEncoder.WriteBytes(buf, 9, FileEncSha256);
+        ProtoEncoder.WriteString(buf, 11, DirectPath);
+        if (MediaKeyTimestamp != 0)   ProtoEncoder.WriteUInt64(buf, 12, (ulong)MediaKeyTimestamp);
+        if (JpegThumbnail.Length > 0) ProtoEncoder.WriteBytes(buf, 16, JpegThumbnail);
         if (ContextInfo != null)      ProtoEncoder.WriteMessage(buf, 17, ContextInfo.ToByteArray());
-        if (MediaKeyTimestamp != 0)   ProtoEncoder.WriteUInt64(buf, 25, (ulong)MediaKeyTimestamp);
         return [.. buf];
     }
 
@@ -601,14 +608,18 @@ public sealed class ImageMessage
             {
                 case 1:  msg.Url = r.ReadString(); break;
                 case 2:  msg.MimeType = r.ReadString(); break;
-                case 3:  msg.FileSha256 = r.ReadBytes(); break;
-                case 4:  msg.FileLength = r.ReadUInt64(); break;
-                case 7:  msg.MediaKey = r.ReadBytes(); break;
-                case 8:  msg.FileEncSha256 = r.ReadBytes(); break;
-                case 10: msg.DirectPath = r.ReadString(); break;
-                case 16: msg.Caption = r.ReadString(); break;
+                case 3:  msg.Caption = r.ReadString(); break;
+                case 4:  msg.FileSha256 = r.ReadBytes(); break;
+                case 5:  msg.FileLength = r.ReadUInt64(); break;
+                case 6:  msg.Height = r.ReadUInt32(); break;
+                case 7:  msg.Width = r.ReadUInt32(); break;
+                case 8:  msg.MediaKey = r.ReadBytes(); break;
+                case 9:  msg.FileEncSha256 = r.ReadBytes(); break;
+                case 11: msg.DirectPath = r.ReadString(); break;
+                case 12: msg.MediaKeyTimestamp = (long)r.ReadUInt64(); break;
+                case 16: msg.JpegThumbnail = r.ReadBytes(); break;
                 case 17: msg.ContextInfo = ContextInfo.ParseFrom(r.ReadBytes()); break;
-                case 25: msg.MediaKeyTimestamp = (long)r.ReadUInt64(); break;
+                case 25: msg.ViewOnce = r.ReadUInt64() != 0; break;
                 default: r.Skip(wire); break;
             }
         }
@@ -683,12 +694,14 @@ public sealed class VideoMessage
     public byte[] FileSha256 { get; set; } = [];    // field 3
     public ulong FileLength { get; set; }            // field 4
     public uint Seconds { get; set; }               // field 5
-    public byte[] MediaKey { get; set; } = [];      // field 7
-    public string Caption { get; set; } = "";       // field 9
-    public byte[] FileEncSha256 { get; set; } = []; // field 10
-    public string DirectPath { get; set; } = "";    // field 11
-    public uint Width { get; set; }                 // field 20
-    public uint Height { get; set; }                // field 21
+    public byte[] MediaKey { get; set; } = [];      // field 6
+    public string Caption { get; set; } = "";       // field 7
+    public bool GifPlayback { get; set; }           // field 8
+    public uint Height { get; set; }                // field 9
+    public uint Width { get; set; }                 // field 10
+    public byte[] FileEncSha256 { get; set; } = []; // field 11
+    public string DirectPath { get; set; } = "";    // field 13
+    public long MediaKeyTimestamp { get; set; }      // field 14
     public ContextInfo? ContextInfo { get; set; }   // field 17
 
     public static VideoMessage ParseFrom(byte[] data)
@@ -705,13 +718,15 @@ public sealed class VideoMessage
                 case 3:  msg.FileSha256 = r.ReadBytes(); break;
                 case 4:  msg.FileLength = r.ReadUInt64(); break;
                 case 5:  msg.Seconds = r.ReadUInt32(); break;
-                case 7:  msg.MediaKey = r.ReadBytes(); break;
-                case 9:  msg.Caption = r.ReadString(); break;
-                case 10: msg.FileEncSha256 = r.ReadBytes(); break;
-                case 11: msg.DirectPath = r.ReadString(); break;
+                case 6:  msg.MediaKey = r.ReadBytes(); break;
+                case 7:  msg.Caption = r.ReadString(); break;
+                case 8:  msg.GifPlayback = r.ReadUInt64() != 0; break;
+                case 9:  msg.Height = r.ReadUInt32(); break;
+                case 10: msg.Width = r.ReadUInt32(); break;
+                case 11: msg.FileEncSha256 = r.ReadBytes(); break;
+                case 13: msg.DirectPath = r.ReadString(); break;
+                case 14: msg.MediaKeyTimestamp = (long)r.ReadUInt64(); break;
                 case 17: msg.ContextInfo = ContextInfo.ParseFrom(r.ReadBytes()); break;
-                case 20: msg.Width = r.ReadUInt32(); break;
-                case 21: msg.Height = r.ReadUInt32(); break;
                 default: r.Skip(wire); break;
             }
         }
@@ -723,14 +738,16 @@ public sealed class VideoMessage
 public sealed class StickerMessage
 {
     public string Url { get; set; } = "";           // field 1
-    public string MimeType { get; set; } = "";      // field 2
-    public byte[] FileSha256 { get; set; } = [];    // field 3
-    public ulong FileLength { get; set; }            // field 4
-    public byte[] MediaKey { get; set; } = [];      // field 5
-    public byte[] FileEncSha256 { get; set; } = []; // field 6
-    public string DirectPath { get; set; } = "";    // field 7
-    public uint Width { get; set; }                 // field 9
-    public uint Height { get; set; }                // field 10
+    public byte[] FileSha256 { get; set; } = [];    // field 2
+    public byte[] FileEncSha256 { get; set; } = []; // field 3
+    public byte[] MediaKey { get; set; } = [];      // field 4
+    public string MimeType { get; set; } = "";      // field 5
+    public uint Height { get; set; }                // field 6
+    public uint Width { get; set; }                 // field 7
+    public string DirectPath { get; set; } = "";    // field 8
+    public ulong FileLength { get; set; }            // field 9
+    public long MediaKeyTimestamp { get; set; }      // field 10
+    public ContextInfo? ContextInfo { get; set; }   // field 17
 
     public static StickerMessage ParseFrom(byte[] data)
     {
@@ -742,14 +759,16 @@ public sealed class StickerMessage
             switch (field)
             {
                 case 1:  msg.Url = r.ReadString(); break;
-                case 2:  msg.MimeType = r.ReadString(); break;
-                case 3:  msg.FileSha256 = r.ReadBytes(); break;
-                case 4:  msg.FileLength = r.ReadUInt64(); break;
-                case 5:  msg.MediaKey = r.ReadBytes(); break;
-                case 6:  msg.FileEncSha256 = r.ReadBytes(); break;
-                case 7:  msg.DirectPath = r.ReadString(); break;
-                case 9:  msg.Width = r.ReadUInt32(); break;
-                case 10: msg.Height = r.ReadUInt32(); break;
+                case 2:  msg.FileSha256 = r.ReadBytes(); break;
+                case 3:  msg.FileEncSha256 = r.ReadBytes(); break;
+                case 4:  msg.MediaKey = r.ReadBytes(); break;
+                case 5:  msg.MimeType = r.ReadString(); break;
+                case 6:  msg.Height = r.ReadUInt32(); break;
+                case 7:  msg.Width = r.ReadUInt32(); break;
+                case 8:  msg.DirectPath = r.ReadString(); break;
+                case 9:  msg.FileLength = r.ReadUInt64(); break;
+                case 10: msg.MediaKeyTimestamp = (long)r.ReadUInt64(); break;
+                case 17: msg.ContextInfo = ContextInfo.ParseFrom(r.ReadBytes()); break;
                 default: r.Skip(wire); break;
             }
         }
@@ -769,7 +788,7 @@ public sealed class DocumentMessage
     public string FileName { get; set; } = "";      // field 8
     public byte[] FileEncSha256 { get; set; } = []; // field 9
     public string DirectPath { get; set; } = "";    // field 10
-    public long MediaKeyTimestamp { get; set; }      // field 16
+    public long MediaKeyTimestamp { get; set; }      // field 11
 
     public byte[] ToByteArray()
     {
@@ -783,7 +802,7 @@ public sealed class DocumentMessage
         ProtoEncoder.WriteString(buf, 8, FileName);
         if (FileEncSha256.Length > 0) ProtoEncoder.WriteBytes(buf, 9, FileEncSha256);
         ProtoEncoder.WriteString(buf, 10, DirectPath);
-        if (MediaKeyTimestamp != 0)   ProtoEncoder.WriteUInt64(buf, 16, (ulong)MediaKeyTimestamp);
+        if (MediaKeyTimestamp != 0)   ProtoEncoder.WriteUInt64(buf, 11, (ulong)MediaKeyTimestamp);
         return [.. buf];
     }
 
@@ -805,7 +824,7 @@ public sealed class DocumentMessage
                 case 8:  msg.FileName = r.ReadString(); break;
                 case 9:  msg.FileEncSha256 = r.ReadBytes(); break;
                 case 10: msg.DirectPath = r.ReadString(); break;
-                case 16: msg.MediaKeyTimestamp = (long)r.ReadUInt64(); break;
+                case 11: msg.MediaKeyTimestamp = (long)r.ReadUInt64(); break;
                 default: r.Skip(wire); break;
             }
         }

@@ -136,7 +136,10 @@ public ref struct ProtoReader
     {
         var len = (int)ReadVarint();
         if (len < 0 || _pos + len > _data.Length)
-            throw new InvalidDataException($"Protobuf bytes length={len} exceeds buffer at pos={_pos}, len={_data.Length}");
+        {
+            _pos = _data.Length; // stop parsing gracefully
+            return [];
+        }
         var data = _data[_pos..(_pos + len)];
         _pos += len;
         return data;
@@ -155,17 +158,25 @@ public ref struct ProtoReader
         {
             case 0: ReadVarint(); break;
             case 1:
-                if (_pos + 8 > _data.Length) throw new InvalidDataException($"Skip 64-bit: not enough bytes at pos={_pos}, len={_data.Length}");
+                if (_pos + 8 > _data.Length) { _pos = _data.Length; break; }
                 _pos += 8; break;
             case 2:
                 var len2 = (int)ReadVarint();
-                if (len2 < 0 || _pos + len2 > _data.Length) throw new InvalidDataException($"Skip LEN: length={len2} exceeds buffer at pos={_pos}, len={_data.Length}");
+                if (len2 < 0 || _pos + len2 > _data.Length) { _pos = _data.Length; break; }
                 _pos += len2; break;
             case 5:
-                if (_pos + 4 > _data.Length) throw new InvalidDataException($"Skip 32-bit: not enough bytes at pos={_pos}, len={_data.Length}");
+                if (_pos + 4 > _data.Length) { _pos = _data.Length; break; }
                 _pos += 4; break;
-            default:
-                throw new InvalidDataException($"Unknown wire type {wireType} at pos={_pos - 1}, len={_data.Length}");
+            case 3: // SGROUP: skip until matching EGROUP (wire type 4)
+                while (HasMore)
+                {
+                    var (_, wt) = ReadTag();
+                    if (wt == 4) break; // EGROUP
+                    Skip(wt);
+                }
+                break;
+            case 4: break; // EGROUP — consumed by parent SGROUP skip
+            default: _pos = _data.Length; break; // unknown wire type — stop parsing this message
         }
     }
 }

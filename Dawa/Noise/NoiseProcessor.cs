@@ -814,7 +814,7 @@ public sealed class NoiseProcessor : IAsyncDisposable
                     var senderJid = participant ?? from;
                     _logger.LogDebug("Participants path: decrypting encType={EncType} from {Jid}", encType, senderJid);
                     var plaintext = _signalStore.DecryptMessage(senderJid, encType, encNode.Data, _auth);
-                    var waMsg     = WAMessage.ParseFrom(plaintext);
+                    var waMsg     = WAMessage.ParseFrom(StripSignalPadding(plaintext));
 
                     // ── History sync notification (participants path) ─────────────────────────
                     if (waMsg.ProtocolMsg?.Type == Proto.ProtocolMessage.TYPE_HISTORY_SYNC_NOTIFICATION
@@ -922,16 +922,19 @@ public sealed class NoiseProcessor : IAsyncDisposable
                 _logger.LogInformation("Decrypted {Bytes} bytes from {Jid} (category={Category})",
                     plaintext.Length, from, node.GetAttr("category") ?? "?");
 
+                // Strip Signal protocol padding (0x80 followed by zero bytes at end)
+                var protoBytes2 = StripSignalPadding(plaintext);
+
                 WAMessage waMsg;
                 try
                 {
-                    waMsg = WAMessage.ParseFrom(plaintext);
+                    waMsg = WAMessage.ParseFrom(protoBytes2);
                 }
                 catch (Exception parseEx)
                 {
                     // Peer/device messages may not be standard WAMessage format — log at Warning so we can diagnose
                     _logger.LogWarning(parseEx, "Could not parse decrypted message as WAMessage from {Jid} ({Len} bytes, first={First})",
-                        from, plaintext.Length, Convert.ToHexString(plaintext[..Math.Min(16, plaintext.Length)]));
+                        from, protoBytes2.Length, Convert.ToHexString(protoBytes2[..Math.Min(16, protoBytes2.Length)]));
                     _ = SendAckAsync(id, from, timestamp);
                     return;
                 }
@@ -2859,7 +2862,14 @@ public sealed class NoiseProcessor : IAsyncDisposable
 
         var myJid = _auth.Me?.Id;
         if (myJid == null)
-            throw new InvalidOperationException("Not authenticated");
+        {
+            // Fail-safe: never throw out of on-demand history sync. It is an optional,
+            // best-effort request; if we cannot make it, the caller simply gets no extra
+            // history and all normal paths (automatic history sync, offline queue, live
+            // delivery) keep working untouched.
+            _logger.LogWarning("OnDemandHistorySync: not authenticated — skipping (normal delivery unaffected)");
+            return new List<IncomingMessage>();
+        }
 
         // If given a LID, resolve to phone JID for the peerDataOperationRequestMessage
         // (phone stores chats by phone JID internally, not LID)
@@ -2886,16 +2896,25 @@ public sealed class NoiseProcessor : IAsyncDisposable
 
         EventHandler<IncomingMessage> onMsg = (_, msg) =>
         {
-            var remoteBase = normalizedJid.Split('@')[0];
-            var requestBase = requestJid.Split('@')[0];
-            if (msg.RemoteJid == normalizedJid ||
-                msg.RemoteJid == requestJid ||
-                msg.From == normalizedJid ||
-                msg.From == requestJid ||
-                (msg.RemoteJid?.Split('@')[0] == remoteBase) ||
-                (msg.RemoteJid?.Split('@')[0] == requestBase))
+            // Exception-safe: a malformed history message must never throw into the
+            // HistoryMessageReceived event dispatch (which also feeds normal history sync).
+            try
             {
-                lock (collected) { collected.Add(msg); }
+                var remoteBase = normalizedJid.Split('@')[0];
+                var requestBase = requestJid.Split('@')[0];
+                if (msg.RemoteJid == normalizedJid ||
+                    msg.RemoteJid == requestJid ||
+                    msg.From == normalizedJid ||
+                    msg.From == requestJid ||
+                    (msg.RemoteJid?.Split('@')[0] == remoteBase) ||
+                    (msg.RemoteJid?.Split('@')[0] == requestBase))
+                {
+                    lock (collected) { collected.Add(msg); }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "OnDemandHistorySync: collector handler error (ignored)");
             }
         };
 
@@ -3839,7 +3858,27 @@ public sealed class NoiseProcessor : IAsyncDisposable
         }
         else if (type == "retry")
         {
-            _logger.LogInformation("HandleReceipt: retry receipt for non-PDO message {Id} from {From} — ACK'd, not resending", id, from);
+            // The recipient could not decrypt one of our messages and is asking us to re-key.
+            // Our stored outgoing session for their device is stale — drop it so the NEXT
+            // message we send establishes a fresh Signal session (pkmsg) they can actually
+            // read. Without this a stale outgoing session never heals and the contact can
+            // never read our messages (observed: a contact seeing blank/"can't see the text").
+            try
+            {
+                if (!string.IsNullOrEmpty(from) && _signalStore.HasSession(from))
+                {
+                    _signalStore.DeleteSession(from);
+                    _logger.LogInformation("HandleReceipt: retry receipt from {From} — dropped stale outgoing session so the next send re-keys.", from);
+                }
+                else
+                {
+                    _logger.LogInformation("HandleReceipt: retry receipt for {Id} from {From} — no stored session to drop (next send will establish fresh).", id, from);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "HandleReceipt: failed to drop session on retry receipt from {From}", from);
+            }
         }
     }
 
@@ -3959,16 +3998,55 @@ public sealed class NoiseProcessor : IAsyncDisposable
                 var total = 0;
                 foreach (var conversation in sync.Conversations)
                 {
+                    // Register every conversation so it appears in the chat list
+                    _threadMetadata.TryAdd(conversation.Id, 0);
+
                     foreach (var histMsg in conversation.Messages)
                     {
                         var wmi = histMsg.Message;
                         if (wmi?.Key == null) continue;
-                        var text = wmi.MessageBody?.EffectiveText ?? "";
-                        var msgType = string.IsNullOrEmpty(text)
-                            ? Messages.MessageType.Unknown
-                            : Messages.MessageType.Text;
-                        // Skip unknown (no content at all) messages
+
+                        var body      = wmi.MessageBody;
+                        var text      = body?.EffectiveText ?? "";
+                        var mediaType = body?.MediaType ?? "";
+
+                        // Determine message type (text or media)
+                        Messages.MessageType msgType;
+                        if (!string.IsNullOrEmpty(text) && !text.StartsWith("["))
+                            msgType = Messages.MessageType.Text;
+                        else if (mediaType == "image")    msgType = Messages.MessageType.Image;
+                        else if (mediaType == "video")    msgType = Messages.MessageType.Video;
+                        else if (mediaType == "audio")    msgType = Messages.MessageType.Audio;
+                        else if (mediaType == "document") msgType = Messages.MessageType.Document;
+                        else                              msgType = Messages.MessageType.Unknown;
+
+                        // Skip messages with genuinely no content
                         if (msgType == Messages.MessageType.Unknown) continue;
+
+                        // Build media URL and key for non-text messages
+                        string? mediaUrl  = null;
+                        string? mediaKey  = null;
+                        string? mimeType  = null;
+                        string? fileName  = null;
+                        if (body != null && msgType != Messages.MessageType.Text)
+                        {
+                            var directPath = msgType == Messages.MessageType.Image    ? body.ImageDirectPath :
+                                             msgType == Messages.MessageType.Video    ? body.VideoDirectPath :
+                                             msgType == Messages.MessageType.Audio    ? body.AudioDirectPath :
+                                             msgType == Messages.MessageType.Document ? body.DocumentDirectPath : "";
+                            var rawKey     = msgType == Messages.MessageType.Image    ? body.ImageMediaKey :
+                                             msgType == Messages.MessageType.Video    ? body.VideoMediaKey :
+                                             msgType == Messages.MessageType.Audio    ? body.AudioMediaKey :
+                                             msgType == Messages.MessageType.Document ? body.DocumentMediaKey : [];
+                            if (!string.IsNullOrEmpty(directPath))
+                                mediaUrl = $"https://mmg.whatsapp.net{directPath}";
+                            if (rawKey.Length > 0)
+                                mediaKey = Convert.ToBase64String(rawKey);
+                            mimeType = msgType == Messages.MessageType.Image    ? "image/jpeg" :
+                                       msgType == Messages.MessageType.Video    ? "video/mp4"  :
+                                       msgType == Messages.MessageType.Audio    ? "audio/ogg"  : "application/octet-stream";
+                            fileName = msgType == Messages.MessageType.Document ? body.DocumentFileName : null;
+                        }
 
                         var remoteJid = wmi.Key.RemoteJid ?? conversation.Id;
                         var fromMe    = wmi.Key.FromMe;
@@ -3987,6 +4065,10 @@ public sealed class NoiseProcessor : IAsyncDisposable
                             FromMe    = fromMe,
                             Timestamp = (long)wmi.Timestamp,
                             PushName  = wmi.PushName.Length > 0 ? wmi.PushName : senderName,
+                            MediaUrl  = mediaUrl,
+                            MediaKey  = mediaKey,
+                            MimeType  = mimeType,
+                            FileName  = fileName,
                         };
                         HistoryMessageReceived?.Invoke(this, msg);
                         total++;
@@ -4106,16 +4188,34 @@ public sealed class NoiseProcessor : IAsyncDisposable
             foreach (var conversation in sync.Conversations)
             {
                 var chatJid = conversation.Id;
+                // Add conversation to thread metadata so chat appears in chat list
+                _threadMetadata.TryAdd(chatJid, 0);
+
                 foreach (var histMsg in conversation.Messages)
                 {
                     var wmi = histMsg.Message;
                     if (wmi?.Key == null) continue;
 
-                    var text = wmi.MessageBody?.EffectiveText ?? "";
-                    var msgType = string.IsNullOrEmpty(text)
-                        ? Messages.MessageType.Unknown
-                        : Messages.MessageType.Text;
-                    if (msgType == Messages.MessageType.Unknown) continue;
+                    var body    = wmi.MessageBody;
+                    var text    = body?.EffectiveText ?? "";
+                    var mediaType = body?.MediaType ?? "";
+
+                    // Determine message type
+                    Messages.MessageType msgType;
+                    if (!string.IsNullOrEmpty(text) && !text.StartsWith("["))
+                        msgType = Messages.MessageType.Text;
+                    else if (mediaType == "image")
+                        msgType = Messages.MessageType.Image;
+                    else if (mediaType == "video")
+                        msgType = Messages.MessageType.Video;
+                    else if (mediaType == "audio")
+                        msgType = Messages.MessageType.Audio;
+                    else if (mediaType == "document")
+                        msgType = Messages.MessageType.Document;
+                    else if (!string.IsNullOrEmpty(text)) // captions like [image], [video]
+                        msgType = Messages.MessageType.Text;
+                    else
+                        continue; // truly unknown/empty — skip
 
                     var remoteJid  = wmi.Key.RemoteJid ?? chatJid;
                     var fromMe     = wmi.Key.FromMe;
@@ -4125,6 +4225,37 @@ public sealed class NoiseProcessor : IAsyncDisposable
 
                     pushNames.TryGetValue(senderJid.Split('@')[0], out var senderName);
 
+                    // Build media URL from directPath
+                    string? mediaUrl = null;
+                    string? mediaKey = null;
+                    string? mimeType = null;
+                    string? fileName = null;
+                    if (body != null)
+                    {
+                        var directPath = body.ImageDirectPath.Length > 0 ? body.ImageDirectPath :
+                                         body.VideoDirectPath.Length > 0 ? body.VideoDirectPath :
+                                         body.AudioDirectPath.Length > 0 ? body.AudioDirectPath :
+                                         body.DocumentDirectPath.Length > 0 ? body.DocumentDirectPath : "";
+                        var rawKey     = body.ImageMediaKey.Length > 0 ? body.ImageMediaKey :
+                                         body.VideoMediaKey.Length > 0 ? body.VideoMediaKey :
+                                         body.AudioMediaKey.Length > 0 ? body.AudioMediaKey :
+                                         body.DocumentMediaKey.Length > 0 ? body.DocumentMediaKey : [];
+                        if (directPath.Length > 0)
+                            mediaUrl = "https://mmg.whatsapp.net" + directPath;
+                        if (rawKey.Length > 0)
+                            mediaKey = Convert.ToBase64String(rawKey);
+                        if (body.DocumentFileName.Length > 0)
+                            fileName = body.DocumentFileName;
+                        mimeType = mediaType switch
+                        {
+                            "image"    => "image/jpeg",
+                            "video"    => "video/mp4",
+                            "audio"    => "audio/ogg",
+                            "document" => "application/octet-stream",
+                            _          => null
+                        };
+                    }
+
                     var msg = new Messages.IncomingMessage
                     {
                         Id          = wmi.Key.Id,
@@ -4132,10 +4263,14 @@ public sealed class NoiseProcessor : IAsyncDisposable
                         RemoteJid   = remoteJid,
                         Participant = wmi.Key.Participant.Length > 0 ? wmi.Key.Participant : null,
                         Type        = msgType,
-                        Text        = text,
+                        Text        = !string.IsNullOrEmpty(text) ? text : null,
                         FromMe      = fromMe,
                         Timestamp   = (long)wmi.Timestamp,
                         PushName    = wmi.PushName.Length > 0 ? wmi.PushName : senderName,
+                        MediaUrl    = mediaUrl,
+                        MediaKey    = mediaKey,
+                        MimeType    = mimeType,
+                        FileName    = fileName,
                     };
 
                     HistoryMessageReceived?.Invoke(this, msg);
@@ -4155,6 +4290,20 @@ public sealed class NoiseProcessor : IAsyncDisposable
     }
 
     /// <summary>Decompresses zlib-deflated data (strips 2-byte zlib header + 4-byte adler32 trailer).</summary>
+    /// <summary>
+    /// Strip Signal Protocol message padding: ISO 7816-4 style padding
+    /// where the actual message is followed by 0x80 and then zero bytes.
+    /// After AES-CBC PKCS7 decryption, this layer must be removed before proto parsing.
+    /// </summary>
+    private static byte[] StripSignalPadding(byte[] data)
+    {
+        int end = data.Length - 1;
+        while (end > 0 && data[end] == 0x00) end--;
+        if (end >= 0 && data[end] == 0x80)
+            return data[..end];
+        return data; // no padding found — return as-is
+    }
+
     private static byte[] ZlibInflate(byte[] data)
     {
         // zlib stream: 2-byte header + deflate data + 4-byte adler32
