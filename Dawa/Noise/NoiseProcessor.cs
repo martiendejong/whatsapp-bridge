@@ -1159,8 +1159,25 @@ public sealed class NoiseProcessor : IAsyncDisposable
     public Task SendManualRetryReceiptAsync(string to, string msgId, long timestamp, CancellationToken ct) =>
         SendRetryReceiptAsync(msgId, to, timestamp);
 
+    // Per-message retry-receipt attempt counter. A message we can never decrypt (dead
+    // ratchet chain after a long offline gap) otherwise loops forever: fail → retry
+    // receipt → resend → fail, starving delivery of every other message behind it in the
+    // offline queue. After MaxRetryAttempts we ACK the message instead, so WhatsApp stops
+    // resending it and the queue drains to newer/live messages.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _retryAttempts = new();
+    private const int MaxRetryAttempts = 5;
+
     private async Task SendRetryReceiptAsync(string msgId, string to, long timestamp)
     {
+        var attempt = _retryAttempts.AddOrUpdate(msgId, 1, (_, n) => n + 1);
+        if (attempt > MaxRetryAttempts)
+        {
+            _retryAttempts.TryRemove(msgId, out _);
+            _logger.LogWarning("Retry cap ({Max}) reached for {MsgId} — undecryptable, ACKing to drain offline queue.", MaxRetryAttempts, msgId);
+            await SendAckAsync(msgId, to, timestamp);
+            return;
+        }
+
         try
         {
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
@@ -1176,7 +1193,7 @@ public sealed class NoiseProcessor : IAsyncDisposable
                 {
                     new("retry", new Dictionary<string, string>
                     {
-                        ["count"] = "1",
+                        ["count"] = attempt.ToString(),
                         ["id"]    = msgId,
                         ["t"]     = timestamp.ToString(),
                         ["v"]     = "1",
