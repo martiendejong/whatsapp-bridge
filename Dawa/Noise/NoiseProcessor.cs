@@ -2862,7 +2862,14 @@ public sealed class NoiseProcessor : IAsyncDisposable
 
         var myJid = _auth.Me?.Id;
         if (myJid == null)
-            throw new InvalidOperationException("Not authenticated");
+        {
+            // Fail-safe: never throw out of on-demand history sync. It is an optional,
+            // best-effort request; if we cannot make it, the caller simply gets no extra
+            // history and all normal paths (automatic history sync, offline queue, live
+            // delivery) keep working untouched.
+            _logger.LogWarning("OnDemandHistorySync: not authenticated — skipping (normal delivery unaffected)");
+            return new List<IncomingMessage>();
+        }
 
         // If given a LID, resolve to phone JID for the peerDataOperationRequestMessage
         // (phone stores chats by phone JID internally, not LID)
@@ -2889,16 +2896,25 @@ public sealed class NoiseProcessor : IAsyncDisposable
 
         EventHandler<IncomingMessage> onMsg = (_, msg) =>
         {
-            var remoteBase = normalizedJid.Split('@')[0];
-            var requestBase = requestJid.Split('@')[0];
-            if (msg.RemoteJid == normalizedJid ||
-                msg.RemoteJid == requestJid ||
-                msg.From == normalizedJid ||
-                msg.From == requestJid ||
-                (msg.RemoteJid?.Split('@')[0] == remoteBase) ||
-                (msg.RemoteJid?.Split('@')[0] == requestBase))
+            // Exception-safe: a malformed history message must never throw into the
+            // HistoryMessageReceived event dispatch (which also feeds normal history sync).
+            try
             {
-                lock (collected) { collected.Add(msg); }
+                var remoteBase = normalizedJid.Split('@')[0];
+                var requestBase = requestJid.Split('@')[0];
+                if (msg.RemoteJid == normalizedJid ||
+                    msg.RemoteJid == requestJid ||
+                    msg.From == normalizedJid ||
+                    msg.From == requestJid ||
+                    (msg.RemoteJid?.Split('@')[0] == remoteBase) ||
+                    (msg.RemoteJid?.Split('@')[0] == requestBase))
+                {
+                    lock (collected) { collected.Add(msg); }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "OnDemandHistorySync: collector handler error (ignored)");
             }
         };
 

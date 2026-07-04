@@ -166,6 +166,50 @@ public class WhatsAppApiController : ControllerBase
     }
 
     /// <summary>
+    /// Request on-demand history sync: ask the phone to push older message history for a
+    /// chat. This is WhatsApp Web's own history mechanism (a linked-device request to the
+    /// phone) — NOT the Google Drive backup, which is not accessible to third parties.
+    /// Fully fail-safe and OPTIONAL: any failure returns success=false and never affects the
+    /// live connection, the automatic history sync, the offline queue, or message delivery.
+    /// POST /api/wa/requestHistory  body: { "chatId": "2547...@s.whatsapp.net", "count": 50 }
+    /// </summary>
+    [HttpPost("requestHistory")]
+    public async Task<IActionResult> RequestHistory([FromBody] RequestHistoryRequest request)
+    {
+        try
+        {
+            var (success, userId, error) = await ValidateApiToken();
+            if (!success)
+                return Unauthorized(new { error });
+
+            if (request == null || string.IsNullOrWhiteSpace(request.ChatId))
+                return BadRequest(new { success = false, error = "chatId is required" });
+
+            var sessionId = await GetUserSessionId(userId!.Value, request.SessionId);
+            if (sessionId == null)
+                return Ok(new { success = false, error = "No active WhatsApp session — normal history sync/live delivery unaffected." });
+
+            var count = request.Count is > 0 and <= 500 ? request.Count : 50;
+            try
+            {
+                await _whatsappService.RequestOnDemandHistoryAsync(sessionId, request.ChatId, count, request.NoAnchor);
+                return Ok(new { success = true, requested = count, chatId = request.ChatId });
+            }
+            catch (Exception)
+            {
+                // Best-effort: on-demand request failed, but the connection and every normal
+                // delivery path keep working. Never surface this as a hard error.
+                return Ok(new { success = false, error = "On-demand history request failed; normal history sync/live delivery unaffected." });
+            }
+        }
+        catch (Exception)
+        {
+            // Absolute backstop: this optional endpoint must never break anything.
+            return Ok(new { success = false, error = "Unexpected error; connection unaffected." });
+        }
+    }
+
+    /// <summary>
     /// Send media (image, video, document)
     /// POST /api/wa/sendMedia
     /// </summary>
@@ -629,6 +673,7 @@ public class WhatsAppApiController : ControllerBase
 }
 
 public record SendMessageRequest(string To, string Body, string? SessionId = null);
+public record RequestHistoryRequest(string ChatId, int Count = 50, bool NoAnchor = false, string? SessionId = null);
 public record SendMediaRequest(string To, string MediaUrl, string? Caption = null, string? SessionId = null);
 public record DownloadMediaRequest(string MediaUrl, string MediaKey, string? MimeType = null, string? SessionId = null);
 public record RevokeMessageRequest(string ChatJid, string MessageId, bool FromMe = true, string? SessionId = null);
