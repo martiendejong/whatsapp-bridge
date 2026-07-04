@@ -3858,7 +3858,27 @@ public sealed class NoiseProcessor : IAsyncDisposable
         }
         else if (type == "retry")
         {
-            _logger.LogInformation("HandleReceipt: retry receipt for non-PDO message {Id} from {From} — ACK'd, not resending", id, from);
+            // The recipient could not decrypt one of our messages and is asking us to re-key.
+            // Our stored outgoing session for their device is stale — drop it so the NEXT
+            // message we send establishes a fresh Signal session (pkmsg) they can actually
+            // read. Without this a stale outgoing session never heals and the contact can
+            // never read our messages (observed: a contact seeing blank/"can't see the text").
+            try
+            {
+                if (!string.IsNullOrEmpty(from) && _signalStore.HasSession(from))
+                {
+                    _signalStore.DeleteSession(from);
+                    _logger.LogInformation("HandleReceipt: retry receipt from {From} — dropped stale outgoing session so the next send re-keys.", from);
+                }
+                else
+                {
+                    _logger.LogInformation("HandleReceipt: retry receipt for {Id} from {From} — no stored session to drop (next send will establish fresh).", id, from);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "HandleReceipt: failed to drop session on retry receipt from {From}", from);
+            }
         }
     }
 
