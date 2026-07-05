@@ -463,14 +463,40 @@ public sealed class WhatsAppClient : IAsyncDisposable
                 _pendingRoutingInfo = routingInfo;
                 _logger.LogInformation("Reconnecting with edge routing info ({Len} bytes).", routingInfo.Length);
             }
-            else
+
+            // Supervised reconnect loop with exponential backoff + jitter, capped at 5 min.
+            // Previously this was one-shot: a single failed ConnectAsync left the client dead
+            // until a manual app-pool recycle. The backoff is deliberately gentle to stay under
+            // WhatsApp's anti-abuse throttle (which blocks reconnects after too many rapid tries).
+            var attempt = 0;
+            while (_options.AutoReconnect && !ct.IsCancellationRequested)
             {
-                _logger.LogInformation("Reconnecting in {Delay}…", _options.ReconnectDelay);
+                attempt++;
+                var delay = ComputeReconnectBackoff(attempt);
+                _logger.LogInformation("Reconnect attempt {N} in {Sec:F0}s.", attempt, delay.TotalSeconds);
+                try { await Task.Delay(delay, CancellationToken.None); } catch { break; }
+                if (ct.IsCancellationRequested) break;
+                try
+                {
+                    await ConnectAsync(CancellationToken.None);
+                    _logger.LogInformation("Reconnect attempt {N} succeeded.", attempt);
+                    return; // success — a fresh receive loop is now running
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Reconnect attempt {N} failed; will retry with backoff.", attempt);
+                }
             }
-            await Task.Delay(_options.ReconnectDelay, CancellationToken.None);
-            try { await ConnectAsync(CancellationToken.None); }
-            catch (Exception ex) { _logger.LogError(ex, "Reconnect failed."); }
         }
+    }
+
+    private static readonly Random _reconnectRng = new();
+    /// <summary>Exponential backoff (base 5s, ×2, capped 5min) with full jitter, for reconnect attempts.</summary>
+    private static TimeSpan ComputeReconnectBackoff(int attempt)
+    {
+        var raw = Math.Min(300.0, 5.0 * Math.Pow(2, Math.Min(attempt - 1, 6)));
+        var jittered = raw * (0.5 + _reconnectRng.NextDouble() * 0.5);
+        return TimeSpan.FromSeconds(jittered);
     }
 
     private void SetState(ConnectionState state)

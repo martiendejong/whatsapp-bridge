@@ -242,6 +242,12 @@ public sealed class NoiseProcessor : IAsyncDisposable
     /// <summary>
     /// Continuously reads and processes incoming frames. Call this on a background task.
     /// </summary>
+    // Timestamp (ticks) of the last frame received from the server. The keepalive loop
+    // watches this to detect a dead/half-open connection (no data for too long) and tear
+    // the socket down so the receive loop unblocks and reconnection can run. Without this a
+    // silently-dropped socket parks ReceiveAsync forever (root cause of the 85-min outage).
+    private long _lastRecvTicks = DateTime.UtcNow.Ticks;
+
     public async Task ReceiveLoopAsync(CancellationToken ct)
     {
         while (!ct.IsCancellationRequested && _socket.IsConnected)
@@ -250,6 +256,8 @@ public sealed class NoiseProcessor : IAsyncDisposable
             {
                 var frame = await _socket.ReceiveFrameAsync(ct);
                 if (frame == null) break;
+
+                System.Threading.Interlocked.Exchange(ref _lastRecvTicks, DateTime.UtcNow.Ticks);
 
                 _logger.LogInformation("Noise: Received raw frame ({Len} bytes), first bytes={Hex}",
                     frame.Length, BitConverter.ToString(frame, 0, Math.Min(32, frame.Length)));
@@ -1102,13 +1110,28 @@ public sealed class NoiseProcessor : IAsyncDisposable
     /// </summary>
     private async Task KeepAliveLoopAsync(CancellationToken ct)
     {
-        _logger.LogInformation("Keepalive loop started (25s interval).");
+        const int intervalMs  = 25_000;              // ping cadence
+        const int deadAfterMs = intervalMs + 15_000; // ~40s of total silence => declare dead
+        _logger.LogInformation("Keepalive loop started ({Interval}s interval, dead after {Dead}s silence).",
+            intervalMs / 1000, deadAfterMs / 1000);
         try
         {
             while (!ct.IsCancellationRequested)
             {
-                await Task.Delay(TimeSpan.FromSeconds(25), ct);
+                await Task.Delay(intervalMs, ct);
                 if (ct.IsCancellationRequested) break;
+
+                // Dead-connection watchdog: if we have not received ANY frame (including the
+                // pong to our own ping) for too long, the socket is dead/half-open. Dispose it
+                // so the parked ReceiveAsync throws, the receive loop exits, and reconnection runs.
+                var silentMs = (DateTime.UtcNow.Ticks - System.Threading.Interlocked.Read(ref _lastRecvTicks))
+                               / TimeSpan.TicksPerMillisecond;
+                if (silentMs > deadAfterMs)
+                {
+                    _logger.LogWarning("Keepalive: no data for {Ms}ms — declaring connection dead, tearing down socket.", silentMs);
+                    try { await _socket.DisposeAsync(); } catch { /* best effort */ }
+                    break;
+                }
 
                 try
                 {
@@ -1127,7 +1150,11 @@ public sealed class NoiseProcessor : IAsyncDisposable
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning(ex, "Keepalive ping failed — connection may be lost.");
+                    // A ping WRITE failure means the socket is gone. Tear it down so the receive
+                    // loop unblocks and reconnection runs (previously it just broke this loop,
+                    // leaving the receive loop parked forever).
+                    _logger.LogWarning(ex, "Keepalive ping write failed — tearing down socket to force reconnect.");
+                    try { await _socket.DisposeAsync(); } catch { /* best effort */ }
                     break;
                 }
             }
@@ -3887,26 +3914,36 @@ public sealed class NoiseProcessor : IAsyncDisposable
         }
         else if (type == "retry")
         {
-            // The recipient could not decrypt one of our messages and is asking us to re-key.
-            // Our stored outgoing session for their device is stale — drop it so the NEXT
-            // message we send establishes a fresh Signal session (pkmsg) they can actually
-            // read. Without this a stale outgoing session never heals and the contact can
-            // never read our messages (observed: a contact seeing blank/"can't see the text").
+            // A recipient device could not decrypt one of our messages and is asking us to
+            // re-key. WhatsApp names the SPECIFIC failing device in the `participant`
+            // attribute (for multi-device / own-device fan-out); `from` is only the
+            // conversation peer. Dropping the session keyed by `from` never heals the stale
+            // own-device (or specific-device) session, so the sync copy stays undecryptable
+            // ("Waiting for this message") forever. Drop the session for the device named in
+            // `participant` (fall back to `from` for 1:1). Then the next send to that device
+            // establishes a fresh pkmsg it can read.
             try
             {
-                if (!string.IsNullOrEmpty(from) && _signalStore.HasSession(from))
+                var participant = node.GetAttr("participant");
+                var failedDevice = !string.IsNullOrEmpty(participant) ? participant : from;
+
+                // Device 0 is keyed bare ("user@server", no ":0") in the send path — normalize.
+                if (failedDevice.EndsWith(":0@s.whatsapp.net", StringComparison.Ordinal))
+                    failedDevice = failedDevice.Replace(":0@s.whatsapp.net", "@s.whatsapp.net");
+
+                if (!string.IsNullOrEmpty(failedDevice) && _signalStore.HasSession(failedDevice))
                 {
-                    _signalStore.DeleteSession(from);
-                    _logger.LogInformation("HandleReceipt: retry receipt from {From} — dropped stale outgoing session so the next send re-keys.", from);
+                    _signalStore.DeleteSession(failedDevice);
+                    _logger.LogInformation("HandleReceipt: retry for {Id} — dropped stale session for failed device {Dev} (from={From}); next send re-keys.", id, failedDevice, from);
                 }
                 else
                 {
-                    _logger.LogInformation("HandleReceipt: retry receipt for {Id} from {From} — no stored session to drop (next send will establish fresh).", id, from);
+                    _logger.LogInformation("HandleReceipt: retry for {Id} failed device {Dev} (from={From}) — no stored session to drop (next send establishes fresh).", id, failedDevice, from);
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "HandleReceipt: failed to drop session on retry receipt from {From}", from);
+                _logger.LogWarning(ex, "HandleReceipt: failed to drop session on retry receipt (from={From})", from);
             }
         }
     }
