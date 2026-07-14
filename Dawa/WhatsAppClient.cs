@@ -112,6 +112,10 @@ public sealed class WhatsAppClient : IAsyncDisposable
         {
             _authState = await _sessionStore.LoadAsync(_cts.Token);
 
+            // Refresh the announced WA web version before the socket opens — an outdated
+            // version gets fresh registrations 405-rejected at the handshake.
+            await Noise.WaVersionProvider.RefreshAsync(_logger, _cts.Token);
+
             _frameSocket = new FrameSocket(_logger);
             SetState(ConnectionState.Handshaking);
             await _frameSocket.ConnectAsync(routingInfo: _pendingRoutingInfo, ct: _cts.Token);

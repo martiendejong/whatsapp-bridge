@@ -2355,19 +2355,20 @@ public sealed class NoiseProcessor : IAsyncDisposable
         return data;
     }
 
-    // Current WA Web version per Baileys baileys-version.json (2026-07-14): [2, 3000, 1035194821]
-    // WhatsApp rejects fresh registrations from outdated versions with "Authentication failure: 405";
-    // already-paired sessions keep working, so this only bites at QR pairing time.
-    // buildHash = MD5(WA_VERSION)
-    private const string WA_VERSION = "2.3000.1035194821";
-    private const int WA_VERSION_TERTIARY = 1035194821;
+    // WA web version now comes from WaVersionProvider (live fetch + disk cache + compiled
+    // fallback) — WhatsApp 405-rejects fresh registrations from outdated versions.
 
     private byte[] BuildClientPayload()
     {
         var userAgent = new UserAgent
         {
             Platform = 14, // WEB
-            AppVersion = new AppVersion { Primary = 2, Secondary = 3000, Tertiary = WA_VERSION_TERTIARY },
+            AppVersion = new AppVersion
+            {
+                Primary = WaVersionProvider.Primary,
+                Secondary = WaVersionProvider.Secondary,
+                Tertiary = WaVersionProvider.Tertiary,
+            },
             Mcc = "000",
             Mnc = "000",
             OsVersion = "0.1",
@@ -2380,7 +2381,7 @@ public sealed class NoiseProcessor : IAsyncDisposable
         if (_auth.IsFresh)
         {
             // Fresh registration: include device pairing data so server knows our keys
-            var buildHash = MD5.HashData(System.Text.Encoding.UTF8.GetBytes(WA_VERSION));
+            var buildHash = MD5.HashData(System.Text.Encoding.UTF8.GetBytes(WaVersionProvider.VersionString));
 
             // Registration ID as 4-byte big-endian
             var eRegid = new byte[4];
@@ -2397,8 +2398,14 @@ public sealed class NoiseProcessor : IAsyncDisposable
 
             var deviceProps = new DevicePropsMessage
             {
-                // Os="Ubuntu", Version={10,15,7}, HistorySyncConfig — all set by default
+                // Os="Ubuntu", HistorySyncConfig — set by default
                 PlatformType = 1, // CHROME
+                Version = new AppVersion
+                {
+                    Primary = WaVersionProvider.Primary,
+                    Secondary = WaVersionProvider.Secondary,
+                    Tertiary = WaVersionProvider.Tertiary,
+                },
             }.ToByteArray();
 
             return new ClientPayload
