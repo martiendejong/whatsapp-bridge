@@ -66,7 +66,7 @@ public sealed class DevicePropsMessage
 {
     public string Os             { get; set; } = "Ubuntu";
     // Version = WA app version (Baileys sends [2, 3000, tertiary]), NOT the OS/browser version.
-    public AppVersion? Version   { get; set; } = new AppVersion { Primary = 2, Secondary = 3000, Tertiary = 1033846690 };
+    public AppVersion? Version   { get; set; } = new AppVersion { Primary = 2, Secondary = 3000, Tertiary = 1035194821 };
     // PlatformType: CHROME=1
     public int PlatformType      { get; set; } = 1;
     // requireFullSync: true triggers the server to include history in initial sync (Baileys default: true)

@@ -2355,16 +2355,19 @@ public sealed class NoiseProcessor : IAsyncDisposable
         return data;
     }
 
-    // Baileys default version: [2, 3000, 1033846690]
-    // buildHash = MD5("2.3000.1033846690")
-    private const string WA_VERSION = "2.3000.1033846690";
+    // Current WA Web version per Baileys baileys-version.json (2026-07-14): [2, 3000, 1035194821]
+    // WhatsApp rejects fresh registrations from outdated versions with "Authentication failure: 405";
+    // already-paired sessions keep working, so this only bites at QR pairing time.
+    // buildHash = MD5(WA_VERSION)
+    private const string WA_VERSION = "2.3000.1035194821";
+    private const int WA_VERSION_TERTIARY = 1035194821;
 
     private byte[] BuildClientPayload()
     {
         var userAgent = new UserAgent
         {
             Platform = 14, // WEB
-            AppVersion = new AppVersion { Primary = 2, Secondary = 3000, Tertiary = 1033846690 },
+            AppVersion = new AppVersion { Primary = 2, Secondary = 3000, Tertiary = WA_VERSION_TERTIARY },
             Mcc = "000",
             Mnc = "000",
             OsVersion = "0.1",
