@@ -1548,8 +1548,9 @@ public sealed class NoiseProcessor : IAsyncDisposable
 
         if (toNodes.Count == 0)
         {
-            _logger.LogError("No devices encrypted successfully for {Jid}", normalizedJid);
-            return;
+            var reason = $"No devices encrypted successfully for {normalizedJid} — message NOT sent (stale/missing Signal session or pre-key bundle fetch failed).";
+            _logger.LogError(reason);
+            throw new InvalidOperationException(reason);
         }
 
         // 9. Build and send message node
@@ -1685,8 +1686,9 @@ public sealed class NoiseProcessor : IAsyncDisposable
 
         if (toNodes.Count == 0)
         {
-            _logger.LogError("No devices encrypted successfully for reaction to {Jid}", normalizedJid);
-            return;
+            var reason = $"No devices encrypted successfully for reaction to {normalizedJid} — reaction NOT sent (stale/missing Signal session or pre-key bundle fetch failed).";
+            _logger.LogError(reason);
+            throw new InvalidOperationException(reason);
         }
 
         var participantsNode = new BinaryNode("participants") { Content = toNodes };
@@ -1922,8 +1924,9 @@ public sealed class NoiseProcessor : IAsyncDisposable
 
         if (toNodes.Count == 0)
         {
-            _logger.LogError("No devices encrypted for media to {Jid}", normalizedJid);
-            return;
+            var reason = $"No devices encrypted for media to {normalizedJid} — media NOT sent (stale/missing Signal session or pre-key bundle fetch failed).";
+            _logger.LogError(reason);
+            throw new InvalidOperationException(reason);
         }
 
         // 7. Build and send message node

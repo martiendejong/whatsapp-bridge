@@ -193,7 +193,15 @@ public class WhatsAppBridgeService : IAsyncDisposable
     public async Task<object?> SendMessageAsync(string sessionId, string to, string body)
     {
         var client = GetConnectedClient(sessionId);
-        await client.SendMessageAsync(to, body, CancellationToken.None);
+        try
+        {
+            await client.SendMessageAsync(to, body, CancellationToken.None);
+        }
+        catch (Exception ex) when (ex is not WhatsAppServiceException)
+        {
+            _logger.LogError(ex, "SendMessageAsync failed for session {SessionId} to {To}", sessionId, to);
+            throw new WhatsAppServiceException(WhatsAppError.MessageFailed(ex.Message), ex);
+        }
         return new { success = true };
     }
 
@@ -286,7 +294,15 @@ public class WhatsAppBridgeService : IAsyncDisposable
     public async Task<object?> SendReactionAsync(string sessionId, string to, string messageId, bool fromMe, string emoji)
     {
         var client = GetConnectedClient(sessionId);
-        await client.SendReactionAsync(to, messageId, fromMe, emoji, CancellationToken.None);
+        try
+        {
+            await client.SendReactionAsync(to, messageId, fromMe, emoji, CancellationToken.None);
+        }
+        catch (Exception ex) when (ex is not WhatsAppServiceException)
+        {
+            _logger.LogError(ex, "SendReactionAsync failed for session {SessionId} to {To}", sessionId, to);
+            throw new WhatsAppServiceException(WhatsAppError.MessageFailed(ex.Message), ex);
+        }
         return new { success = true };
     }
 
@@ -294,7 +310,15 @@ public class WhatsAppBridgeService : IAsyncDisposable
         string mimeType, byte[] fileBytes, string caption, string fileName)
     {
         var client = GetConnectedClient(sessionId);
-        await client.SendMediaAsync(to, fileBytes, mediaType, mimeType, caption, fileName);
+        try
+        {
+            await client.SendMediaAsync(to, fileBytes, mediaType, mimeType, caption, fileName);
+        }
+        catch (Exception ex) when (ex is not WhatsAppServiceException)
+        {
+            _logger.LogError(ex, "SendMediaAsync failed for session {SessionId} to {To}", sessionId, to);
+            throw new WhatsAppServiceException(WhatsAppError.MessageFailed(ex.Message), ex);
+        }
         return new { success = true };
     }
 
