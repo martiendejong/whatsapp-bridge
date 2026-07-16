@@ -18,6 +18,7 @@ public class WhatsAppBridgeService : IAsyncDisposable
     private readonly IConfiguration _configuration;
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<WhatsAppBridgeService> _logger;
+    private readonly TaskIntakeForwarder _taskIntake;
 
     // One Dawa client per sessionId
     private readonly ConcurrentDictionary<string, WhatsAppClient> _clients = new();
@@ -30,12 +31,14 @@ public class WhatsAppBridgeService : IAsyncDisposable
         IServiceScopeFactory scopeFactory,
         IConfiguration configuration,
         ILoggerFactory loggerFactory,
-        ILogger<WhatsAppBridgeService> logger)
+        ILogger<WhatsAppBridgeService> logger,
+        TaskIntakeForwarder taskIntake)
     {
         _scopeFactory = scopeFactory;
         _configuration = configuration;
         _loggerFactory = loggerFactory;
         _logger = logger;
+        _taskIntake = taskIntake;
     }
 
     // ─── Session lifecycle ─────────────────────────────────────────────────────
@@ -626,6 +629,12 @@ public class WhatsAppBridgeService : IAsyncDisposable
             // Deduplicate by message ID
             if (list.Any(m => m.Id == stored.Id)) return;
 
+            // Task-intake forwarding: only genuine, newly-received inbound messages
+            // (not history replays, not our own outgoing messages). Fire-and-forget so
+            // a slow/failed intake call can never block or crash the inbound pipeline.
+            if (!isHistory && !msg.FromMe && _taskIntake.IsEnabled)
+                DispatchTaskIntake(sessionId, msg);
+
             if (isHistory)
             {
                 // Insert in chronological order (history messages may arrive out of order)
@@ -649,6 +658,35 @@ public class WhatsAppBridgeService : IAsyncDisposable
 
         // Persist to disk (throttle for history: only persist in batch via caller)
         if (!isHistory) PersistMessages(sessionId);
+    }
+
+    /// <summary>
+    /// Fire-and-forget dispatch of an inbound message to the task-intake forwarder.
+    /// Reply is routed back through the existing SendMessageAsync send path (to the sender's
+    /// chat). Any error is swallowed here — this must never affect the inbound pipeline.
+    /// </summary>
+    private void DispatchTaskIntake(string sessionId, Dawa.Messages.IncomingMessage msg)
+    {
+        // Reply target: the conversation JID the message arrived on.
+        var replyTo = msg.RemoteJid;
+
+        Func<string, string, Task> reply = async (to, body) =>
+        {
+            try { await SendMessageAsync(sessionId, to, body); }
+            catch (Exception ex) { _logger.LogWarning(ex, "TaskIntake reply send failed for session {Sid}", sessionId); }
+        };
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await _taskIntake.HandleInboundAsync(msg.From, msg.Text, msg.Id, (_, body) => reply(replyTo, body));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "TaskIntake dispatch error for session {Sid}", sessionId);
+            }
+        });
     }
 
     public bool IsSessionConnected(string sessionId)

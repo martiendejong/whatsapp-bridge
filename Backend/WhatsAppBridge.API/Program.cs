@@ -8,6 +8,10 @@ using WhatsAppBridge.API.Authentication;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Optional local override file (gitignored) — real secrets like TaskIntake:ApiKey live here,
+// or in environment variables (e.g. TASKINTAKE__APIKEY). Placeholders only in appsettings.json.
+builder.Configuration.AddJsonFile("appsettings.Local.json", optional: true, reloadOnChange: true);
+
 // Configure IIS integration for production
 if (builder.Environment.IsProduction())
 {
@@ -78,6 +82,8 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
 builder.Services.AddScoped<AuthService>();
 builder.Services.AddScoped<TwoFactorService>();
 builder.Services.AddSingleton<EncryptionService>();
+// Singleton: forwards allow-listed "/task ..." inbound messages to jengo-agi intake (default-OFF, additive)
+builder.Services.AddSingleton<TaskIntakeForwarder>();
 // Singleton: holds long-lived Dawa WhatsAppClient instances (one per user session)
 builder.Services.AddSingleton<WhatsAppBridgeService>();
 
