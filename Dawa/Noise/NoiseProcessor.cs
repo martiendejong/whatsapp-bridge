@@ -1434,7 +1434,7 @@ public sealed class NoiseProcessor : IAsyncDisposable
     // ─── Send message ───────────────────────────────────────────────────────
 
     /// <summary>Sends an encrypted text message to a JID using Signal Protocol.</summary>
-    public async Task SendTextMessageAsync(string jid, string text, CancellationToken ct)
+    public async Task<string> SendTextMessageAsync(string jid, string text, CancellationToken ct)
     {
         // 1. Normalize JID
         var normalizedJid = jid.Contains('@') ? jid : $"{jid.TrimStart('+')}@s.whatsapp.net";
@@ -1585,6 +1585,10 @@ public sealed class NoiseProcessor : IAsyncDisposable
         await SendNodeAsync(msgNode, ct);
         _logger.LogInformation("Sent encrypted message to {Jid} via {RecipientCount}+{SenderCount} devices",
             normalizedJid, recipientDeviceJids.Count, senderDeviceJids.Count);
+
+        _messageStatuses[msgId] = Messages.MessageStatus.Sent;
+        MessageStatusUpdated?.Invoke(this, (msgId, normalizedJid, Messages.MessageStatus.Sent));
+        return msgId;
     }
 
     /// <summary>
@@ -3860,7 +3864,7 @@ public sealed class NoiseProcessor : IAsyncDisposable
 
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, Messages.MessageStatus> _messageStatuses = new();
 
-    public event EventHandler<(string MessageId, Messages.MessageStatus Status)>? MessageStatusUpdated;
+    public event EventHandler<(string MessageId, string Jid, Messages.MessageStatus Status)>? MessageStatusUpdated;
 
     private async Task HandleReceiptAsync(BinaryNode node, CancellationToken ct)
     {
@@ -3877,11 +3881,26 @@ public sealed class NoiseProcessor : IAsyncDisposable
             _          => Messages.MessageStatus.Delivered,
         };
 
-        if (!string.IsNullOrEmpty(id))
+        // A single receipt stanza can cover several messages at once: the primary
+        // `id` attribute, plus a batched <list><item id=".."/></list> child the
+        // server uses to fold multiple consecutive delivery/read receipts together.
+        var ids = new List<string>();
+        if (!string.IsNullOrEmpty(id)) ids.Add(id);
+        var list = node.FindChild("list");
+        if (list != null)
         {
-            _messageStatuses[id] = status;
-            MessageStatusUpdated?.Invoke(this, (id, status));
-            _logger.LogDebug("Receipt: msg {Id} → {Status}", id, status);
+            foreach (var item in list.Children)
+            {
+                var itemId = item.GetAttr("id");
+                if (!string.IsNullOrEmpty(itemId)) ids.Add(itemId);
+            }
+        }
+
+        foreach (var msgId in ids)
+        {
+            _messageStatuses[msgId] = status;
+            MessageStatusUpdated?.Invoke(this, (msgId, from, status));
+            _logger.LogDebug("Receipt: msg {Id} → {Status}", msgId, status);
         }
 
         // ACK the receipt
