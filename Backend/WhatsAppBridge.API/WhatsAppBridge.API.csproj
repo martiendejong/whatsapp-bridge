@@ -23,4 +23,9 @@
     <ProjectReference Include="..\..\Dawa\Dawa.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Baked into the DLL so /api/ai-docs is deploy-proof — no reliance on a loose file being copied to the publish output -->
+    <EmbeddedResource Include="..\..\AI-INTEGRATION.md" LogicalName="AI-INTEGRATION.md" />
+  </ItemGroup>
+
 </Project>
