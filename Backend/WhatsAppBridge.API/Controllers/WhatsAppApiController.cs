@@ -670,6 +670,25 @@ public class WhatsAppApiController : ControllerBase
         var status = _whatsappService.GetMessageStatus(resolvedSessionId!, messageId);
         return Ok(new { messageId, status = status?.ToString() ?? "unknown" });
     }
+
+    /// <summary>
+    /// Get message delivery/read status (path-based resource route)
+    /// GET /api/{sessionId}/messages/{msgId}/status
+    /// </summary>
+    [HttpGet("/api/{sessionId}/messages/{msgId}/status")]
+    public async Task<IActionResult> GetMessageStatusByPath(string sessionId, string msgId)
+    {
+        var (success, userId, error) = await ValidateApiToken();
+        if (!success)
+            return Unauthorized(new { error });
+
+        var resolvedSessionId = await GetUserSessionId(userId!.Value, sessionId);
+        if (resolvedSessionId == null)
+            return BadRequest(new { error = $"WhatsApp session '{sessionId}' not found or not connected" });
+
+        var status = _whatsappService.GetMessageStatus(resolvedSessionId!, msgId);
+        return Ok(new { messageId = msgId, status = status?.ToString() ?? "unknown" });
+    }
 }
 
 public record SendMessageRequest(string To, string Body, string? SessionId = null);

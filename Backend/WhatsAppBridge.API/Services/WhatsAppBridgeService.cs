@@ -77,6 +77,7 @@ public class WhatsAppBridgeService : IAsyncDisposable
         client.MessageReceived        += (_, msg) => StoreMessage(sessionId, msg);
         client.HistoryMessageReceived += (_, msg) => StoreMessage(sessionId, msg, isHistory: true);
         client.HistorySyncCompleted   += (_, n)   => { _logger.LogInformation("HistorySync: persisting {N} msgs for {Sid}", n, sessionId); PersistMessages(sessionId); };
+        client.MessageStatusUpdated   += (_, evt) => UpdateMessageStatus(sessionId, evt.Jid, evt.MessageId, evt.Status);
 
         client.Connected += (_, _) =>
         {
@@ -154,6 +155,7 @@ public class WhatsAppBridgeService : IAsyncDisposable
         client.MessageReceived        += (_, msg) => StoreMessage(sessionId, msg);
         client.HistoryMessageReceived += (_, msg) => StoreMessage(sessionId, msg, isHistory: true);
         client.HistorySyncCompleted   += (_, n)   => { _logger.LogInformation("HistorySync: persisting {N} msgs for {Sid}", n, sessionId); PersistMessages(sessionId); };
+        client.MessageStatusUpdated   += (_, evt) => UpdateMessageStatus(sessionId, evt.Jid, evt.MessageId, evt.Status);
 
         client.Connected += (_, _) =>
         {
@@ -196,16 +198,45 @@ public class WhatsAppBridgeService : IAsyncDisposable
     public async Task<object?> SendMessageAsync(string sessionId, string to, string body)
     {
         var client = GetConnectedClient(sessionId);
+        (string messageId, string jid) sent;
         try
         {
-            await client.SendMessageAsync(to, body, CancellationToken.None);
+            sent = await client.SendMessageAsync(to, body, CancellationToken.None);
         }
         catch (Exception ex) when (ex is not WhatsAppServiceException)
         {
             _logger.LogError(ex, "SendMessageAsync failed for session {SessionId} to {To}", sessionId, to);
             throw new WhatsAppServiceException(WhatsAppError.MessageFailed(ex.Message), ex);
         }
-        return new { success = true };
+
+        var key = $"{sessionId}:{sent.jid}";
+        var storedMessage = new WhatsAppMessage(
+            Id: sent.messageId,
+            From: "me",
+            To: sent.jid,
+            Body: body,
+            Timestamp: DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            Status: Dawa.Messages.MessageStatus.Sent.ToString());
+        var list = _messageStore.GetOrAdd(key, _ => new List<WhatsAppMessage>());
+        lock (list)
+        {
+            list.Add(storedMessage);
+            if (list.Count > MaxMessagesPerChat) list.RemoveAt(0);
+        }
+
+        return new { success = true, messageId = sent.messageId };
+    }
+
+    /// <summary>Applies a delivery/read/played status update to a previously-sent message in the store.</summary>
+    private void UpdateMessageStatus(string sessionId, string jid, string messageId, Dawa.Messages.MessageStatus status)
+    {
+        var key = $"{sessionId}:{jid}";
+        if (!_messageStore.TryGetValue(key, out var msgs)) return;
+        lock (msgs)
+        {
+            var idx = msgs.FindIndex(m => m.Id == messageId);
+            if (idx >= 0) msgs[idx] = msgs[idx] with { Status = status.ToString() };
+        }
     }
 
     public async Task<byte[]?> DownloadMediaAsync(string sessionId, string mediaUrl, string mediaKeyBase64, string mimeType)
@@ -547,7 +578,22 @@ public class WhatsAppBridgeService : IAsyncDisposable
     public Dawa.Messages.MessageStatus? GetMessageStatus(string sessionId, string messageId)
     {
         if (_clients.TryGetValue(sessionId, out var client))
-            return client.GetMessageStatus(messageId);
+        {
+            var live = client.GetMessageStatus(messageId);
+            if (live != null) return live;
+        }
+
+        // Fall back to the persisted message store — covers messages whose status
+        // was recorded by a prior client instance (e.g. after a reconnect).
+        var prefix = $"{sessionId}:";
+        foreach (var kv in _messageStore)
+        {
+            if (!kv.Key.StartsWith(prefix, StringComparison.Ordinal)) continue;
+            WhatsAppMessage? found;
+            lock (kv.Value) { found = kv.Value.FirstOrDefault(m => m.Id == messageId); }
+            if (found?.Status != null && Enum.TryParse<Dawa.Messages.MessageStatus>(found.Status, out var parsed))
+                return parsed;
+        }
         return null;
     }
 
