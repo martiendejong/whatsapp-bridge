@@ -186,6 +186,24 @@ public sealed class WhatsAppClient : IAsyncDisposable
         await _noiseProcessor.SendTextMessageAsync(jid, text, cancellationToken);
     }
 
+    /// <summary>
+    /// Sends a text message as a reply, attaching quoted-message ContextInfo so the
+    /// recipient's client renders it as a reply to the original message.
+    /// </summary>
+    /// <param name="to">Phone number ("31612345678") or full JID ("31612345678@s.whatsapp.net").</param>
+    /// <param name="text">Reply text.</param>
+    /// <param name="quotedMsgId">ID of the message being replied to.</param>
+    /// <param name="quotedFromJid">JID of the sender of the quoted message.</param>
+    public async Task SendReplyAsync(string to, string text, string quotedMsgId, string quotedFromJid, CancellationToken cancellationToken = default)
+    {
+        if (_noiseProcessor == null || _state != ConnectionState.Connected)
+            throw new InvalidOperationException("Client is not connected.");
+
+        var jid = to.Contains('@') ? to : $"{new string(to.Where(char.IsDigit).ToArray())}@s.whatsapp.net";
+        var quotedContext = new Dawa.Proto.ContextInfo { StanzaId = quotedMsgId, Participant = quotedFromJid };
+        await _noiseProcessor.SendTextMessageAsync(jid, text, cancellationToken, quotedContext);
+    }
+
     public Task<List<(string Jid, string Name)>> GetContactsAsync(CancellationToken ct)
     {
         if (_noiseProcessor == null || _state != ConnectionState.Connected)

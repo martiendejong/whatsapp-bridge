@@ -166,6 +166,47 @@ public class WhatsAppApiController : ControllerBase
     }
 
     /// <summary>
+    /// Send a reply to a specific message, attaching quoted-message context so the
+    /// recipient's client renders it as a reply.
+    /// POST /api/wa/sendReply
+    /// </summary>
+    [HttpPost("sendReply")]
+    public async Task<IActionResult> SendReply([FromBody] SendReplyRequest request)
+    {
+        try
+        {
+            var (success, userId, error) = await ValidateApiToken();
+            if (!success)
+                return Unauthorized(new { error });
+
+            var sessionId = await GetUserSessionId(userId!.Value, request.SessionId);
+            if (sessionId == null)
+                return BadRequest(new { error = request.SessionId != null
+                    ? $"WhatsApp session '{request.SessionId}' not found or not connected"
+                    : "No active WhatsApp session" });
+
+            // Encrypt message if encryption enabled
+            var messageToSend = _encryptionService.IsEncryptionEnabled
+                ? _encryptionService.Encrypt(request.Body)
+                : request.Body;
+
+            var result = await _whatsappService.SendReplyAsync(sessionId, request.To, messageToSend, request.QuotedMessageId, request.QuotedFromJid);
+
+            return Ok(result);
+        }
+        catch (WhatsAppServiceException ex)
+        {
+            // Return user-friendly error message
+            return StatusCode(400, new
+            {
+                error = ex.Error.UserMessage,
+                errorCode = ex.Error.ErrorCode,
+                details = ex.Error.AdditionalInfo
+            });
+        }
+    }
+
+    /// <summary>
     /// Request on-demand history sync: ask the phone to push older message history for a
     /// chat. This is WhatsApp Web's own history mechanism (a linked-device request to the
     /// phone) — NOT the Google Drive backup, which is not accessible to third parties.
@@ -673,6 +714,7 @@ public class WhatsAppApiController : ControllerBase
 }
 
 public record SendMessageRequest(string To, string Body, string? SessionId = null);
+public record SendReplyRequest(string To, string Body, string QuotedMessageId, string QuotedFromJid, string? SessionId = null);
 public record RequestHistoryRequest(string ChatId, int Count = 50, bool NoAnchor = false, string? SessionId = null);
 public record SendMediaRequest(string To, string MediaUrl, string? Caption = null, string? SessionId = null);
 public record DownloadMediaRequest(string MediaUrl, string MediaKey, string? MimeType = null, string? SessionId = null);

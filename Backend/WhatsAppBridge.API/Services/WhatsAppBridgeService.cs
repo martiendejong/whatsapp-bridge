@@ -208,6 +208,21 @@ public class WhatsAppBridgeService : IAsyncDisposable
         return new { success = true };
     }
 
+    public async Task<object?> SendReplyAsync(string sessionId, string to, string body, string quotedMsgId, string quotedFromJid)
+    {
+        var client = GetConnectedClient(sessionId);
+        try
+        {
+            await client.SendReplyAsync(to, body, quotedMsgId, quotedFromJid, CancellationToken.None);
+        }
+        catch (Exception ex) when (ex is not WhatsAppServiceException)
+        {
+            _logger.LogError(ex, "SendReplyAsync failed for session {SessionId} to {To}", sessionId, to);
+            throw new WhatsAppServiceException(WhatsAppError.MessageFailed(ex.Message), ex);
+        }
+        return new { success = true };
+    }
+
     public async Task<byte[]?> DownloadMediaAsync(string sessionId, string mediaUrl, string mediaKeyBase64, string mimeType)
     {
         try { return await WhatsAppClient.DownloadMediaAsync(mediaUrl, mediaKeyBase64, mimeType); }
