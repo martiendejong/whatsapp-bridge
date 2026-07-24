@@ -115,6 +115,16 @@ app.UseAuthorization();
 
 app.MapControllers();
 
+// Deploy-time version tracking: lets JengoAGI (or anyone) confirm which version a running
+// instance actually has, instead of guessing from build timestamps/commit counts. The version
+// comes from the assembly's <Version> (WhatsAppBridge.API.csproj), which deploy/bump-version.ps1
+// keeps in sync with the repo-root VERSION file on every release.
+app.MapGet("/api/version", () =>
+{
+    var version = typeof(Program).Assembly.GetName().Version?.ToString() ?? "unknown";
+    return Results.Ok(new { version, buildTimeUtc = System.IO.File.GetLastWriteTimeUtc(typeof(Program).Assembly.Location) });
+}).AllowAnonymous();
+
 // Ensure database is created
 using (var scope = app.Services.CreateScope())
 {

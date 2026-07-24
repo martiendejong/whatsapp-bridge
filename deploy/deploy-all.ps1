@@ -10,7 +10,8 @@
 #>
 
 param(
-    [switch]$SkipPrerequisites
+    [switch]$SkipPrerequisites,
+    [switch]$SkipVersionBump
 )
 
 $ErrorActionPreference = "Stop"
@@ -23,20 +24,33 @@ Write-Host ""
 # Get deployment directory
 $deployDir = $PSScriptRoot
 
+# Bump release version + git tag (so a deployed instance's GET /api/version can be traced
+# back to the exact commit that was published, instead of guessing from build timestamps)
+if (-not $SkipVersionBump) {
+    Write-Host "`n[1/5] Bumping release version..." -ForegroundColor Yellow
+    & "$deployDir\bump-version.ps1"
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Version bump failed!" -ForegroundColor Red
+        exit 1
+    }
+} else {
+    Write-Host "`n[1/5] Skipping version bump..." -ForegroundColor Yellow
+}
+
 # Install prerequisites
 if (-not $SkipPrerequisites) {
-    Write-Host "`n[1/4] Installing prerequisites..." -ForegroundColor Yellow
+    Write-Host "`n[2/5] Installing prerequisites..." -ForegroundColor Yellow
     & "$deployDir\install-prerequisites.ps1"
     if ($LASTEXITCODE -ne 0) {
         Write-Host "Prerequisites installation failed!" -ForegroundColor Red
         exit 1
     }
 } else {
-    Write-Host "`n[1/4] Skipping prerequisites..." -ForegroundColor Yellow
+    Write-Host "`n[2/5] Skipping prerequisites..." -ForegroundColor Yellow
 }
 
 # Deploy WhatsApp Service
-Write-Host "`n[2/4] Deploying WhatsApp Service..." -ForegroundColor Yellow
+Write-Host "`n[3/5] Deploying WhatsApp Service..." -ForegroundColor Yellow
 & "$deployDir\deploy-whatsapp-service.ps1"
 if ($LASTEXITCODE -ne 0) {
     Write-Host "WhatsApp Service deployment failed!" -ForegroundColor Red
@@ -44,7 +58,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # Deploy Backend API
-Write-Host "`n[3/4] Deploying Backend API..." -ForegroundColor Yellow
+Write-Host "`n[4/5] Deploying Backend API..." -ForegroundColor Yellow
 & "$deployDir\deploy-backend.ps1"
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Backend deployment failed!" -ForegroundColor Red
@@ -52,7 +66,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # Deploy Frontend
-Write-Host "`n[4/4] Deploying Frontend..." -ForegroundColor Yellow
+Write-Host "`n[5/5] Deploying Frontend..." -ForegroundColor Yellow
 & "$deployDir\deploy-frontend.ps1"
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Frontend deployment failed!" -ForegroundColor Red
