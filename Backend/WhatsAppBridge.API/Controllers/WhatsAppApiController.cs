@@ -291,6 +291,68 @@ public class WhatsAppApiController : ControllerBase
     }
 
     /// <summary>
+    /// Durable message log (task 869ecbkv7): reads from the SQLite Messages table instead of
+    /// the capped in-memory store, so it survives app-pool restarts and session re-pairs and
+    /// spans ALL of the caller's sessions (including replaced ones). chatId accepts a full JID
+    /// or a bare phone number. since = unix seconds (only messages with a later WhatsApp
+    /// timestamp). Results are returned oldest-first.
+    /// GET /api/wa/messages?chatId=31612345678&since=1785500000&count=50&fromMe=false
+    /// </summary>
+    [HttpGet("messages")]
+    public async Task<IActionResult> GetDurableMessages(
+        [FromQuery] string? chatId = null,
+        [FromQuery] long? since = null,
+        [FromQuery] int count = 50,
+        [FromQuery] bool? fromMe = null)
+    {
+        var (success, userId, error) = await ValidateApiToken();
+        if (!success)
+            return Unauthorized(new { error });
+
+        count = Math.Clamp(count, 1, 500);
+
+        // All sessions ever owned by this user — a reply that arrived on a since-replaced
+        // session must stay readable after a re-pair.
+        var sessionIds = await _context.WhatsAppSessions
+            .Where(s => s.UserId == userId!.Value)
+            .Select(s => s.SessionId)
+            .ToListAsync();
+
+        var query = _context.Messages.AsNoTracking()
+            .Where(m => sessionIds.Contains(m.SessionId));
+
+        if (!string.IsNullOrWhiteSpace(chatId))
+        {
+            var bare = chatId.Split('@')[0].Split(':')[0];
+            query = query.Where(m => m.ChatJid == chatId || m.ChatJid.StartsWith(bare + "@"));
+        }
+        if (since.HasValue)
+            query = query.Where(m => m.Timestamp > since.Value);
+        if (fromMe.HasValue)
+            query = query.Where(m => m.FromMe == fromMe.Value);
+
+        var messages = await query
+            .OrderByDescending(m => m.Timestamp).ThenByDescending(m => m.Id)
+            .Take(count)
+            .ToListAsync();
+        messages.Reverse();
+
+        return Ok(messages.Select(m => new
+        {
+            id = m.MessageId,
+            chatJid = m.ChatJid,
+            fromMe = m.FromMe,
+            sender = m.Sender,
+            body = m.Body,
+            type = m.Type,
+            mediaUrl = m.MediaUrl,
+            timestamp = m.Timestamp,
+            receivedAt = m.ReceivedAt,
+            isHistory = m.IsHistory
+        }));
+    }
+
+    /// <summary>
     /// Get all chats
     /// GET /api/wa/getChats
     /// </summary>

@@ -130,6 +130,28 @@ using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
     db.Database.EnsureCreated();
+
+    // EnsureCreated() no-ops when the database already exists, so tables added later
+    // (like the durable Messages store, task 869ecbkv7) must be self-healed explicitly.
+    db.Database.ExecuteSqlRaw("""
+        CREATE TABLE IF NOT EXISTS Messages (
+            Id INTEGER NOT NULL CONSTRAINT PK_Messages PRIMARY KEY AUTOINCREMENT,
+            SessionId TEXT NOT NULL,
+            ChatJid TEXT NOT NULL,
+            MessageId TEXT NOT NULL,
+            FromMe INTEGER NOT NULL,
+            Sender TEXT NOT NULL,
+            Body TEXT NOT NULL,
+            Type TEXT NOT NULL,
+            MediaUrl TEXT NULL,
+            Timestamp INTEGER NOT NULL,
+            ReceivedAt TEXT NOT NULL,
+            IsHistory INTEGER NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS IX_Messages_SessionId_MessageId ON Messages (SessionId, MessageId);
+        CREATE INDEX IF NOT EXISTS IX_Messages_ChatJid_Timestamp ON Messages (ChatJid, Timestamp);
+        CREATE INDEX IF NOT EXISTS IX_Messages_ReceivedAt ON Messages (ReceivedAt);
+        """);
 }
 
 // Restore WhatsApp sessions on startup — includes "disconnected" sessions that have saved credentials

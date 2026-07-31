@@ -224,6 +224,12 @@ public class WhatsAppBridgeService : IAsyncDisposable
             if (list.Count > MaxMessagesPerChat) list.RemoveAt(0);
         }
 
+        // The send path bypasses the StoreMessage funnel, so mirror the outgoing message into
+        // the durable Messages table here as well (task 869ecbkv7).
+        PersistMessageToDatabase(sessionId, sent.jid, sent.messageId, fromMe: true,
+            sender: "me", body: body, type: "text", mediaUrl: null,
+            timestamp: storedMessage.Timestamp, isHistory: false);
+
         return new { success = true, messageId = sent.messageId };
     }
 
@@ -704,6 +710,42 @@ public class WhatsAppBridgeService : IAsyncDisposable
 
         // Persist to disk (throttle for history: only persist in batch via caller)
         if (!isHistory) PersistMessages(sessionId);
+
+        // Durable copy in SQLite (task 869ecbkv7): the in-memory store is capped and starts
+        // empty after a restart or re-pair, so everything that decrypts is also appended to
+        // the Messages table. Fire-and-forget with a full guard — a slow or failing DB write
+        // must never block or crash the inbound pipeline.
+        PersistMessageToDatabase(sessionId, msg.RemoteJid, msg.Id, msg.FromMe,
+            msg.FromMe ? "me" : msg.From, msg.Text ?? "", msg.Type.ToString().ToLowerInvariant(),
+            msg.MediaUrl, msg.Timestamp, isHistory);
+    }
+
+    /// <summary>
+    /// Appends one message to the durable SQLite Messages table. INSERT OR IGNORE against the
+    /// unique (SessionId, MessageId) index makes replays and restarts idempotent. Never throws.
+    /// </summary>
+    private void PersistMessageToDatabase(string sessionId, string chatJid, string messageId,
+        bool fromMe, string sender, string body, string type, string? mediaUrl, long timestamp, bool isHistory)
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                using var scope = _scopeFactory.CreateScope();
+                var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+                var receivedAt = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss.fffffff");
+                await db.Database.ExecuteSqlInterpolatedAsync($@"
+                    INSERT OR IGNORE INTO Messages
+                        (SessionId, ChatJid, MessageId, FromMe, Sender, Body, Type, MediaUrl, Timestamp, ReceivedAt, IsHistory)
+                    VALUES
+                        ({sessionId}, {chatJid}, {messageId}, {(fromMe ? 1 : 0)}, {sender}, {body}, {type},
+                         {mediaUrl}, {timestamp}, {receivedAt}, {(isHistory ? 1 : 0)})");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Durable message persist failed for [{MessageId}] in {Chat} (message is still in the in-memory store)", messageId, chatJid);
+            }
+        });
     }
 
     /// <summary>
