@@ -43,6 +43,12 @@ export const whatsapp = {
     api.post(`/api/whatsapp/sessions/${sessionId}/send`, { To: to, Message: message }),
   getContacts: (sessionId: string) =>
     api.get(`/api/whatsapp/sessions/${sessionId}/contacts`),
+  getStoredChats: (sessionId: string) =>
+    api.get(`/api/whatsapp/sessions/${sessionId}/store/chats`),
+  getStoredMessages: (sessionId: string, chatJid: string, opts?: { since?: number; before?: number; count?: number }) =>
+    api.get(`/api/whatsapp/sessions/${sessionId}/store/messages`, {
+      params: { chatJid, ...opts },
+    }),
 };
 
 export default api;

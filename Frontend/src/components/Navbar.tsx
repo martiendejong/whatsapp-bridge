@@ -18,6 +18,9 @@ export default function Navbar() {
           <Link to="/whatsapp-sessions" style={{ color: 'white', textDecoration: 'none' }}>
             WhatsApp
           </Link>
+          <Link to="/messages" style={{ color: 'white', textDecoration: 'none' }}>
+            Berichten
+          </Link>
           <Link to="/account" style={{ color: 'white', textDecoration: 'none' }}>
             Account
           </Link>

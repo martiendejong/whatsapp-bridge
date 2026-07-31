@@ -6,6 +6,7 @@ import Dashboard from './pages/Dashboard';
 import ApiConnections from './pages/ApiConnections';
 import WhatsAppSessions from './pages/WhatsAppSessions';
 import AccountSettings from './pages/AccountSettings';
+import Messages from './pages/Messages';
 import Navbar from './components/Navbar';
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
@@ -62,6 +63,14 @@ function AppRoutes() {
           element={
             <PrivateRoute>
               <WhatsAppSessions />
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/messages"
+          element={
+            <PrivateRoute>
+              <Messages />
             </PrivateRoute>
           }
         />
