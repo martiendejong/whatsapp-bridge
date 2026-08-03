@@ -113,3 +113,22 @@ session cannot perform) before "multiple chats with recent history visible on /m
 survives restart" can be verified live — that verification step is explicitly called out
 as needing "patience for full device sync (hours)" per the 2026-07-06 lesson referenced in
 the task. Code changes are ready for review independent of that step.
+
+## 2026-08-03 — task 869edbxpx
+Done: PR #43 (own durable messages by UserId, self-heal + backfill, all read endpoints
+updated) was already deployed and live-verified when this session's dispatch fetched a
+0-comment task history — the local `master` checkout was 2 commits behind at search time,
+which hid #43 from every "existing PR" check. Independently re-implemented the same fix
+before discovering #43 mid-session, opened a duplicate PR (#44), then found #43 via the
+mandatory pre-report re-verification and reconciled: closed #44 (it also missed the
+`GetStoredMessageMedia` endpoint that #43 correctly covered — same stale-checkout gap),
+pushed one small addition to #43 (encoded the one-time 6-orphaned-row backfill as
+idempotent self-heal SQL instead of a manual command that only lived in a ClickUp comment),
+and merged #43 as 88e23e3.
+Verified: `dotnet build` clean; reproduced the incident in a throwaway SQLite DB and
+confirmed the old SessionId-only filter surfaces 2 messages while the new UserId filter
+surfaces all 8; #43's own CI failures (discover-tests, static-analysis) are pre-existing
+repo-wide misconfiguration (no test projects, no root solution file) unrelated to this diff.
+Left: nothing. Always `git fetch && git merge --ff-only origin/<base>` before trusting a
+grep/gh-pr-list search for "does a PR already exist" — a stale local checkout silently
+narrows every one of those searches.
