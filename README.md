@@ -268,6 +268,36 @@ whatsappbridge/
 
 ## Troubleshooting
 
+### "I sent a message but the conversation isn't showing under /messages"
+
+`/messages` (and the durable message store behind it) only ever contains chats that
+belong to **this bridge's own linked WhatsApp account** — the number you scanned the
+QR code with when you connected the session. It has no way to see:
+
+- **Messages sent from your personal phone's own WhatsApp app.** That's a completely
+  separate WhatsApp account/session; the bridge cannot read another account's chats,
+  even if both accounts happen to message the same contact. If you want a conversation
+  with a contact to show up under `/messages`, it must be sent *through this bridge*
+  (via `POST /api/wa/sendMessage`, the JWT `sessions/{id}/send` endpoint, or the
+  "Verstuur" button on the `/messages` page itself) — not from your own phone.
+- **Chat history that predates when the durable store was introduced.** `GET
+  /api/wa/getChats` reads live from the connected WhatsApp session and can list a chat
+  (e.g. an old conversation still cached on the phone) that has zero rows in the
+  durable `Messages` table, because that table is only ever populated by messages
+  sent/received *through the bridge* after the durable store went live. A chat visible
+  via `getChats` is not proof any message from it was ever persisted or sent by the
+  bridge.
+- **A brand-new contact with no prior bridge-sent/received message.** The `/messages`
+  page only lists chats that already have at least one row in the durable store —
+  there's currently no "start a new conversation" action in the UI, so the very first
+  message to a contact must go through the send API directly.
+
+If a message really was sent through the bridge's own send paths and still doesn't
+show up, that's a real bug — check that the underlying WhatsApp send call
+(`WhatsAppBridgeService.SendMessageAsync`) actually succeeded (a thrown
+`WhatsAppServiceException` short-circuits before the message is persisted) rather than
+assuming the persistence step itself failed.
+
 ### WhatsApp Service Won't Start
 
 Check the service logs:

@@ -10,3 +10,18 @@ warnings); ran the built DLL locally and confirmed `GET /api/version` returns
 Left: nothing for this task. The messy `/deploy` folder has many one-off troubleshooting
 scripts from past manual VPS deploys — `deploy-all.ps1` may not be the actual script last
 used to deploy to production; worth confirming with Martien which deploy path is live.
+
+## 2026-08-03 — task 869ecw8e4
+Done: investigated "messages sent to Frank never reached the bridge" — found zero POST
+requests to any WhatsApp send endpoint in jengo-agi's HttpClient logs across two full days
+spanning the report window, and zero rows for Frank's number in the durable `Messages`
+table (confirmed live via `getChats`/`getMessages` against the deployed bridge). The
+dashboard's `/messages` page also has no "start new conversation" affordance — a first
+message to a contact must go through the send API directly, and none did. Concluded the
+message was sent from Martien's own personal phone (a separate WhatsApp account the bridge
+structurally cannot see), not a code bug. Documented this in README.md's Troubleshooting
+section so the same confusion doesn't recur.
+Verified: not independently testable (no code path changed) — conclusion is based on a live
+read-back of the deployed bridge's `getChats`/`getMessages` API and jengo-agi's own request
+logs, not a build/test run.
+Left: nothing for this task.
