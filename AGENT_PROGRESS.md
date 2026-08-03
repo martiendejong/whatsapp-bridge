@@ -48,3 +48,16 @@ Left: end-to-end confirmation (a real text from Martien's phone landing in /mess
 the two stuck message ids ACE87B93.../AC75A7A7... draining from the offline queue) needs
 this deployed to 85.215.217.154 and a live test message — that's a human/deploy step, not
 something this session can trigger.
+
+## 2026-08-03 — task 869ecw8ed
+Done: watchdog (`tools/wa-watchdog/watchdog.ps1`) no longer alerts on 401 events from a
+dead/legacy session while the real session is connected, and its own health check now
+uses the long-lived `waToken` ApiConnection (X-Api-Token/X-Email) instead of the rotating
+frontend password. PR #39.
+Verified: PowerShell syntax parse clean; standalone logic test of the 401-gating decision
+(4 cases) all pass; live end-to-end run on production (85.215.217.154) — new auth succeeds,
+no regressions, no false alert.
+Left: deployed straight to production (this script has no CI/CD, it's a manual-copy
+scheduled task) alongside opening the PR — `bridgePassword` removed from prod config.json
+since it's no longer read. Nothing else remains; genuine session-death alerting could not
+be tested live (would require an actual WA logout) but the gating logic itself is unit-tested.
