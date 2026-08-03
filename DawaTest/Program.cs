@@ -21,6 +21,113 @@ using Dawa.Crypto;
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─── Stale-identity session-drop self-test (task 869ecw8dq) ───────────────────
+// Reproduces the device-0 @lid bug: a session established BEFORE a re-pair can never
+// decrypt again (MAC always fails, since the ratchet was derived against an identity
+// key that no longer exists). Verifies MAC FAIL on such a session drops it (so the next
+// delivery re-keys via pkmsg), while an ORDINARY MAC FAIL (same identity, e.g. a
+// duplicate/out-of-order redelivery) leaves the session intact.
+{
+    var tmpRoot = Path.Combine(Path.GetTempPath(), "dawa-selftest-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(tmpRoot);
+    try
+    {
+        const string jid = "31600000000@s.whatsapp.net";
+
+        static byte[] Fake32()
+        {
+            var b = new byte[32];
+            Random.Shared.NextBytes(b);
+            return b;
+        }
+
+        (Dawa.Signal.SignalKeyStore store, Dawa.Auth.AuthState auth) BuildSession(byte[]? establishIdentity)
+        {
+            var store = new Dawa.Signal.SignalKeyStore(Path.Combine(tmpRoot, Guid.NewGuid().ToString("N")));
+            var auth  = Dawa.Auth.AuthState.CreateNew();
+            var (ratchetPriv, ratchetPub) = Curve25519Helper.GenerateKeyPair();
+
+            var session = new Dawa.Signal.SignalSession
+            {
+                RemoteJid                   = jid,
+                RootKey                     = Fake32(),
+                SendChainKey                = Fake32(),
+                ReceiveChainKey             = Fake32(),
+                SendCounter                 = 0,
+                ReceiveCounter              = 0,
+                PrevSendCounter             = 0,
+                TheirCurrentRatchetPublic   = ratchetPub, // == inner msg's RatchetKey below -> ratchetMatched=true
+                OurRatchetPrivate           = ratchetPriv,
+                OurRatchetPublic            = ratchetPub,
+                TheirIdentityPublic         = Fake32(),
+                BaseKey                     = Fake32(),
+                PreKeyId                    = 0,
+                SignedPreKeyId              = 1,
+                PeerRegistrationId          = 0,
+                IsEstablished               = true,
+                OurIdentityPublicAtEstablish = establishIdentity ?? auth.SignedIdentityKeyPublic,
+            };
+            store.PutSession(jid, session);
+            return (store, auth);
+        }
+
+        static byte[] BuildWhisperFrame(byte[] ratchetKeyRaw)
+        {
+            var proto = new Dawa.Signal.WhisperMessageProto
+            {
+                RatchetKey      = new byte[] { 0x05 }.Concat(ratchetKeyRaw).ToArray(),
+                Counter         = 0,
+                PreviousCounter = 0,
+                Ciphertext      = Fake32(),
+            };
+            var protoBytes = proto.ToByteArray();
+            var frame = new byte[1 + protoBytes.Length + 8]; // trailing 8 bytes left as zero = guaranteed-wrong MAC
+            frame[0] = 0x33;
+            protoBytes.CopyTo(frame, 1);
+            return frame;
+        }
+
+        // Case 1: our identity changed since the session was established (stale post-re-pair
+        // session) — MAC FAIL must drop the session.
+        {
+            var (store, auth) = BuildSession(establishIdentity: Fake32()); // deliberately != auth's current identity
+            var frame = BuildWhisperFrame(store.GetSession(jid)!.TheirCurrentRatchetPublic);
+            Exception? caught = null;
+            try { store.DecryptMessage(jid, "msg", frame, auth); }
+            catch (Exception ex) { caught = ex; }
+            var isExpectedException = caught is InvalidOperationException;
+            var sessionGone = !store.HasSession(jid);
+            var pass = isExpectedException && sessionGone;
+            Console.WriteLine($"[Session self-test] Stale-identity MAC FAIL drops session: {(pass ? "PASS ✓" : "FAIL ✗")} (exType={caught?.GetType().Name}, sessionGone={sessionGone})");
+        }
+
+        // Case 2: same identity, ordinary MAC failure — session must be left intact so a
+        // later correctly-keyed message can still use it.
+        {
+            var (store, auth) = BuildSession(establishIdentity: null); // establishIdentity == current auth identity
+            var frame = BuildWhisperFrame(store.GetSession(jid)!.TheirCurrentRatchetPublic);
+            Exception? caught = null;
+            try { store.DecryptMessage(jid, "msg", frame, auth); }
+            catch (Exception ex) { caught = ex; }
+            var isExpectedException = caught is System.Security.Cryptography.CryptographicException;
+            var sessionKept = store.HasSession(jid);
+            var pass = isExpectedException && sessionKept;
+            Console.WriteLine($"[Session self-test] Ordinary MAC FAIL keeps session: {(pass ? "PASS ✓" : "FAIL ✗")} (exType={caught?.GetType().Name}, sessionKept={sessionKept})");
+        }
+    }
+    finally
+    {
+        try { Directory.Delete(tmpRoot, true); } catch { /* best effort cleanup */ }
+    }
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
+if (args.Contains("--selftest"))
+{
+    Console.WriteLine("Self-tests complete, exiting (--selftest).");
+    return;
+}
+
 // --fresh flag wipes the saved session so you always get a fresh QR
 var sessionDir = Path.Combine(AppContext.BaseDirectory, "dawa-test-session");
 if (args.Contains("--fresh") && Directory.Exists(sessionDir))

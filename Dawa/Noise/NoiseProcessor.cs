@@ -835,7 +835,7 @@ public sealed class NoiseProcessor : IAsyncDisposable
                     {
                         _logger.LogInformation("Participants path: received HISTORY_SYNC_NOTIFICATION from {Jid}", senderJid);
                         _ = Task.Run(() => ProcessHistorySyncAsync(waMsg.ProtocolMsg.HistorySyncNotification, CancellationToken.None));
-                        _ = SendAckAsync(id, from, timestamp);
+                        _ = SendAckAsync(id, from, timestamp, participant);
                         continue;
                     }
 
@@ -844,7 +844,7 @@ public sealed class NoiseProcessor : IAsyncDisposable
                     {
                         _logger.LogInformation("Participants path: received PeerDataOperationResponseMessage from {Jid}", senderJid);
                         _ = Task.Run(() => ProcessPeerDataResponseAsync(waMsg.PeerDataResponse, CancellationToken.None));
-                        _ = SendAckAsync(id, from, timestamp);
+                        _ = SendAckAsync(id, from, timestamp, participant);
                         continue;
                     }
 
@@ -853,7 +853,7 @@ public sealed class NoiseProcessor : IAsyncDisposable
                     {
                         _logger.LogDebug("Participants path: protocol message type={PT} from {Jid} — skipping",
                             waMsg.ProtocolMsg.Type, senderJid);
-                        _ = SendAckAsync(id, from, timestamp);
+                        _ = SendAckAsync(id, from, timestamp, participant);
                         continue;
                     }
 
@@ -865,7 +865,7 @@ public sealed class NoiseProcessor : IAsyncDisposable
                     if (msgType == Messages.MessageType.Unknown)
                     {
                         _logger.LogDebug("Participants path: unknown message type from {Jid} — ACKing and skipping", senderJid);
-                        _ = SendAckAsync(id, from, timestamp);
+                        _ = SendAckAsync(id, from, timestamp, participant);
                         continue;
                     }
 
@@ -901,12 +901,12 @@ public sealed class NoiseProcessor : IAsyncDisposable
                         QuotedType       = quotedType,
                     });
 
-                    _ = SendAckAsync(id, from, timestamp);
+                    _ = SendAckAsync(id, from, timestamp, participant);
                 }
                 catch (Exception ex)
                 {
                     _logger.LogError(ex, "Participants path: failed to decrypt encType={EncType} from {Jid}", encType, from);
-                    _ = HandleUndecryptableAsync(id, from, timestamp);
+                    _ = HandleUndecryptableAsync(id, from, timestamp, participant);
                 }
             }
             return;
@@ -928,7 +928,7 @@ public sealed class NoiseProcessor : IAsyncDisposable
                 catch (Exception decEx)
                 {
                     _logger.LogWarning(decEx, "Failed to decrypt direct enc message from {Jid}", from);
-                    _ = HandleUndecryptableAsync(id, from, timestamp);
+                    _ = HandleUndecryptableAsync(id, from, timestamp, participant);
                     return;
                 }
 
@@ -948,7 +948,7 @@ public sealed class NoiseProcessor : IAsyncDisposable
                     // Peer/device messages may not be standard WAMessage format — log at Warning so we can diagnose
                     _logger.LogWarning(parseEx, "Could not parse decrypted message as WAMessage from {Jid} ({Len} bytes, first={First})",
                         from, protoBytes2.Length, Convert.ToHexString(protoBytes2[..Math.Min(16, protoBytes2.Length)]));
-                    _ = SendAckAsync(id, from, timestamp);
+                    _ = SendAckAsync(id, from, timestamp, participant);
                     return;
                 }
 
@@ -961,7 +961,7 @@ public sealed class NoiseProcessor : IAsyncDisposable
                     && waMsg.ProtocolMsg.HistorySyncNotification != null)
                 {
                     _ = Task.Run(() => ProcessHistorySyncAsync(waMsg.ProtocolMsg.HistorySyncNotification, CancellationToken.None));
-                    _ = SendAckAsync(id, from, timestamp);
+                    _ = SendAckAsync(id, from, timestamp, participant);
                     return;
                 }
 
@@ -970,7 +970,7 @@ public sealed class NoiseProcessor : IAsyncDisposable
                 {
                     _logger.LogInformation("Direct enc path: received PeerDataOperationResponseMessage from {Jid}", from);
                     _ = Task.Run(() => ProcessPeerDataResponseAsync(waMsg.PeerDataResponse, CancellationToken.None));
-                    _ = SendAckAsync(id, from, timestamp);
+                    _ = SendAckAsync(id, from, timestamp, participant);
                     return;
                 }
 
@@ -979,7 +979,7 @@ public sealed class NoiseProcessor : IAsyncDisposable
                 {
                     _logger.LogDebug("Direct enc path: protocol message type={PT} from {Jid} — skipping",
                         waMsg.ProtocolMsg.Type, from);
-                    _ = SendAckAsync(id, from, timestamp);
+                    _ = SendAckAsync(id, from, timestamp, participant);
                     return;
                 }
 
@@ -1024,7 +1024,7 @@ public sealed class NoiseProcessor : IAsyncDisposable
                 {
                     _logger.LogDebug("Direct enc path: unknown message type from {Jid} — ACKing", from);
                 }
-                _ = SendAckAsync(id, from, timestamp);
+                _ = SendAckAsync(id, from, timestamp, participant);
             }
             catch (Exception ex)
             {
@@ -1163,18 +1163,27 @@ public sealed class NoiseProcessor : IAsyncDisposable
         _logger.LogInformation("Keepalive loop ended.");
     }
 
-    private async Task SendAckAsync(string msgId, string to, long timestamp)
+    // ACKs a <message> stanza. WhatsApp's server identifies WHICH stanza is being
+    // acknowledged via the "class" attribute — it must be the ORIGINAL node's tag name
+    // ("message" here), NOT a "type" attribute (matches the real @whiskeysockets/baileys
+    // sendMessageAck: `attrs: { id, to, class: tag }`, type only added for non-"message"
+    // tags). The previous version sent `type="message"` with no `class` at all, which the
+    // server never recognized as a valid ack — every message, decryptable or not, kept
+    // being redelivered from the offline queue with a climbing `offline` counter forever.
+    private async Task SendAckAsync(string msgId, string to, long timestamp, string? participant = null)
     {
         try
         {
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-            var ack = new BinaryNode("ack", new Dictionary<string, string>
+            var attrs = new Dictionary<string, string>
             {
-                ["id"]   = msgId,
-                ["to"]   = to,
-                ["type"] = "message",
-                ["t"]    = timestamp.ToString(),
-            });
+                ["id"]    = msgId,
+                ["to"]    = to,
+                ["class"] = "message",
+            };
+            if (!string.IsNullOrEmpty(participant))
+                attrs["participant"] = participant;
+            var ack = new BinaryNode("ack", attrs);
             await SendNodeAsync(ack, cts.Token);
         }
         catch (Exception ex)
@@ -1197,14 +1206,31 @@ public sealed class NoiseProcessor : IAsyncDisposable
     /// participant's phone, so nothing important is lost. This keeps the bridge current — the
     /// behaviour a healthy client (e.g. Baileys) gets for free by never accumulating a backlog.
     /// </summary>
-    private async Task HandleUndecryptableAsync(string id, string from, long timestamp)
+    // Caps how many times we log a full INFORMATION line + re-ack for the SAME backlog
+    // message id. Before the ack-format fix above, WhatsApp kept redelivering an acked
+    // backlog message indefinitely (offline counter climbing 10, 11, 12... for days) because
+    // the malformed ack was never recognized — every redelivery re-triggered this branch and
+    // wrote another multi-line entry to signal-debug.log. The ack fix addresses the root
+    // cause, but this cap is a backstop: after MaxBacklogAckLogs redeliveries of the same
+    // still-undelivered id we keep acking (cheap, harmless) but drop to a single debug line,
+    // so one broken/undead session can no longer spam the log pipeline for days on end.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _backlogAckAttempts = new();
+    private const int MaxBacklogAckLogs = 5;
+
+    private async Task HandleUndecryptableAsync(string id, string from, long timestamp, string? participant = null)
     {
         const long BacklogThresholdSeconds = 2 * 3600; // messages older than 2h = offline backlog
         var ageSeconds = DateTimeOffset.UtcNow.ToUnixTimeSeconds() - timestamp;
         if (timestamp > 0 && ageSeconds > BacklogThresholdSeconds)
         {
-            _logger.LogInformation("Undecryptable BACKLOG message {Id} from {From} (age {Hours}h) — ACK to drain queue, no retry.", id, from, ageSeconds / 3600);
-            await SendAckAsync(id, from, timestamp);
+            var attempt = _backlogAckAttempts.AddOrUpdate(id, 1, (_, n) => n + 1);
+            if (attempt <= MaxBacklogAckLogs)
+                _logger.LogInformation("Undecryptable BACKLOG message {Id} from {From} (age {Hours}h) — ACK to drain queue, no retry.", id, from, ageSeconds / 3600);
+            else if (attempt == MaxBacklogAckLogs + 1)
+                _logger.LogWarning("Undecryptable BACKLOG message {Id} from {From} still being redelivered after {N} acks — suppressing further per-attempt logs (still acking).", id, from, MaxBacklogAckLogs);
+            else
+                _logger.LogDebug("Undecryptable BACKLOG message {Id} redelivered again (attempt {Attempt}) — ACK to drain queue.", id, attempt);
+            await SendAckAsync(id, from, timestamp, participant);
         }
         else
         {

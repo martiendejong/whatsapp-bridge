@@ -25,3 +25,26 @@ Verified: not independently testable (no code path changed) — conclusion is ba
 read-back of the deployed bridge's `getChats`/`getMessages` API and jengo-agi's own request
 logs, not a build/test run.
 Left: nothing for this task.
+
+## 2026-08-03 — task 869ecw8dq
+Done: fixed the malformed `<ack>` stanza in `SendAckAsync` (was missing the `class`
+attribute WhatsApp uses to identify which stanza is being acked — confirmed against the
+real `@whiskeysockets/baileys` `sendMessageAck` source; this is why WhatsApp never stopped
+redelivering ANY message, decryptable or not — confirmed live: even the successfully
+decrypted `:90@lid` image kept reappearing with a climbing `offline` counter). Added
+identity-mismatch detection in `DecryptWhisperMessage`: a session now stores the identity
+key it was established under, and a MAC FAIL is checked against our CURRENT identity — if
+they differ (a re-pair happened since), the session is dropped so the next delivery falls
+through to a retry receipt instead of failing forever. Also capped the per-message backlog
+ACK log noise (5 full log lines, then debug-only) so one broken session can't keep
+inflating the 188MB signal-debug.log for days.
+Verified: `dotnet build` clean on Dawa/API/DawaTest (0 errors/warnings beyond pre-existing
+XML-doc warnings). Added 2 new self-tests to `DawaTest/Program.cs` (run via
+`dotnet DawaTest.dll --selftest`): stale-identity MAC FAIL correctly drops the session
+(InvalidOperationException, session gone); ordinary same-identity MAC FAIL correctly
+leaves the session intact (CryptographicException, session kept) — proves the fix doesn't
+over-drop on harmless/transient failures. 4/4 self-tests pass.
+Left: end-to-end confirmation (a real text from Martien's phone landing in /messages, and
+the two stuck message ids ACE87B93.../AC75A7A7... draining from the offline queue) needs
+this deployed to 85.215.217.154 and a live test message — that's a human/deploy step, not
+something this session can trigger.
