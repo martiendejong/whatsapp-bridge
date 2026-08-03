@@ -49,6 +49,11 @@ export const whatsapp = {
     api.get(`/api/whatsapp/sessions/${sessionId}/store/messages`, {
       params: { chatJid, ...opts },
     }),
+  getStoredMessageMedia: (sessionId: string, chatJid: string, messageId: string) =>
+    api.get(`/api/whatsapp/sessions/${sessionId}/store/messages/media`, {
+      params: { chatJid, messageId },
+      responseType: 'blob',
+    }),
 };
 
 export default api;

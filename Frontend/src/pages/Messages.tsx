@@ -9,6 +9,7 @@ interface StoredChat {
   messageCount: number;
   lastTimestamp: number;
   lastBody: string | null;
+  lastType: string | null;
   lastFromMe: boolean;
 }
 
@@ -20,6 +21,7 @@ interface StoredMessage {
   body: string;
   type: string;
   mediaUrl: string | null;
+  mediaAvailable: boolean;
   timestamp: number;
   isHistory: boolean;
 }
@@ -32,6 +34,19 @@ function formatTime(unixSeconds: number): string {
   return sameDay ? time : `${d.toLocaleDateString('nl-NL', { day: '2-digit', month: '2-digit' })} ${time}`;
 }
 
+// Dutch placeholder shown wherever a media message has no (or no useful) body text.
+function mediaLabel(type: string | null): string {
+  switch (type) {
+    case 'image': return '[foto]';
+    case 'video': return '[video]';
+    case 'audio':
+    case 'ptt': return '[audio]';
+    case 'document': return '[document]';
+    case 'sticker': return '[sticker]';
+    default: return type ? `[${type}]` : '[media]';
+  }
+}
+
 export default function Messages() {
   const [sessions, setSessions] = useState<WhatsAppSession[]>([]);
   const [sessionId, setSessionId] = useState<string>('');
@@ -41,6 +56,7 @@ export default function Messages() {
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
+  const [downloadingId, setDownloadingId] = useState('');
   const threadRef = useRef<HTMLDivElement>(null);
   const selectedChatRef = useRef(selectedChat);
   selectedChatRef.current = selectedChat;
@@ -111,6 +127,20 @@ export default function Messages() {
     }
   };
 
+  const openMedia = async (m: StoredMessage) => {
+    if (!sessionId || downloadingId) return;
+    setDownloadingId(m.id);
+    try {
+      const res = await whatsapp.getStoredMessageMedia(sessionId, m.chatJid, m.id);
+      const blobUrl = URL.createObjectURL(res.data);
+      window.open(blobUrl, '_blank');
+    } catch {
+      setError('Media kon niet worden gedownload');
+    } finally {
+      setDownloadingId('');
+    }
+  };
+
   const activeChat = chats.find((c) => c.chatJid === selectedChat);
 
   return (
@@ -159,7 +189,8 @@ export default function Messages() {
                 <span style={{ color: '#888', fontSize: 12, flexShrink: 0 }}>{formatTime(c.lastTimestamp)}</span>
               </div>
               <div style={{ color: '#666', fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {c.lastFromMe ? 'Jij: ' : ''}{c.lastBody || `(${c.messageCount} berichten)`}
+                {c.lastFromMe ? 'Jij: ' : ''}
+                {c.lastBody || (c.lastType && c.lastType !== 'text' ? mediaLabel(c.lastType) : `(${c.messageCount} berichten)`)}
               </div>
             </div>
           ))}
@@ -186,9 +217,28 @@ export default function Messages() {
                       boxShadow: '0 1px 1px rgba(0,0,0,0.1)',
                       whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 14,
                     }}>
-                      {m.body || (m.mediaUrl ? `[${m.type}]` : '')}
+                      {m.body}
                       {m.mediaUrl && (
-                        <div><a href={m.mediaUrl} target="_blank" rel="noreferrer">media</a></div>
+                        <div style={{ marginTop: m.body ? 6 : 0 }}>
+                          {m.mediaAvailable ? (
+                            <button
+                              type="button"
+                              onClick={() => openMedia(m)}
+                              disabled={downloadingId === m.id}
+                              style={{
+                                border: '1px solid #ccc', borderRadius: 6, padding: '4px 10px',
+                                background: '#f5f5f5', cursor: downloadingId === m.id ? 'default' : 'pointer',
+                                fontSize: 13,
+                              }}
+                            >
+                              {downloadingId === m.id ? '...' : mediaLabel(m.type)}
+                            </button>
+                          ) : (
+                            <span style={{ color: '#8a8a8a', fontStyle: 'italic', fontSize: 13 }}>
+                              {mediaLabel(m.type)} · media niet beschikbaar
+                            </span>
+                          )}
+                        </div>
                       )}
                       <div style={{ fontSize: 11, color: '#8a8a8a', textAlign: 'right', marginTop: 2 }}>
                         {m.isHistory ? 'hist · ' : ''}{formatTime(m.timestamp)}

@@ -144,6 +144,8 @@ using (var scope = app.Services.CreateScope())
             Body TEXT NOT NULL,
             Type TEXT NOT NULL,
             MediaUrl TEXT NULL,
+            MediaKey TEXT NULL,
+            MimeType TEXT NULL,
             Timestamp INTEGER NOT NULL,
             ReceivedAt TEXT NOT NULL,
             IsHistory INTEGER NOT NULL
@@ -152,6 +154,26 @@ using (var scope = app.Services.CreateScope())
         CREATE INDEX IF NOT EXISTS IX_Messages_ChatJid_Timestamp ON Messages (ChatJid, Timestamp);
         CREATE INDEX IF NOT EXISTS IX_Messages_ReceivedAt ON Messages (ReceivedAt);
         """);
+
+    // Columns added after the table already existed elsewhere (task 869ecw8du: MediaKey +
+    // MimeType, needed to download-and-decrypt media via the bridge instead of dead-linking
+    // to the encrypted WhatsApp CDN URL). SQLite has no "ADD COLUMN IF NOT EXISTS", so guard
+    // each with a duplicate-column catch instead.
+    foreach (var alterSql in new[]
+             {
+                 "ALTER TABLE Messages ADD COLUMN MediaKey TEXT NULL",
+                 "ALTER TABLE Messages ADD COLUMN MimeType TEXT NULL",
+             })
+    {
+        try
+        {
+            db.Database.ExecuteSqlRaw(alterSql);
+        }
+        catch (Exception ex) when (ex.Message.Contains("duplicate column name", StringComparison.OrdinalIgnoreCase))
+        {
+            // Column already present from a prior startup or the CREATE TABLE above.
+        }
+    }
 }
 
 // Restore WhatsApp sessions on startup — includes "disconnected" sessions that have saved credentials

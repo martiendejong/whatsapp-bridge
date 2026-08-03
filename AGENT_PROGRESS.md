@@ -11,6 +11,28 @@ Left: nothing for this task. The messy `/deploy` folder has many one-off trouble
 scripts from past manual VPS deploys — `deploy-all.ps1` may not be the actual script last
 used to deploy to production; worth confirming with Martien which deploy path is live.
 
+## 2026-08-03 — task 869ecw8du
+Done: chat list now shows `[foto]`/`[audio]`/etc. instead of a blank line when a media
+message has no body (store/chats gained `lastType`). Thread renders a media chip instead
+of the dead encrypted mmg.whatsapp.net link — clicking it calls a new
+`GET store/messages/media` endpoint that decrypts the CDN blob server-side via Dawa's
+existing `DownloadMediaAsync`. MediaKey/MimeType are now captured at ingest and persisted
+(self-healing `ALTER TABLE ADD COLUMN`, PR #16's already-merged CDN work). Rows from
+before this change have no key, so they render a disabled "media niet beschikbaar" label
+instead of a button (`mediaAvailable: false`). Text-only rendering untouched.
+Verified: backend `dotnet build` clean (0 warnings/errors); frontend `tsc --noEmit` +
+`npm run build` clean. Ran the app against a simulated pre-existing DB (old Messages
+schema, no MediaKey/MimeType) and confirmed the self-heal ALTER TABLEs applied without
+error and the legacy row survived untouched. Ran the app against a fresh DB, registered
+a user, seeded one text + one legacy media (no key) + one new media (with key) message,
+and hit the live endpoints: `store/chats` returned the correct `lastType` per chat,
+`store/messages` returned `mediaAvailable: false` for the legacy row and `true` for the
+new one, and `store/messages/media` returned 404 for the unavailable row, a graceful 502
+(not a crash) for the new row's unreachable fake CDN URL, and 404 for an unknown message.
+Left: no browser/Playwright tool was available in this session, so the actual chip
+rendering in the page was not visually confirmed — only the API contract it renders
+from, plus a clean typecheck/build.
+
 ## 2026-08-03 — task 869ecw8e4
 Done: investigated "messages sent to Frank never reached the bridge" — found zero POST
 requests to any WhatsApp send endpoint in jengo-agi's HttpClient logs across two full days

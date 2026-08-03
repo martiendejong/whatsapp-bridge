@@ -212,7 +212,7 @@ public class WhatsAppController : ControllerBase
 
         // Last-message preview per chat: chat counts are small, so per-chat top-1 queries keep
         // the main GroupBy translatable by EF's SQLite provider.
-        var previews = new Dictionary<string, (string Body, bool FromMe)>();
+        var previews = new Dictionary<string, (string Body, bool FromMe, string Type)>();
         foreach (var chat in chats)
         {
             var last = await _context.Messages.AsNoTracking()
@@ -220,7 +220,7 @@ public class WhatsAppController : ControllerBase
                 .OrderByDescending(m => m.Timestamp).ThenByDescending(m => m.Id)
                 .FirstOrDefaultAsync();
             if (last != null)
-                previews[chat.ChatJid] = (last.Body, last.FromMe);
+                previews[chat.ChatJid] = (last.Body, last.FromMe, last.Type);
         }
 
         var names = new Dictionary<string, string>();
@@ -248,6 +248,7 @@ public class WhatsAppController : ControllerBase
             messageCount = c.MessageCount,
             lastTimestamp = c.LastTimestamp,
             lastBody = previews.TryGetValue(c.ChatJid, out var p) ? p.Body : null,
+            lastType = previews.TryGetValue(c.ChatJid, out var p3) ? p3.Type : null,
             lastFromMe = previews.TryGetValue(c.ChatJid, out var p2) && p2.FromMe
         }));
     }
@@ -296,10 +297,47 @@ public class WhatsAppController : ControllerBase
             body = m.Body,
             type = m.Type,
             mediaUrl = m.MediaUrl,
+            // Media decryption needs MediaKey alongside MediaUrl (task 869ecw8du); rows
+            // persisted before that column existed have a URL the bridge can never open.
+            // The raw key itself is never sent to the frontend — only this readiness flag.
+            mediaAvailable = !string.IsNullOrEmpty(m.MediaUrl) && !string.IsNullOrEmpty(m.MediaKey),
             timestamp = m.Timestamp,
             receivedAt = m.ReceivedAt,
             isHistory = m.IsHistory
         }));
+    }
+
+    /// <summary>
+    /// Downloads and decrypts a stored message's media via the bridge (task 869ecw8du) —
+    /// WhatsApp CDN links are encrypted and cannot be opened directly by the browser.
+    /// </summary>
+    [HttpGet("sessions/{sessionId}/store/messages/media")]
+    public async Task<IActionResult> GetStoredMessageMedia(string sessionId, [FromQuery] string chatJid, [FromQuery] string messageId)
+    {
+        var userId = GetUserId();
+        var session = await _context.WhatsAppSessions
+            .FirstOrDefaultAsync(s => s.SessionId == sessionId && s.UserId == userId);
+        if (session == null) return NotFound(new { error = "Session not found" });
+        if (string.IsNullOrWhiteSpace(chatJid) || string.IsNullOrWhiteSpace(messageId))
+            return BadRequest(new { error = "chatJid and messageId are required" });
+
+        var sessionIds = await _context.WhatsAppSessions
+            .Where(s => s.UserId == userId)
+            .Select(s => s.SessionId)
+            .ToListAsync();
+
+        var message = await _context.Messages.AsNoTracking()
+            .FirstOrDefaultAsync(m => sessionIds.Contains(m.SessionId) && m.ChatJid == chatJid && m.MessageId == messageId);
+        if (message == null) return NotFound(new { error = "Message not found" });
+        if (string.IsNullOrEmpty(message.MediaUrl) || string.IsNullOrEmpty(message.MediaKey))
+            return NotFound(new { error = "Media niet beschikbaar voor dit bericht" });
+
+        var bytes = await _whatsappService.DownloadMediaAsync(
+            message.SessionId, message.MediaUrl, message.MediaKey, message.MimeType ?? "application/octet-stream");
+        if (bytes == null || bytes.Length == 0)
+            return StatusCode(502, new { error = "Media download mislukt" });
+
+        return File(bytes, message.MimeType ?? "application/octet-stream");
     }
 
     [HttpGet("sessions/{sessionId}/profile-pic/{jid}")]

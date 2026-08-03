@@ -32,6 +32,15 @@ public class StoredMessage
 
     public string? MediaUrl { get; set; }
 
+    /// <summary>
+    /// Base64 media decryption key captured at ingest time (task 869ecw8du). WhatsApp CDN
+    /// links are encrypted; without this key alongside MediaUrl the media can never be
+    /// downloaded, even by the bridge. Null for rows persisted before this column existed.
+    /// </summary>
+    public string? MediaKey { get; set; }
+
+    public string? MimeType { get; set; }
+
     /// <summary>Original WhatsApp timestamp (unix seconds).</summary>
     public long Timestamp { get; set; }
 
