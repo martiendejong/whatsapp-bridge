@@ -43,6 +43,7 @@ public class AppDbContext : DbContext
             entity.HasIndex(e => new { e.SessionId, e.MessageId }).IsUnique();
             entity.HasIndex(e => new { e.ChatJid, e.Timestamp });
             entity.HasIndex(e => e.ReceivedAt);
+            entity.HasIndex(e => e.UserId);
             entity.Property(e => e.SessionId).HasMaxLength(100);
             entity.Property(e => e.ChatJid).HasMaxLength(200);
             entity.Property(e => e.MessageId).HasMaxLength(200);

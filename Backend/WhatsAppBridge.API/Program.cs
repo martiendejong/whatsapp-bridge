@@ -155,6 +155,31 @@ using (var scope = app.Services.CreateScope())
         CREATE INDEX IF NOT EXISTS IX_Messages_ReceivedAt ON Messages (ReceivedAt);
         """);
 
+    // Self-heal: UserId on Messages (ownership stable across QR re-pairs - a re-pair replaces
+    // the session row/GUID, which orphaned pre-re-pair messages for session-scoped queries).
+    // Backfill from the current session rows where possible; remaining orphans keep NULL and
+    // are still returned via the legacy SessionId fallback in the read endpoints.
+    var hasUserId = db.Database.SqlQueryRaw<int>(
+        "SELECT COUNT(*) AS Value FROM pragma_table_info('Messages') WHERE name = 'UserId'").AsEnumerable().First();
+    if (hasUserId == 0)
+    {
+        db.Database.ExecuteSqlRaw("ALTER TABLE Messages ADD COLUMN UserId INTEGER NULL;");
+        db.Database.ExecuteSqlRaw("CREATE INDEX IF NOT EXISTS IX_Messages_UserId ON Messages (UserId);");
+    }
+    db.Database.ExecuteSqlRaw(
+        "UPDATE Messages SET UserId = (SELECT w.UserId FROM WhatsAppSessions w WHERE w.SessionId = Messages.SessionId) " +
+        "WHERE UserId IS NULL AND EXISTS (SELECT 1 FROM WhatsAppSessions w WHERE w.SessionId = Messages.SessionId);");
+
+    // One-time backfill for the 6 messages orphaned by the 2026-08-03 re-pair incident that
+    // motivated this fix: WhatsAppSessions row 24 (SessionId starting 768fd204) was replaced by
+    // row 27 (4ab31111) before UserId existed, so no live session remains for the generic
+    // backfill above to resolve their owner from. This was already applied once as a manual
+    // datafix during the initial deploy; encoding it here makes it reproducible (e.g. after a
+    // restore from an older backup) instead of living only in a one-off SQL command. Scoped to
+    // UserId IS NULL, so it is a no-op everywhere else and after it has run once here.
+    db.Database.ExecuteSqlRaw(
+        "UPDATE Messages SET UserId = 4 WHERE UserId IS NULL AND SessionId LIKE '768fd204%';");
+
     // Columns added after the table already existed elsewhere (task 869ecw8du: MediaKey +
     // MimeType, needed to download-and-decrypt media via the bridge instead of dead-linking
     // to the encrypted WhatsApp CDN URL). SQLite has no "ADD COLUMN IF NOT EXISTS", so guard

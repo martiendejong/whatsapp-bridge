@@ -199,7 +199,7 @@ public class WhatsAppController : ControllerBase
             .ToListAsync();
 
         var chats = await _context.Messages.AsNoTracking()
-            .Where(m => sessionIds.Contains(m.SessionId))
+            .Where(m => (m.UserId == userId || (m.UserId == null && sessionIds.Contains(m.SessionId))))
             .GroupBy(m => m.ChatJid)
             .Select(g => new
             {
@@ -216,7 +216,7 @@ public class WhatsAppController : ControllerBase
         foreach (var chat in chats)
         {
             var last = await _context.Messages.AsNoTracking()
-                .Where(m => sessionIds.Contains(m.SessionId) && m.ChatJid == chat.ChatJid)
+                .Where(m => (m.UserId == userId || (m.UserId == null && sessionIds.Contains(m.SessionId))) && m.ChatJid == chat.ChatJid)
                 .OrderByDescending(m => m.Timestamp).ThenByDescending(m => m.Id)
                 .FirstOrDefaultAsync();
             if (last != null)
@@ -276,7 +276,7 @@ public class WhatsAppController : ControllerBase
 
         count = Math.Clamp(count, 1, 500);
         var query = _context.Messages.AsNoTracking()
-            .Where(m => sessionIds.Contains(m.SessionId) && m.ChatJid == chatJid);
+            .Where(m => (m.UserId == userId || (m.UserId == null && sessionIds.Contains(m.SessionId))) && m.ChatJid == chatJid);
         if (before.HasValue)
             query = query.Where(m => m.Timestamp < before.Value);
         if (since.HasValue)
@@ -327,7 +327,7 @@ public class WhatsAppController : ControllerBase
             .ToListAsync();
 
         var message = await _context.Messages.AsNoTracking()
-            .FirstOrDefaultAsync(m => sessionIds.Contains(m.SessionId) && m.ChatJid == chatJid && m.MessageId == messageId);
+            .FirstOrDefaultAsync(m => (m.UserId == userId || (m.UserId == null && sessionIds.Contains(m.SessionId))) && m.ChatJid == chatJid && m.MessageId == messageId);
         if (message == null) return NotFound(new { error = "Message not found" });
         if (string.IsNullOrEmpty(message.MediaUrl) || string.IsNullOrEmpty(message.MediaKey))
             return NotFound(new { error = "Media niet beschikbaar voor dit bericht" });

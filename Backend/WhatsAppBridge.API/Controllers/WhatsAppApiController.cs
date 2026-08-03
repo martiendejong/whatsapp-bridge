@@ -319,7 +319,7 @@ public class WhatsAppApiController : ControllerBase
             .ToListAsync();
 
         var query = _context.Messages.AsNoTracking()
-            .Where(m => sessionIds.Contains(m.SessionId));
+            .Where(m => (m.UserId == userId!.Value || (m.UserId == null && sessionIds.Contains(m.SessionId))));
 
         if (!string.IsNullOrWhiteSpace(chatId))
         {

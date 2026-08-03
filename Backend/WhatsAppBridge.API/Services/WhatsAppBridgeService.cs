@@ -794,12 +794,20 @@ public class WhatsAppBridgeService : IAsyncDisposable
             {
                 using var scope = _scopeFactory.CreateScope();
                 var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+                // Own the row by USER, not just by session GUID: a QR re-pair REPLACES the
+                // WhatsAppSessions row (new SessionId), which orphaned every pre-re-pair
+                // message for session-scoped queries (2026-08-03). UserId is stable across
+                // re-pairs, so readers filter on it instead.
+                var userId = await db.WhatsAppSessions
+                    .Where(s => s.SessionId == sessionId)
+                    .Select(s => (int?)s.UserId)
+                    .FirstOrDefaultAsync();
                 var receivedAt = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss.fffffff");
                 await db.Database.ExecuteSqlInterpolatedAsync($@"
                     INSERT OR IGNORE INTO Messages
-                        (SessionId, ChatJid, MessageId, FromMe, Sender, Body, Type, MediaUrl, MediaKey, MimeType, Timestamp, ReceivedAt, IsHistory)
+                        (SessionId, UserId, ChatJid, MessageId, FromMe, Sender, Body, Type, MediaUrl, MediaKey, MimeType, Timestamp, ReceivedAt, IsHistory)
                     VALUES
-                        ({sessionId}, {chatJid}, {messageId}, {(fromMe ? 1 : 0)}, {sender}, {body}, {type},
+                        ({sessionId}, {userId}, {chatJid}, {messageId}, {(fromMe ? 1 : 0)}, {sender}, {body}, {type},
                          {mediaUrl}, {mediaKey}, {mimeType}, {timestamp}, {receivedAt}, {(isHistory ? 1 : 0)})");
             }
             catch (Exception ex)

@@ -14,6 +14,10 @@ public class StoredMessage
     /// <summary>Bridge session GUID the message arrived on.</summary>
     public string SessionId { get; set; } = string.Empty;
 
+    /// <summary>Owning bridge user - stable across QR re-pairs (a re-pair replaces the
+    /// session row and its GUID, so SessionId alone cannot be used for ownership).</summary>
+    public int? UserId { get; set; }
+
     /// <summary>Conversation JID as Dawa resolved it (e.g. 31633984381@s.whatsapp.net).</summary>
     public string ChatJid { get; set; } = string.Empty;
 
