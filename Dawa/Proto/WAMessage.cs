@@ -1100,11 +1100,12 @@ public sealed class PeerDataOperationRequestMessage
 {
     public const int TYPE_HISTORY_SYNC_ON_DEMAND = 7;  // PeerDataOperationRequestType enum
 
-    public int    RequestType      { get; set; } = TYPE_HISTORY_SYNC_ON_DEMAND;  // field 1
-    public string ChatJid          { get; set; } = "";  // historySyncOnDemandRequest.chatJid (field 6 → sub-field 1)
-    public string OldestMsgId      { get; set; } = "";  // historySyncOnDemandRequest.oldestMsgId (field 6 → sub-field 2)
-    public bool   OldestMsgFromMe  { get; set; }        // historySyncOnDemandRequest.oldestMsgFromMe (field 6 → sub-field 3)
-    public int    OnDemandMsgCount { get; set; } = 50;  // historySyncOnDemandRequest.onDemandMsgCount (field 6 → sub-field 4)
+    public int    RequestType           { get; set; } = TYPE_HISTORY_SYNC_ON_DEMAND;  // field 1
+    public string ChatJid               { get; set; } = "";  // historySyncOnDemandRequest.chatJid (field 6 → sub-field 1)
+    public string OldestMsgId           { get; set; } = "";  // historySyncOnDemandRequest.oldestMsgId (field 6 → sub-field 2)
+    public bool   OldestMsgFromMe       { get; set; }        // historySyncOnDemandRequest.oldestMsgFromMe (field 6 → sub-field 3)
+    public int    OnDemandMsgCount      { get; set; } = 50;  // historySyncOnDemandRequest.onDemandMsgCount (field 6 → sub-field 4)
+    public long   OldestMsgTimestampMs  { get; set; }        // historySyncOnDemandRequest.oldestMsgTimestampMs (field 6 → sub-field 5)
 
     public byte[] ToByteArray()
     {
@@ -1118,6 +1119,7 @@ public sealed class PeerDataOperationRequestMessage
         if (!string.IsNullOrEmpty(OldestMsgId)) ProtoEncoder.WriteString(req, 2, OldestMsgId);
         if (OldestMsgFromMe)                    ProtoEncoder.WriteBool(req, 3, true);
         ProtoEncoder.WriteInt32Always(req, 4, OnDemandMsgCount);  // always emit count even if 0
+        if (OldestMsgTimestampMs > 0)            ProtoEncoder.WriteUInt64(req, 5, (ulong)OldestMsgTimestampMs);
         ProtoEncoder.WriteMessage(buf, 6, [.. req]);
 
         return [.. buf];

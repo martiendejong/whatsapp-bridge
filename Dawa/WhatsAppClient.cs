@@ -248,11 +248,13 @@ public sealed class WhatsAppClient : IAsyncDisposable
     /// which the receive loop picks up and fires HistoryMessageReceived for each message.
     /// Returns the messages from that chat that arrived during the push notification (or empty on timeout).
     /// </summary>
-    public Task<List<Dawa.Messages.IncomingMessage>> RequestOnDemandHistorySyncAsync(string chatJid, int count, CancellationToken ct)
+    public Task<List<Dawa.Messages.IncomingMessage>> RequestOnDemandHistorySyncAsync(
+        string chatJid, int count, CancellationToken ct,
+        string? oldestMsgId = null, bool oldestMsgFromMe = false, long oldestMsgTimestampMs = 0)
     {
         if (_noiseProcessor == null || _state != ConnectionState.Connected)
             return Task.FromResult(new List<Dawa.Messages.IncomingMessage>());
-        return _noiseProcessor.RequestOnDemandHistorySyncAsync(chatJid, count, ct);
+        return _noiseProcessor.RequestOnDemandHistorySyncAsync(chatJid, count, ct, oldestMsgId, oldestMsgFromMe, oldestMsgTimestampMs);
     }
 
     public List<string> GetGroupJids()

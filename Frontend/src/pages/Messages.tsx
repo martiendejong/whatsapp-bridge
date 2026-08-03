@@ -56,10 +56,14 @@ export default function Messages() {
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
+  const [loadingHistory, setLoadingHistory] = useState(false);
+  const [historyStatus, setHistoryStatus] = useState('');
   const [downloadingId, setDownloadingId] = useState('');
   const threadRef = useRef<HTMLDivElement>(null);
   const selectedChatRef = useRef(selectedChat);
   selectedChatRef.current = selectedChat;
+  const messagesCountRef = useRef(messages.length);
+  messagesCountRef.current = messages.length;
 
   useEffect(() => {
     whatsapp.getSessions().then((res) => {
@@ -102,6 +106,7 @@ export default function Messages() {
   useEffect(() => {
     if (!sessionId || !selectedChat) return;
     setMessages([]);
+    setHistoryStatus('');
     loadMessages(sessionId, selectedChat);
     const iv = setInterval(() => loadMessages(sessionId, selectedChat), 5000);
     return () => clearInterval(iv);
@@ -124,6 +129,28 @@ export default function Messages() {
       setError('Versturen mislukt');
     } finally {
       setSending(false);
+    }
+  };
+
+  const loadOlderHistory = async () => {
+    if (!sessionId || !selectedChat || loadingHistory) return;
+    setLoadingHistory(true);
+    setHistoryStatus('Vraagt oudere berichten op bij de telefoon...');
+    try {
+      await whatsapp.requestHistory(sessionId, selectedChat, 100);
+      // The phone answers asynchronously (a WhatsApp Web-style linked-device push, up to ~35s);
+      // poll the durable store a few times so newly-arrived history appears without a manual refresh.
+      const before = messagesCountRef.current;
+      for (const delayMs of [4000, 8000, 8000, 8000]) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        await loadMessages(sessionId, selectedChat);
+      }
+      const gained = messagesCountRef.current - before;
+      setHistoryStatus(gained > 0 ? `Klaar. ${gained} oudere berichten opgehaald.` : 'Geen nieuwe oudere berichten ontvangen.');
+    } catch {
+      setHistoryStatus('Ophalen van geschiedenis mislukt.');
+    } finally {
+      setLoadingHistory(false);
     }
   };
 
@@ -202,12 +229,28 @@ export default function Messages() {
             <div style={{ margin: 'auto', color: '#888' }}>Kies een gesprek om de berichten te zien</div>
           ) : (
             <>
-              <div style={{ padding: '10px 16px', background: '#f0f0f0', borderBottom: '1px solid #ddd', fontWeight: 600 }}>
-                {activeChat?.name || activeChat?.phone || selectedChat}
-                <span style={{ fontWeight: 400, color: '#888', marginLeft: 8, fontSize: 13 }}>
-                  {activeChat ? `${activeChat.messageCount} berichten` : ''}
-                </span>
+              <div style={{ padding: '10px 16px', background: '#f0f0f0', borderBottom: '1px solid #ddd', fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                <div>
+                  {activeChat?.name || activeChat?.phone || selectedChat}
+                  <span style={{ fontWeight: 400, color: '#888', marginLeft: 8, fontSize: 13 }}>
+                    {activeChat ? `${activeChat.messageCount} berichten` : ''}
+                  </span>
+                </div>
+                <button
+                  className="btn"
+                  onClick={loadOlderHistory}
+                  disabled={loadingHistory}
+                  style={{ fontWeight: 400, fontSize: 12, padding: '4px 10px', flexShrink: 0 }}
+                  title="Vraag de telefoon om oudere berichten voor dit gesprek (WhatsApp on-demand history sync)"
+                >
+                  {loadingHistory ? 'Bezig...' : 'Oudere berichten laden'}
+                </button>
               </div>
+              {historyStatus && (
+                <div style={{ padding: '6px 16px', background: '#fff8e1', borderBottom: '1px solid #ddd', fontSize: 12, color: '#795548' }}>
+                  {historyStatus}
+                </div>
+              )}
               <div ref={threadRef} style={{ flex: 1, overflowY: 'auto', padding: 16 }}>
                 {messages.map((m, i) => (
                   <div key={`${m.id}-${i}`} style={{ display: 'flex', justifyContent: m.fromMe ? 'flex-end' : 'flex-start', marginBottom: 6 }}>

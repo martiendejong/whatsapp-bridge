@@ -2955,7 +2955,17 @@ public sealed class NoiseProcessor : IAsyncDisposable
     /// Returns the messages collected from that push notification (or empty if the phone
     /// does not respond within the timeout).
     /// </summary>
-    public async Task<List<IncomingMessage>> RequestOnDemandHistorySyncAsync(string chatJid, int count, CancellationToken ct)
+    /// <param name="oldestMsgId">
+    /// WhatsApp message id of the oldest message we already have for this chat. This is the
+    /// "backfill anchor" — without it the phone has no reference point for "older than what?"
+    /// and a request behaves like a fresh sync of the newest <paramref name="count"/> messages
+    /// instead of paging further back. Leave null for that fresh-sync behavior.
+    /// </param>
+    /// <param name="oldestMsgFromMe">Whether the oldest stored message (<paramref name="oldestMsgId"/>) was sent by us.</param>
+    /// <param name="oldestMsgTimestampMs">Timestamp (unix ms) of the oldest stored message.</param>
+    public async Task<List<IncomingMessage>> RequestOnDemandHistorySyncAsync(
+        string chatJid, int count, CancellationToken ct,
+        string? oldestMsgId = null, bool oldestMsgFromMe = false, long oldestMsgTimestampMs = 0)
     {
         var normalizedJid = chatJid.Contains('@') ? chatJid : $"{chatJid}@s.whatsapp.net";
 
@@ -3028,13 +3038,15 @@ public sealed class NoiseProcessor : IAsyncDisposable
 
         try
         {
-            _logger.LogInformation("OnDemandHistorySync: sending peerDataOperationRequestMessage for {ChatJid} (requestJid={ReqJid})", normalizedJid, requestJid);
-            await SendPeerDataOperationRequestAsync(myJid, requestJid, count, ct);
+            _logger.LogInformation(
+                "OnDemandHistorySync: sending peerDataOperationRequestMessage for {ChatJid} (requestJid={ReqJid}, anchor={Anchor})",
+                normalizedJid, requestJid, oldestMsgId ?? "(none — fresh sync of newest messages)");
+            await SendPeerDataOperationRequestAsync(myJid, requestJid, count, ct, oldestMsgId, oldestMsgFromMe, oldestMsgTimestampMs);
             // If LID and request JID differ, also try with the original LID (phone may accept either)
             if (requestJid != normalizedJid)
             {
                 await Task.Delay(1000, ct);
-                await SendPeerDataOperationRequestAsync(myJid, normalizedJid, count, ct);
+                await SendPeerDataOperationRequestAsync(myJid, normalizedJid, count, ct, oldestMsgId, oldestMsgFromMe, oldestMsgTimestampMs);
             }
 
             // Wait up to 35 seconds for the phone to push the history sync notification
@@ -3060,7 +3072,9 @@ public sealed class NoiseProcessor : IAsyncDisposable
         lock (collected) { return [.. collected]; }
     }
 
-    private async Task SendPeerDataOperationRequestAsync(string myJid, string targetChatJid, int count, CancellationToken ct)
+    private async Task SendPeerDataOperationRequestAsync(
+        string myJid, string targetChatJid, int count, CancellationToken ct,
+        string? oldestMsgId = null, bool oldestMsgFromMe = false, long oldestMsgTimestampMs = 0)
     {
         var myPhone = myJid.Split('@')[0].Split(':')[0];
 
@@ -3095,9 +3109,12 @@ public sealed class NoiseProcessor : IAsyncDisposable
         {
             PeerDataOperation = new Proto.PeerDataOperationRequestMessage
             {
-                RequestType      = Proto.PeerDataOperationRequestMessage.TYPE_HISTORY_SYNC_ON_DEMAND,
-                ChatJid          = targetChatJid,
-                OnDemandMsgCount = count,
+                RequestType          = Proto.PeerDataOperationRequestMessage.TYPE_HISTORY_SYNC_ON_DEMAND,
+                ChatJid              = targetChatJid,
+                OnDemandMsgCount     = count,
+                OldestMsgId          = oldestMsgId ?? "",
+                OldestMsgFromMe      = oldestMsgFromMe,
+                OldestMsgTimestampMs = oldestMsgTimestampMs,
             }
         };
         var protoBytes = PadMessage(msg.ToByteArrayWithPeerDataOperation());
@@ -3135,8 +3152,10 @@ public sealed class NoiseProcessor : IAsyncDisposable
         }) { Content = contentNodes };
 
         // Track this PDO message so that if the phone sends a retry receipt we can resend
+        // it with the SAME anchor (previously hardcoded to no-anchor, which silently dropped
+        // the backfill target on resend).
         _sentPdoMsgIds.Add(msgId);
-        _lastPdoRequest = (targetChatJid, null, false, 0, count);
+        _lastPdoRequest = (targetChatJid, oldestMsgId, oldestMsgFromMe, oldestMsgTimestampMs, count);
 
         await SendNodeAsync(msgNode, ct);
         _logger.LogInformation("OnDemandHistorySync: sent peerDataOperationRequestMessage (msgId={Id}) to self", msgId);
@@ -3962,7 +3981,8 @@ public sealed class NoiseProcessor : IAsyncDisposable
             {
                 try
                 {
-                    await RequestOnDemandHistorySyncAsync(req.ChatJid, req.Count, ct);
+                    await RequestOnDemandHistorySyncAsync(req.ChatJid, req.Count, ct,
+                        req.OldestMsgId, req.OldestMsgFromMe, req.OldestMsgTimestampMs);
                 }
                 catch (Exception ex2)
                 {

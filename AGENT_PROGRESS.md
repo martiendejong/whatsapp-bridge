@@ -83,3 +83,33 @@ Left: deployed straight to production (this script has no CI/CD, it's a manual-c
 scheduled task) alongside opening the PR — `bridgePassword` removed from prod config.json
 since it's no longer read. Nothing else remains; genuine session-death alerting could not
 be tested live (would require an actual WA logout) but the gating logic itself is unit-tested.
+
+## 2026-08-03 — task 869ecy6kp
+Done: fixed the root cause of "requestHistory returned success but delivered nothing" —
+`WhatsAppBridgeService.RequestOnDemandHistoryAsync` already computed the backfill anchor
+(oldest stored message id/fromMe/timestamp) but then silently discarded it, calling
+`RequestOnDemandHistorySyncAsync(jid, count, ct)` with no anchor at all; the phone then had
+no reference point for "older than what?" and just re-sent the newest messages instead of
+paging back. Threaded the anchor through the full call chain (`WhatsAppBridgeService` →
+`WhatsAppClient` → `NoiseProcessor.RequestOnDemandHistorySyncAsync` →
+`SendPeerDataOperationRequestAsync`) and added the missing `oldestMsgTimestampMs` proto
+field (field 5 of `historySyncOnDemandRequest`) that the encoder never had at all. Also
+fixed the retry-resend path (`_lastPdoRequest`), which hardcoded `null/false/0` for the
+anchor on every resend. Sourced the anchor from the durable SQLite `Messages` table (falling
+back to the in-memory cache) instead of only the in-memory store, since that store is empty
+right after an app-pool restart even though history already exists in SQLite, and spans
+every SessionId the user has re-paired under. Wired a "Oudere berichten laden" button into
+the `/messages` page (Messages.tsx) so the endpoint is actually reachable per-chat, not just
+via raw `curl`. Confirmed via code read that "media in history: store type + mediaUrl like
+live messages" was already shipped symmetrically by task 869ecbkv7 — no change needed there.
+Verified: `dotnet build` clean on Backend/Dawa/DawaTest (0 errors). Added 4 new self-tests
+to `DawaTest/Program.cs` (`dotnet DawaTest.dll --selftest`): anchor fields are present in
+the serialized proto bytes; the `historySyncOnDemandRequest` sub-message round-trips with
+fields 2/3/5 all encoded; a no-anchor request correctly omits those fields (regression guard
+for the existing "first sync" behavior). 8/8 self-tests pass (4 new + 4 pre-existing).
+`npm run build` (tsc + vite) clean on Frontend.
+Left: the task's own DoD requires a QR re-pair by Martien (a physical phone action this
+session cannot perform) before "multiple chats with recent history visible on /messages,
+survives restart" can be verified live — that verification step is explicitly called out
+as needing "patience for full device sync (hours)" per the 2026-07-06 lesson referenced in
+the task. Code changes are ready for review independent of that step.

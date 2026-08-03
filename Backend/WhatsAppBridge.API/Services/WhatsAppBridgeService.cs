@@ -461,25 +461,83 @@ public class WhatsAppBridgeService : IAsyncDisposable
         var key = $"{sessionId}:{jid}";
 
         // Find the oldest stored message for this chat so the phone knows where to continue from
+        // ("give me messages older than this one"). Without this anchor the request behaves like
+        // a fresh sync of the newest `count` messages instead of a backfill — the bug behind
+        // "requestHistory returned success but delivered nothing" (task 869ecy6kp).
         string? oldestMsgId     = null;
         bool    oldestFromMe    = false;
         long    oldestTimestamp = 0;
 
-        if (!noAnchor && _messageStore.TryGetValue(key, out var msgs))
+        if (!noAnchor)
         {
-            lock (msgs)
+            // Prefer the durable SQLite store (survives restarts/re-pairs and spans every
+            // SessionId the user has ever paired) over the in-memory cache, which is empty
+            // right after an app-pool restart even though history already exists in SQLite.
+            var dbOldest = await FindOldestStoredMessageAsync(sessionId, jid);
+            if (dbOldest != null)
             {
-                var oldest = msgs.MinBy(m => m.Timestamp);
-                if (oldest != null)
+                oldestMsgId     = dbOldest.Value.MessageId;
+                oldestFromMe    = dbOldest.Value.FromMe;
+                oldestTimestamp = dbOldest.Value.Timestamp * 1000L; // convert seconds → milliseconds
+            }
+            else if (_messageStore.TryGetValue(key, out var msgs))
+            {
+                lock (msgs)
                 {
-                    oldestMsgId     = oldest.Id;
-                    oldestFromMe    = oldest.From == "me";
-                    oldestTimestamp = oldest.Timestamp * 1000L; // convert seconds → milliseconds
+                    var oldest = msgs.MinBy(m => m.Timestamp);
+                    if (oldest != null)
+                    {
+                        oldestMsgId     = oldest.Id;
+                        oldestFromMe    = oldest.From == "me";
+                        oldestTimestamp = oldest.Timestamp * 1000L;
+                    }
                 }
             }
         }
 
-        await client.RequestOnDemandHistorySyncAsync(jid, count, CancellationToken.None);
+        _logger.LogInformation(
+            "RequestOnDemandHistoryAsync: chat={Chat} count={Count} anchor={Anchor}",
+            jid, count, oldestMsgId ?? "(none)");
+
+        await client.RequestOnDemandHistorySyncAsync(jid, count, CancellationToken.None,
+            oldestMsgId, oldestFromMe, oldestTimestamp);
+    }
+
+    /// <summary>
+    /// Finds the oldest durably-stored message for a chat, across every SessionId belonging to
+    /// the same user as <paramref name="sessionId"/> — a re-pair gets a new SessionId, and the
+    /// backfill anchor must not reset just because the user re-scanned the QR code.
+    /// </summary>
+    private async Task<(string MessageId, bool FromMe, long Timestamp)?> FindOldestStoredMessageAsync(string sessionId, string chatJid)
+    {
+        try
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+
+            var userId = await db.WhatsAppSessions
+                .Where(s => s.SessionId == sessionId)
+                .Select(s => (int?)s.UserId)
+                .FirstOrDefaultAsync();
+            if (userId == null) return null;
+
+            var sessionIds = await db.WhatsAppSessions
+                .Where(s => s.UserId == userId.Value)
+                .Select(s => s.SessionId)
+                .ToListAsync();
+
+            var oldest = await db.Messages.AsNoTracking()
+                .Where(m => sessionIds.Contains(m.SessionId) && m.ChatJid == chatJid)
+                .OrderBy(m => m.Timestamp)
+                .FirstOrDefaultAsync();
+
+            return oldest == null ? null : (oldest.MessageId, oldest.FromMe, oldest.Timestamp);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "FindOldestStoredMessageAsync failed for chat {Chat} — falling back to in-memory anchor", chatJid);
+            return null;
+        }
     }
 
     public async Task<List<object>?> FetchMessageHistoryAsync(string sessionId, string jid, int count)

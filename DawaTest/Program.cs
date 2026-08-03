@@ -122,6 +122,104 @@ using Dawa.Crypto;
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─── On-demand history sync anchor self-test (task 869ecy6kp) ─────────────────
+// Reproduces the "requestHistory returned success but delivered nothing" bug: the
+// backfill anchor (oldest stored message id/fromMe/timestamp) must actually be encoded
+// into the peerDataOperationRequestMessage proto, or the phone has no reference point
+// for "older than what?" and just re-sends the newest messages instead of paging back.
+// Pulled into its own non-async local function: Program.cs's top-level statements
+// compile into one async Main (because of the later `await app.RunAsync()`), and C# 12
+// disallows `ref struct` locals (ProtoReader) inside async method bodies.
+RunPdoAnchorSelfTest();
+
+static void RunPdoAnchorSelfTest()
+{
+    var withAnchor = new Dawa.Proto.PeerDataOperationRequestMessage
+    {
+        ChatJid              = "31600000000@s.whatsapp.net",
+        OldestMsgId          = "3EB0ANCHOR123",
+        OldestMsgFromMe      = true,
+        OnDemandMsgCount     = 100,
+        OldestMsgTimestampMs = 1712345678000,
+    };
+    var bytes = withAnchor.ToByteArray();
+
+    bool Contains(byte[] haystack, byte[] needle)
+    {
+        for (var i = 0; i <= haystack.Length - needle.Length; i++)
+        {
+            var match = true;
+            for (var j = 0; j < needle.Length; j++)
+                if (haystack[i + j] != needle[j]) { match = false; break; }
+            if (match) return true;
+        }
+        return false;
+    }
+
+    var hasAnchorId = Contains(bytes, System.Text.Encoding.UTF8.GetBytes(withAnchor.OldestMsgId));
+    Console.WriteLine($"[PDO anchor self-test] OldestMsgId present in serialized bytes: {(hasAnchorId ? "PASS ✓" : "FAIL ✗")}");
+
+    // Round-trip through the embedded sub-message field numbers by decoding manually:
+    // field 6 (historySyncOnDemandRequest) must be present, and within it sub-field 2
+    // (oldestMsgId), 3 (oldestMsgFromMe), 5 (oldestMsgTimestampMs) must all be set.
+    var reader = Dawa.Proto.ProtoEncoder.CreateReader(bytes);
+    byte[]? subMsg = null;
+    while (reader.HasMore)
+    {
+        var (field, wireType) = reader.ReadTag();
+        if (field == 6 && wireType == 2) { subMsg = reader.ReadBytes(); break; }
+        reader.Skip(wireType);
+    }
+    var hasSubMsg = subMsg != null;
+    Console.WriteLine($"[PDO anchor self-test] historySyncOnDemandRequest sub-message present: {(hasSubMsg ? "PASS ✓" : "FAIL ✗")}");
+
+    if (subMsg != null)
+    {
+        var subReader = Dawa.Proto.ProtoEncoder.CreateReader(subMsg);
+        var seenFields = new HashSet<int>();
+        while (subReader.HasMore)
+        {
+            var (field, wireType) = subReader.ReadTag();
+            seenFields.Add(field);
+            subReader.Skip(wireType);
+        }
+        var allPresent = seenFields.Contains(2) && seenFields.Contains(3) && seenFields.Contains(5);
+        Console.WriteLine($"[PDO anchor self-test] oldestMsgId(2)+oldestMsgFromMe(3)+oldestMsgTimestampMs(5) all encoded: {(allPresent ? "PASS ✓" : "FAIL ✗")} (fields={string.Join(",", seenFields)})");
+    }
+
+    // No-anchor request (fresh sync of newest N) must NOT emit the anchor sub-fields —
+    // confirms the fix doesn't regress the existing "no anchor yet" first-sync behavior.
+    var withoutAnchor = new Dawa.Proto.PeerDataOperationRequestMessage
+    {
+        ChatJid          = "31600000000@s.whatsapp.net",
+        OnDemandMsgCount = 50,
+    };
+    var noAnchorBytes = withoutAnchor.ToByteArray();
+    var noAnchorReader = Dawa.Proto.ProtoEncoder.CreateReader(noAnchorBytes);
+    byte[]? noAnchorSub = null;
+    while (noAnchorReader.HasMore)
+    {
+        var (field, wireType) = noAnchorReader.ReadTag();
+        if (field == 6 && wireType == 2) { noAnchorSub = noAnchorReader.ReadBytes(); break; }
+        noAnchorReader.Skip(wireType);
+    }
+    var noAnchorFields = new HashSet<int>();
+    if (noAnchorSub != null)
+    {
+        var r2 = Dawa.Proto.ProtoEncoder.CreateReader(noAnchorSub);
+        while (r2.HasMore)
+        {
+            var (field, wireType) = r2.ReadTag();
+            noAnchorFields.Add(field);
+            r2.Skip(wireType);
+        }
+    }
+    var correctlyOmitted = !noAnchorFields.Contains(2) && !noAnchorFields.Contains(3) && !noAnchorFields.Contains(5);
+    Console.WriteLine($"[PDO anchor self-test] no-anchor request omits anchor sub-fields: {(correctlyOmitted ? "PASS ✓" : "FAIL ✗")} (fields={string.Join(",", noAnchorFields)})");
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
+
 if (args.Contains("--selftest"))
 {
     Console.WriteLine("Self-tests complete, exiting (--selftest).");
