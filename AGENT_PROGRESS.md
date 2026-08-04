@@ -1,5 +1,43 @@
 # Agent Progress
 
+## 2026-08-04 — task 869edf3k4
+Done: root-caused "0 isHistory rows after fresh re-pair" via log evidence and a live
+on-demand test. The 2026-08-03 QR re-pair completed at 21:35:38 UTC; the app pool was
+recycled ~7 min later (21:42, coincident with an unrelated deploy) before WhatsApp ever
+sent a HISTORY_SYNC_NOTIFICATION — confirmed via log analysis: the 7 self/peer control
+messages received in that window all decrypted and parsed successfully but none matched
+`ProtocolMessage.Type == TYPE_HISTORY_SYNC_NOTIFICATION` (the unconditional
+`_logger.LogInformation("HistorySync: received ...")` in `ProcessHistorySyncAsync` never
+fired). Live-tested the #42 on-demand path end-to-end via `POST /api/wa/requestHistory`
+against the Martien chat (existing anchor `6451E50C1D428021`): request construction and
+delivery are healthy (anchor resolved from SQLite, encrypted+sent to both own devices),
+but the phone never returned a `PeerDataOperationResponseMessage` within two 35s windows
+— confirmed no code-side bug in the send path; this needs the phone to actually respond,
+which is outside agent control (matches 869ecy6kp's own note: "patience for full device
+sync (hours)").
+Fixed along the way: (1) the "skip other protocol messages" logs on both decrypt paths
+(`NoiseProcessor.cs`) were `LogDebug`, invisible under prod's `"Default": "Information"`
+level — this is exactly what made "did a HISTORY_SYNC_NOTIFICATION arrive?" unanswerable
+from the deployed logs; bumped to `LogInformation`. (2) `HistorySyncNotification.SyncType`
+constants had RECENT/FULL and ON_DEMAND/NON_BLOCKING_DATA swapped vs WhatsApp's real enum
+(cosmetic — only feeds a log label — but actively misleading); fixed and added a
+regression self-test. (3) Removed `HandleHistorySyncAsync`, a fully separate, never-called
+CDN-download+decrypt+parse implementation that duplicated the live `ProcessHistorySyncAsync`
+path — confirmed dead via `grep`, this is the "does a code path bypass StoreMessage" check
+the task asked for; it doesn't (the dead path was never reachable), but it was pure
+confusion risk during debugging.
+Verified: `dotnet build` clean on Backend/Dawa/DawaTest (0 warnings/errors from this
+change). `dotnet DawaTest.dll --selftest`: 9/9 pass (8 pre-existing + 1 new SyncType
+regression test). Root cause + on-demand test were verified live against production
+(85.215.217.154 / api.whatsapp.wreckingball.ai) via direct log reads and a real
+`requestHistory` call — not simulated.
+Left: the actual delivery (isHistory=1 rows appearing, Frank's chat showing up) requires
+either the phone to respond to a future on-demand request or a fresh re-pair that survives
+long enough for WhatsApp's INITIAL_BOOTSTRAP push to arrive — neither is something this
+session can force. The always-on `HistoryMessageReceived += StoreMessage(isHistory:true)`
+listener (`WhatsAppBridgeService.cs:78,156`) is correctly wired and will persist whatever
+arrives, whenever it arrives, with no code change needed on that side.
+
 ## 2026-07-24 — task 869e8wk1v
 Done: added deploy-time version tracking — repo-root `VERSION` file, `<Version>` in
 `WhatsAppBridge.API.csproj`, a `GET /api/version` endpoint, and `deploy/bump-version.ps1`

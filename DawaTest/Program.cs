@@ -219,6 +219,22 @@ static void RunPdoAnchorSelfTest()
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─── HistorySyncNotification.SyncType constants (task 869edf3k4) ──────────────
+// RECENT/FULL and ON_DEMAND/NON_BLOCKING_DATA were previously swapped relative to
+// WhatsApp's real HistorySyncType enum. Only used for a log label today, but a future
+// caller keying real logic off these names must not reintroduce the swap silently.
+{
+    var syncTypeOk =
+        Dawa.Proto.HistorySyncNotification.INITIAL_BOOTSTRAP == 0 &&
+        Dawa.Proto.HistorySyncNotification.FULL              == 2 &&
+        Dawa.Proto.HistorySyncNotification.RECENT             == 3 &&
+        Dawa.Proto.HistorySyncNotification.PUSH_NAME          == 4 &&
+        Dawa.Proto.HistorySyncNotification.NON_BLOCKING_DATA  == 5 &&
+        Dawa.Proto.HistorySyncNotification.ON_DEMAND          == 6;
+    Console.WriteLine($"[HistorySync self-test] SyncType constants match WhatsApp's real enum: {(syncTypeOk ? "PASS ✓" : "FAIL ✗")}");
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 
 if (args.Contains("--selftest"))
 {

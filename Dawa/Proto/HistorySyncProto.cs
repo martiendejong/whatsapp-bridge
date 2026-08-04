@@ -21,12 +21,16 @@ public sealed class HistorySyncNotification
     public int    Progress      { get; set; }         // field 9
     public byte[] InlineBlob    { get; set; } = [];  // field 10 (newer WA: zlib blob sent inline)
 
+    // Field values verified against WhatsApp's actual HistorySyncNotification.HistorySyncType enum
+    // (whatsmeow/Baileys). RECENT/FULL and ON_DEMAND/NON_BLOCKING_DATA were previously swapped here —
+    // harmless (only used to label the synctype in a log line, see ProcessHistorySyncAsync), but it
+    // actively misled debugging of task 869edf3k4 by mislabeling which sync type had actually arrived.
     public const int INITIAL_BOOTSTRAP = 0;
-    public const int RECENT            = 2;
-    public const int FULL              = 3;
+    public const int FULL              = 2;
+    public const int RECENT            = 3;
     public const int PUSH_NAME         = 4;
-    public const int ON_DEMAND         = 5;
-    public const int NON_BLOCKING_DATA = 6;
+    public const int NON_BLOCKING_DATA = 5;
+    public const int ON_DEMAND         = 6;
 
     public static HistorySyncNotification Decode(byte[] data)
     {

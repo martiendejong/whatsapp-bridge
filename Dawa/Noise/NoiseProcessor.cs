@@ -851,7 +851,12 @@ public sealed class NoiseProcessor : IAsyncDisposable
                     // ── Skip other protocol messages (key sync, app state, etc.) ──────────────
                     if (waMsg.ProtocolMsg != null)
                     {
-                        _logger.LogDebug("Participants path: protocol message type={PT} from {Jid} — skipping",
+                        // LogInformation, not LogDebug: production runs at "Default": "Information"
+                        // (appsettings.json), so a LogDebug here is invisible in the deployed stdout
+                        // logs — which made it impossible to tell "no history push arrived" apart from
+                        // "a protocol message arrived and was correctly identified as non-history" while
+                        // diagnosing task 869edf3k4 (zero isHistory rows after a fresh re-pair).
+                        _logger.LogInformation("Participants path: protocol message type={PT} from {Jid} — skipping",
                             waMsg.ProtocolMsg.Type, senderJid);
                         _ = SendAckAsync(id, from, timestamp, participant);
                         continue;
@@ -977,7 +982,10 @@ public sealed class NoiseProcessor : IAsyncDisposable
                 // ── Skip other protocol messages (key sync, app state, etc.) ──────────────
                 if (waMsg.ProtocolMsg != null)
                 {
-                    _logger.LogDebug("Direct enc path: protocol message type={PT} from {Jid} — skipping",
+                    // LogInformation, not LogDebug — see the matching comment on the participants
+                    // path above (task 869edf3k4): this is the only code path that observes every
+                    // post-pairing self/peer protocol message, and it was invisible in production.
+                    _logger.LogInformation("Direct enc path: protocol message type={PT} from {Jid} — skipping",
                         waMsg.ProtocolMsg.Type, from);
                     _ = SendAckAsync(id, from, timestamp, participant);
                     return;
@@ -3242,190 +3250,14 @@ public sealed class NoiseProcessor : IAsyncDisposable
             CollectNodes(child, tag, result);
     }
 
-    // ─── History Sync (HistorySyncNotification → CDN download → proto parse) ─
-
-    private static readonly HttpClient _httpClient = new(new HttpClientHandler
-    {
-        AutomaticDecompression = System.Net.DecompressionMethods.None, // handle ourselves
-    });
-
-    /// <summary>
-    /// Handles a HistorySyncNotification message from the phone.
-    /// Downloads the encrypted blob from WhatsApp CDN, decrypts it, parses the
-    /// HistorySync protobuf, and fires HistoryMessageReceived for each message and HistorySyncCompleted at the end.
-    /// </summary>
-    private async Task HandleHistorySyncAsync(
-        Dawa.Proto.HistorySyncNotification notification,
-        string msgId, string from, long timestamp, CancellationToken ct)
-    {
-        _logger.LogInformation(
-            "HistorySync: type={Type} chunkOrder={Chunk} directPath={Path} fileLen={Len}",
-            notification.SyncType, notification.Progress, notification.DirectPath, notification.FileLength);
-
-        try
-        {
-            // ── 1. Download encrypted blob from WhatsApp CDN ───────────────────
-            if (string.IsNullOrEmpty(notification.DirectPath))
-            {
-                _logger.LogWarning("HistorySync: no directPath — cannot download blob");
-                _ = SendAckAsync(msgId, from, timestamp);
-                return;
-            }
-
-            var cdnUrl = "https://mmg.whatsapp.net" + notification.DirectPath;
-            byte[] encryptedBlob;
-            try
-            {
-                encryptedBlob = await _httpClient.GetByteArrayAsync(cdnUrl, ct);
-                _logger.LogInformation("HistorySync: downloaded {Bytes} bytes from CDN", encryptedBlob.Length);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "HistorySync: CDN download failed for {Url}", cdnUrl);
-                _ = SendAckAsync(msgId, from, timestamp);
-                return;
-            }
-
-            // ── 2. Decrypt: HKDF-expand mediaKey → IV(16) + aesKey(32) + macKey(32) ─
-            // Info string for history sync is "WhatsApp History Keys"
-            // Expand mediaKey using HKDF-SHA256 with WhatsApp's standard media key derivation.
-            // Info: "WhatsApp History Keys", salt: 32 zero bytes, output: 112 bytes.
-            // Layout (from Baileys): IV=0..15, AES=16..47, MAC=48..79
-            var expanded = Dawa.Crypto.DawaHKDF.DeriveKey(
-                notification.MediaKey,
-                salt: new byte[32], // zero salt
-                info: System.Text.Encoding.UTF8.GetBytes("WhatsApp History Keys"),
-                outputLength: 80);
-
-            var iv     = expanded[0..16];    // bytes 0..15
-            var aesKey = expanded[16..48];   // bytes 16..47
-            // macKey is expanded[48..80] — we trust the download, skip MAC verification for now
-
-            // Strip trailing 10-byte HMAC
-            var ciphertext = encryptedBlob[..^10];
-
-            byte[] decrypted;
-            try
-            {
-                using var aes = System.Security.Cryptography.Aes.Create();
-                aes.Key  = aesKey;
-                aes.IV   = iv;
-                aes.Mode = System.Security.Cryptography.CipherMode.CBC;
-                aes.Padding = System.Security.Cryptography.PaddingMode.PKCS7;
-                using var dec = aes.CreateDecryptor();
-                decrypted = dec.TransformFinalBlock(ciphertext, 0, ciphertext.Length);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "HistorySync: AES decryption failed");
-                _ = SendAckAsync(msgId, from, timestamp);
-                return;
-            }
-
-            // ── 3. Gunzip the decrypted bytes ─────────────────────────────────
-            byte[] protoBytes;
-            try
-            {
-                using var inStream  = new System.IO.MemoryStream(decrypted);
-                using var gzip      = new System.IO.Compression.GZipStream(inStream, System.IO.Compression.CompressionMode.Decompress);
-                using var outStream = new System.IO.MemoryStream();
-                await gzip.CopyToAsync(outStream, ct);
-                protoBytes = outStream.ToArray();
-                _logger.LogInformation("HistorySync: decompressed to {Bytes} bytes", protoBytes.Length);
-            }
-            catch
-            {
-                // Not gzip — use raw bytes
-                protoBytes = decrypted;
-                _logger.LogInformation("HistorySync: not gzip-compressed, using raw {Bytes} bytes", protoBytes.Length);
-            }
-
-            // ── 4. Parse HistorySync protobuf ──────────────────────────────────
-            Dawa.Proto.HistorySync historySync;
-            try
-            {
-                historySync = Dawa.Proto.HistorySync.Decode(protoBytes);
-                _logger.LogInformation("HistorySync: parsed {ConvCount} conversations, {NameCount} push names",
-                    historySync.Conversations.Count, historySync.PushNames.Count);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "HistorySync: failed to parse HistorySync proto ({Bytes} bytes)", protoBytes.Length);
-                _ = SendAckAsync(msgId, from, timestamp);
-                return;
-            }
-
-            // ── 5. Store push names from history ─────────────────────────────────
-            foreach (var pn in historySync.PushNames)
-            {
-                if (!string.IsNullOrEmpty(pn.Id) && !string.IsNullOrEmpty(pn.PushName))
-                    _pushNames.TryAdd(pn.Id, pn.PushName);
-            }
-
-            // ── 6. Fire HistoryMessageReceived for each message ───────────────────
-            var totalMessages = 0;
-            foreach (var conv in historySync.Conversations)
-            {
-                var chatJid = conv.Id;
-                if (string.IsNullOrEmpty(chatJid)) continue;
-
-                foreach (var hm in conv.Messages)
-                {
-                    var wmi = hm.Message;
-                    if (wmi == null) continue;
-                    var key = wmi.Key;
-                    if (key == null) continue;
-
-                    var text = wmi.MessageBody?.EffectiveText;
-                    if (string.IsNullOrEmpty(text)) continue;
-
-                    var msgFromMe = key.FromMe;
-                    var msgFrom   = msgFromMe
-                        ? (_auth.Me?.Id ?? chatJid)
-                        : (!string.IsNullOrEmpty(key.Participant) ? key.Participant : chatJid);
-
-                    HistoryMessageReceived?.Invoke(this, new IncomingMessage
-                    {
-                        Id          = key.Id,
-                        From        = msgFrom,
-                        RemoteJid   = key.RemoteJid.Length > 0 ? key.RemoteJid : chatJid,
-                        Participant = key.Participant.Length > 0 ? key.Participant : null,
-                        Text        = text,
-                        FromMe      = msgFromMe,
-                        Timestamp   = (long)wmi.Timestamp,
-                        PushName    = wmi.PushName,
-                    });
-                    totalMessages++;
-                }
-
-                // Update thread metadata with latest message timestamp
-                if (conv.Messages.Count > 0)
-                {
-                    var latest = conv.Messages
-                        .Where(m => m.Message != null)
-                        .Max(m => (long)m.Message!.Timestamp);
-                    _threadMetadata.TryAdd(chatJid, latest);
-                }
-            }
-
-            _logger.LogInformation("HistorySync: fired {Total} HistoryMessageReceived events across {Convs} conversations",
-                totalMessages, historySync.Conversations.Count);
-
-            // Signal completion so callers can persist the full sync
-            HistorySyncCompleted?.Invoke(this, totalMessages);
-
-            SaveCacheToDisk();
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "HistorySync: unexpected error");
-        }
-        finally
-        {
-            _ = SendAckAsync(msgId, from, timestamp);
-        }
-    }
-
+    // ─── History Sync (dead code removed, task 869edf3k4) ──────────────────────
+    // This block used to hold HandleHistorySyncAsync, a fully separate CDN-download +
+    // decrypt + parse + fire implementation of history sync that was never called from
+    // anywhere — the live wiring (lines ~837, ~963) has always called ProcessHistorySyncAsync
+    // (below) instead, which additionally supports the newer InlineBlob delivery path this
+    // dead copy never gained. Removed rather than fixed to avoid the exact confusion it
+    // caused while diagnosing "0 history rows after a fresh re-pair": two independently
+    // maintained implementations of the same responsibility, only one of which was live.
     // ─── Groups ──────────────────────────────────────────────────────────────
 
     /// <summary>
