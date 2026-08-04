@@ -419,7 +419,7 @@ def main():
         sftp = ssh.open_sftp()
         try:
             log("[pre-deploy] checking which WhatsApp sessions are currently connected...")
-            pre_connected, _ = get_connected_session_ids(PUBLIC_URL, probe_email, probe_password)
+            pre_connected, _ = get_connected_session_ids(API_URL, probe_email, probe_password)
             log(f"[pre-deploy] {len(pre_connected)} session(s) currently connected")
 
             upload_helper(sftp)
@@ -468,11 +468,11 @@ def main():
                 else:
                     log("[3/5] --skip-frontend set, skipping frontend deploy.")
 
-                log(f"[4/5] Running post-deploy smoke checks against {PUBLIC_URL} ...")
-                smoke_check_version(PUBLIC_URL)
+                log(f"[4/5] Running post-deploy smoke checks against {API_URL} (API) and {FRONTEND_URL} (frontend)...")
+                smoke_check_version(API_URL)
                 if frontend_dist_dir:
-                    smoke_check_bundle_asset(PUBLIC_URL, frontend_dist_dir, required_url)
-                post_connected, _ = get_connected_session_ids(PUBLIC_URL, probe_email, probe_password)
+                    smoke_check_bundle_asset(FRONTEND_URL, frontend_dist_dir, required_url)
+                post_connected, _ = get_connected_session_ids(API_URL, probe_email, probe_password)
                 lost = pre_connected - post_connected
                 if lost:
                     raise SmokeCheckFailed(
@@ -490,7 +490,7 @@ def main():
                 run_helper(ssh, "Rollback", BackupDir=backup_dir,
                            BackendLiveDir=REMOTE_BACKEND_DIR, FrontendLiveDir=REMOTE_FRONTEND_DIR)
                 time.sleep(5)
-                smoke_check_version(PUBLIC_URL)
+                smoke_check_version(API_URL)
                 log(f"[5/5] Rollback complete. Live site restored from {backup_dir}.")
                 # Re-surface as SmokeCheckFailed regardless of the original exception type: the
                 # top-level handler's "(rolled back)" message is only accurate for this class,
