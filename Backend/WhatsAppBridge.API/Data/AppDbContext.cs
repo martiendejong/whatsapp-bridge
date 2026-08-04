@@ -14,6 +14,7 @@ public class AppDbContext : DbContext
     public DbSet<WhatsAppSession> WhatsAppSessions { get; set; }
     public DbSet<TwoFactorToken> TwoFactorTokens { get; set; }
     public DbSet<StoredMessage> Messages { get; set; }
+    public DbSet<BlockedOutboundMessage> BlockedOutboundMessages { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -49,6 +50,15 @@ public class AppDbContext : DbContext
             entity.Property(e => e.MessageId).HasMaxLength(200);
             entity.Property(e => e.Sender).HasMaxLength(200);
             entity.Property(e => e.Type).HasMaxLength(40);
+        });
+
+        modelBuilder.Entity<BlockedOutboundMessage>(entity =>
+        {
+            entity.HasIndex(e => e.BlockedAtUtc);
+            entity.HasIndex(e => e.UserId);
+            entity.Property(e => e.Endpoint).HasMaxLength(60);
+            entity.Property(e => e.Recipient).HasMaxLength(200);
+            entity.Property(e => e.BodyPreview).HasMaxLength(200);
         });
     }
 }

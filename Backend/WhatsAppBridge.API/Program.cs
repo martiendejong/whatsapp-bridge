@@ -84,6 +84,7 @@ builder.Services.AddScoped<TwoFactorService>();
 builder.Services.AddSingleton<EncryptionService>();
 // Singleton: forwards allow-listed "/task ..." inbound messages to jengo-agi intake (default-OFF, additive)
 builder.Services.AddSingleton<TaskIntakeForwarder>();
+builder.Services.AddScoped<OutboundGuardrailService>();
 // Singleton: holds long-lived Dawa WhatsAppClient instances (one per user session)
 builder.Services.AddSingleton<WhatsAppBridgeService>();
 
@@ -199,6 +200,22 @@ using (var scope = app.Services.CreateScope())
             // Column already present from a prior startup or the CREATE TABLE above.
         }
     }
+
+    // Outbound guardrail audit trail (task 869edf485): EnsureCreated() no-ops on an
+    // already-existing DB, so a table added after go-live must be self-healed explicitly.
+    db.Database.ExecuteSqlRaw("""
+        CREATE TABLE IF NOT EXISTS BlockedOutboundMessages (
+            Id INTEGER NOT NULL CONSTRAINT PK_BlockedOutboundMessages PRIMARY KEY AUTOINCREMENT,
+            UserId INTEGER NULL,
+            Endpoint TEXT NOT NULL,
+            Recipient TEXT NOT NULL,
+            BodyPreview TEXT NOT NULL,
+            Reason TEXT NOT NULL,
+            BlockedAtUtc TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS IX_BlockedOutboundMessages_BlockedAtUtc ON BlockedOutboundMessages (BlockedAtUtc);
+        CREATE INDEX IF NOT EXISTS IX_BlockedOutboundMessages_UserId ON BlockedOutboundMessages (UserId);
+        """);
 }
 
 // Restore WhatsApp sessions on startup — includes "disconnected" sessions that have saved credentials

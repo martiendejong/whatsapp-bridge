@@ -1,5 +1,19 @@
 # Agent Progress
 
+## 2026-08-04 — task 869edf485
+Done: PR #48 — new OutboundGuardrailService gates sendMessage/sendMedia/forwardMessage:
+allow-listed recipients (default: Martien only) always pass, anyone else only within quiet
+hours (default 08:00-21:00 server local time). Blocked sends return 403 and persist to a new
+BlockedOutboundMessages table (self-healed via CREATE TABLE IF NOT EXISTS, same pattern as
+the Messages table), readable via GET /api/wa/blockedOutbound. Companion client-side fix in
+scp-jengo/jengo-agi#59.
+Verified: dotnet build clean; ran the app against a fresh throwaway SQLite DB with a seeded
+user+API connection and live-curled sendMessage — non-allow-listed recipient outside quiet
+hours blocked (403), same recipient allowed when quiet hours widened to cover current time,
+allow-listed recipient always passes, unauthenticated request still 401, blocked attempt
+correctly surfaced via GET /api/wa/blockedOutbound.
+Left: nothing.
+
 ## 2026-08-04 — task 869edf3k4
 Done: root-caused "0 isHistory rows after fresh re-pair" via log evidence and a live
 on-demand test. The 2026-08-03 QR re-pair completed at 21:35:38 UTC; the app pool was

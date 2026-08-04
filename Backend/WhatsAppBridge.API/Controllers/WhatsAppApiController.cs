@@ -18,17 +18,20 @@ public class WhatsAppApiController : ControllerBase
     private readonly AuthService _authService;
     private readonly WhatsAppBridgeService _whatsappService;
     private readonly EncryptionService _encryptionService;
+    private readonly OutboundGuardrailService _outboundGuardrail;
 
     public WhatsAppApiController(
         AppDbContext context,
         AuthService authService,
         WhatsAppBridgeService whatsappService,
-        EncryptionService encryptionService)
+        EncryptionService encryptionService,
+        OutboundGuardrailService outboundGuardrail)
     {
         _context = context;
         _authService = authService;
         _whatsappService = whatsappService;
         _encryptionService = encryptionService;
+        _outboundGuardrail = outboundGuardrail;
     }
 
     private async Task<(bool success, int? userId, string? error)> ValidateApiToken()
@@ -138,6 +141,10 @@ public class WhatsAppApiController : ControllerBase
             if (!success)
                 return Unauthorized(new { error });
 
+            var (allowed, blockReason) = await _outboundGuardrail.CheckAsync("sendMessage", request.To, request.Body, userId);
+            if (!allowed)
+                return StatusCode(403, new { error = blockReason, blocked = true });
+
             var sessionId = await GetUserSessionId(userId!.Value, request.SessionId);
             if (sessionId == null)
                 return BadRequest(new { error = request.SessionId != null
@@ -221,6 +228,10 @@ public class WhatsAppApiController : ControllerBase
             var (success, userId, error) = await ValidateApiToken();
             if (!success)
                 return Unauthorized(new { error });
+
+            var (allowed, blockReason) = await _outboundGuardrail.CheckAsync("sendMedia", request.To, request.Caption ?? "", userId);
+            if (!allowed)
+                return StatusCode(403, new { error = blockReason, blocked = true });
 
             var sessionId = await GetUserSessionId(userId!.Value, request.SessionId);
             if (sessionId == null)
@@ -491,6 +502,10 @@ public class WhatsAppApiController : ControllerBase
         if (!success)
             return Unauthorized(new { error });
 
+        var (allowed, blockReason) = await _outboundGuardrail.CheckAsync("forwardMessage", request.ToJid, request.Text, userId);
+        if (!allowed)
+            return StatusCode(403, new { error = blockReason, blocked = true });
+
         var sessionId = await GetUserSessionId(userId!.Value, request.SessionId);
         if (sessionId == null)
             return BadRequest(new { error = "No active WhatsApp session" });
@@ -712,6 +727,37 @@ public class WhatsAppApiController : ControllerBase
         {
             return StatusCode(500, new { error = ex.Message });
         }
+    }
+
+    /// <summary>
+    /// Outbound sends refused by the guardrail (task 869edf485): surfaces blocked attempts
+    /// instead of leaving them only in a log line, scoped to the caller's own user.
+    /// GET /api/wa/blockedOutbound?count=50
+    /// </summary>
+    [HttpGet("blockedOutbound")]
+    public async Task<IActionResult> GetBlockedOutbound([FromQuery] int count = 50)
+    {
+        var (success, userId, error) = await ValidateApiToken();
+        if (!success)
+            return Unauthorized(new { error });
+
+        count = Math.Clamp(count, 1, 500);
+
+        var blocked = await _context.BlockedOutboundMessages
+            .AsNoTracking()
+            .Where(b => b.UserId == userId!.Value)
+            .OrderByDescending(b => b.BlockedAtUtc)
+            .Take(count)
+            .ToListAsync();
+
+        return Ok(blocked.Select(b => new
+        {
+            endpoint = b.Endpoint,
+            to = b.Recipient,
+            bodyPreview = b.BodyPreview,
+            reason = b.Reason,
+            blockedAtUtc = b.BlockedAtUtc,
+        }));
     }
 
     /// <summary>
