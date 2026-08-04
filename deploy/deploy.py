@@ -408,7 +408,7 @@ def main():
     probe_email = os.environ.get("WHATSAPPBRIDGE_PROBE_EMAIL", "info@martiendejong.nl")
     probe_password = _get_secret(
         "WHATSAPPBRIDGE_PROBE_PASSWORD",
-        "Probe login password (vault: 'WhatsApp Bridge frontend login (martiendejong)')",
+        "Probe login password (vault project 8 cred 52: 'WhatsApp Bridge frontend login (martiendejong)')",
     )
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
