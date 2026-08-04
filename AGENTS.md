@@ -20,7 +20,7 @@ served a 500.30. None of the legacy scripts verify a build before uploading it, 
 upload before serving it, or can undo a bad deploy. `deploy/deploy.py` gates all three:
 
 - Refuses to build/upload if `Frontend/.env.production` doesn't declare exactly
-  `VITE_API_URL=https://whatsapp.wreckingball.ai`, and refuses again if the built JS bundle
+  `VITE_API_URL=https://api.whatsapp.wreckingball.ai`, and refuses again if the built JS bundle
   doesn't actually contain that URL.
 - Uploads to a temp remote folder, verifies every uploaded file's size against the local
   file, then moves the temp folder into place server-side — never serves a partial upload.

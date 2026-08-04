@@ -27,7 +27,7 @@ BEGIN
             'implicit',
             'WhatsApp Bridge',
             '["ept:authorization","ept:token","gt:authorization_code","gt:refresh_token","rst:code","scp:openid","scp:profile","scp:email","scp:roles"]',
-            '["https://whatsapp.wreckingball.ai/api/auth/iam/callback","http://localhost:5149/api/auth/iam/callback"]',
+            '["https://api.whatsapp.wreckingball.ai/api/auth/iam/callback","http://localhost:5149/api/auth/iam/callback"]',
             '["https://whatsapp.wreckingball.ai/login","http://localhost:5173/login"]',
             '["ft:pkce"]',
             gen_random_uuid()::TEXT

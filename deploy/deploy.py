@@ -57,7 +57,9 @@ FRONTEND_DIR = REPO_ROOT / "Frontend"
 ENV_PRODUCTION_FILE = FRONTEND_DIR / ".env.production"
 REMOTE_HELPER_LOCAL_PATH = REPO_ROOT / "deploy" / "remote_helpers.ps1"
 
-PUBLIC_URL = "https://whatsapp.wreckingball.ai"
+FRONTEND_URL = "https://whatsapp.wreckingball.ai"
+API_URL = "https://api.whatsapp.wreckingball.ai"
+PUBLIC_URL = FRONTEND_URL  # kept for smoke-check back-compat (version, probe login, bundle)
 SSH_HOST = "85.215.217.154"
 SSH_PORT = 22
 SSH_USER = "administrator"
@@ -150,7 +152,7 @@ def _validate_env_production():
         raise DeployAborted(
             f"{ENV_PRODUCTION_FILE} does not exist. A build right now would embed an EMPTY "
             f"API base URL — this is the exact bug that broke login on 2026-08-01 and "
-            f"2026-08-04. Create it with VITE_API_URL={PUBLIC_URL} before deploying."
+            f"2026-08-04. Create it with VITE_API_URL={API_URL} before deploying."
         )
     value = None
     for line in ENV_PRODUCTION_FILE.read_text(encoding="utf-8").splitlines():
@@ -158,9 +160,9 @@ def _validate_env_production():
         if line.startswith("VITE_API_URL="):
             value = line.split("=", 1)[1].strip()
             break
-    if value != PUBLIC_URL:
+    if value != API_URL:
         raise DeployAborted(
-            f"{ENV_PRODUCTION_FILE} has VITE_API_URL={value!r}, expected {PUBLIC_URL!r}. This is "
+            f"{ENV_PRODUCTION_FILE} has VITE_API_URL={value!r}, expected {API_URL!r}. This is "
             f"the same class of bug that broke login before (e.g. the 2026-03-08 incident, where "
             f"an extra ':5001' bypassed IIS entirely). Fix the file before deploying."
         )
