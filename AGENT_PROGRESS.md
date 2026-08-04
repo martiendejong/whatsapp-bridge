@@ -1,5 +1,57 @@
 # Agent Progress
 
+## 2026-08-04 — task 869edf3na (round 2, PR #47 review fixes)
+Done: addressed both CHANGES REQUESTED gaps from the commit-4c0373f review.
+(1) `deploy/remote_helpers.ps1`'s `Invoke-Rollback` now excludes `$ExcludeNames`
+(server-only files: `appsettings.Production.json`/`.Secrets.json`,
+`whatsappbridge.db*`) from both the pre-restore delete and the `robocopy` restore
+(`/XF`), same as `Invoke-SwapBackend` already did — a rollback can no longer
+silently overwrite the live DB with the pre-deploy snapshot. `Invoke-Backup`'s
+robocopy also now excludes them, so the backup never captures the DB in the
+first place. (2) `deploy/deploy.py`'s deploy loop now tracks `live_state_changed`
+(set once the backend or frontend has actually been swapped into place) — any
+`DeployAborted` raised after that point (e.g. a frontend upload failure once the
+backend is already live) now triggers the same rollback + smoke-recheck path
+that only `SmokeCheckFailed` used to trigger. The rollback path re-raises as
+`SmokeCheckFailed` regardless of the original exception type, so the top-level
+"(rolled back)" exit message stays accurate.
+Verified: `python -m py_compile deploy/deploy.py` clean; PowerShell
+`Parser::ParseFile` on `remote_helpers.ps1` reports zero syntax errors; reran
+`python deploy/deploy.py --check-only` against the repo's real state — refuses
+(exit 1) with no `Frontend/.env.production`, refuses (exit 1) with a deliberately
+wrong `VITE_API_URL=http://localhost:5001`, and passes with the correct value;
+backend gate (`--skip-frontend`) still publishes 60 files/29 DLLs and passes.
+Not re-exercised live against production (no real deploy/rollback run this
+session) — same limitation as round 1.
+Left: nothing for this task. A first real deploy should still be human-watched
+per round 1's note.
+
+## 2026-08-04 — task 869edf3na
+Done: replaced the old `deploy/deploy.py` (a single-DLL app_offline copy loop) with a
+hardened deploy script that is now THE only supported deploy path (documented in new
+`AGENTS.md`). It refuses to build/upload unless `Frontend/.env.production` declares exactly
+`VITE_API_URL=https://whatsapp.wreckingball.ai` (checked against the known-correct URL, not
+just self-consistency — an earlier version of the gate only checked the bundle against
+whatever the file said, which would have missed the 2026-03-08 `:5001` wrong-port bug),
+and separately verifies the built JS actually contains it. Uploads go to a temp remote
+folder first (size-verified per file via SFTP `stat`), then a `deploy/remote_helpers.ps1`
+helper (uploaded once per deploy, invoked over SSH) does the server-side move into place —
+backend as a full delete-then-move-all (never a single-DLL swap), frontend assets before
+`index.html`. Post-deploy smoke checks (`/api/version`, a probe login, the live bundle
+asset, WhatsApp session continuity vs. a pre-deploy snapshot) trigger an automatic rollback
+from a timestamped pre-deploy backup if any fail.
+Verified: `dotnet build -c Release` clean (0 warnings/errors). Ran `python deploy/deploy.py
+--check-only` against the repo's actual current state (`Frontend/.env.production` doesn't
+exist yet — PR #46 not merged) and confirmed it refuses with exit code 1 before any network
+code runs; also tested a wrong-port value, an empty value, and the correct value (passes,
+exit 0) to confirm the gate catches both known incident classes. Remote SSH/rollback logic
+(`remote_helpers.ps1`) is PowerShell-parse-checked but not exercised against the live
+server — no real deploy was run against production in this session.
+Left: this session did not merge or touch PR #46 (`.env.production` commit) — separate task,
+still open. Once merged, `deploy/deploy.py` (no flags) becomes usable end-to-end; until then
+`--check-only` is what proves the gate. A first real deploy should be run and watched by a
+human before agents rely on the rollback path unattended.
+
 ## 2026-08-04 — task 869edf485
 Done: PR #48 — new OutboundGuardrailService gates sendMessage/sendMedia/forwardMessage:
 allow-listed recipients (default: Martien only) always pass, anyone else only within quiet
