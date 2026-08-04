@@ -23,7 +23,15 @@ export const auth = {
     api.post('/api/auth/register', { Email: email, Password: password }),
   login: (email: string, password: string) =>
     api.post('/api/auth/login', { Email: email, Password: password }),
+  me: (token: string) =>
+    api.get('/api/auth/me', { headers: { Authorization: `Bearer ${token}` } }),
 };
+
+export const iam = {
+  status: () => api.get('/api/auth/iam/status'),
+};
+
+export { API_BASE_URL };
 
 export const apiConnections = {
   getAll: () => api.get('/api/apiconnections'),

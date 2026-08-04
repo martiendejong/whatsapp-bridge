@@ -79,7 +79,9 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
         options => { });
 
 // Services
+builder.Services.AddHttpClient();
 builder.Services.AddScoped<AuthService>();
+builder.Services.AddScoped<IamService>();
 builder.Services.AddScoped<TwoFactorService>();
 builder.Services.AddSingleton<EncryptionService>();
 // Singleton: forwards allow-listed "/task ..." inbound messages to jengo-agi intake (default-OFF, additive)

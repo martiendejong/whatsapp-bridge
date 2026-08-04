@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './AuthContext';
 import Login from './pages/Login';
 import Register from './pages/Register';
+import IamCallback from './pages/IamCallback';
 import Dashboard from './pages/Dashboard';
 import ApiConnections from './pages/ApiConnections';
 import WhatsAppSessions from './pages/WhatsAppSessions';
@@ -42,6 +43,7 @@ function AppRoutes() {
             </PublicRoute>
           }
         />
+        <Route path="/auth/iam/callback" element={<IamCallback />} />
         <Route
           path="/dashboard"
           element={

@@ -236,3 +236,38 @@ repo-wide misconfiguration (no test projects, no root solution file) unrelated t
 Left: nothing. Always `git fetch && git merge --ff-only origin/<base>` before trusting a
 grep/gh-pr-list search for "does a PR already exist" — a stale local checkout silently
 narrows every one of those searches.
+
+## 2026-08-04 — task 869edf3gq
+Done: "Login with IAM" on `/login` — `IamService` (PKCE S256, cookie-stored state/verifier)
++ `IamAuthController` (`/api/auth/iam/status|login|callback`) do the authorization-code
+exchange against the IAM System (`maendeleo.martiendejong.nl`), then `AuthService.
+FindOrCreateFromIamAsync` maps the id_token's email onto the existing bridge account
+(case-insensitive match — resolves to user 4 for info@martiendejong.nl, no duplicate
+created) and a local JWT is issued via the existing `GenerateJwtToken`. Frontend gained
+an "Login with IAM" button (shown only when `/api/auth/iam/status` reports enabled) and
+an `/auth/iam/callback` route that exchanges the redirected token via `GET /api/auth/me`
+and calls the existing `AuthContext.login`. Password login path is untouched. Registered
+the `whatsapp-bridge` OpenIddict client in the IAM Postgres DB (public client, PKCE,
+`tools/register-iam-client.sql`, mirrors coach-app/jengo-web) — it is a public client so
+there is no client secret to put in vault.
+Verified: backend `dotnet build` clean (0 errors); frontend `tsc --noEmit` + `npm run
+build` clean. Confirmed live against the real IAM authority: `/connect/authorize` with
+`client_id=whatsapp-bridge` 302-redirects to the IAM login page (client recognized),
+while a bogus client_id 400s — proves the registration is live and PKCE parameters are
+accepted. No local WhatsApp Bridge SQLite DB was available in this worktree to exercise
+`FindOrCreateFromIamAsync` against a real user 4 row end-to-end.
+Left: a human needs to actually click through the full flow once on
+whatsapp.wreckingball.ai (browser/session tooling wasn't available here) to confirm the
+final redirect lands on `/dashboard` logged in as user 4.
+
+## 2026-08-04 — task 869edf3gq (round 2, review fix)
+Done: fixed the reviewer-flagged gap on PR #50 — `IamAuthController.Callback()` now
+checks `user.TwoFactorEnabled` and refuses SSO login (redirect to `/login?iam_error=
+two_factor_required` with a clear message) instead of issuing a JWT unconditionally,
+matching the protection `AuthController.Login` already enforces for password login.
+2FA-enabled accounts must still use password login (which runs the existing verify-2fa
+step); non-2FA accounts are unaffected.
+Verified: backend `dotnet build` clean (0 errors); frontend `tsc --noEmit` + `npm run
+build` clean.
+Left: nothing new — same human click-through gap noted in the prior entry (no browser
+tool available this session).

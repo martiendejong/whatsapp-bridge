@@ -106,6 +106,22 @@ public class AuthController : ControllerBase
     }
 
     [Authorize]
+    [HttpGet("me")]
+    public async Task<IActionResult> Me()
+    {
+        var userId = GetUserId();
+        var user = await _authService.GetUserByIdAsync(userId);
+
+        if (user == null)
+            return NotFound();
+
+        return Ok(new
+        {
+            user = new { user.Id, user.Email, user.LastLoginAt, user.CreatedAt, user.IsActive, user.IsAdmin }
+        });
+    }
+
+    [Authorize]
     [HttpPut("update-email")]
     public async Task<IActionResult> UpdateEmail([FromBody] UpdateEmailRequest request)
     {
