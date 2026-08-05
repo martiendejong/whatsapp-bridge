@@ -298,6 +298,37 @@ public class WhatsAppApiController : ControllerBase
             ).ToList();
         }
 
+        // Fall back to SQLite when in-memory store is empty (restart / re-pair / deploy).
+        // The Messages table is excluded from deploy cleanup and is the durable record.
+        if (messages == null || messages.Count == 0)
+        {
+            var sessionIds = await _context.WhatsAppSessions
+                .Where(s => s.UserId == userId!.Value)
+                .Select(s => s.SessionId)
+                .ToListAsync();
+
+            var bare = chatId.Split('@')[0].Split(':')[0];
+            var stored = await _context.Messages.AsNoTracking()
+                .Where(m => (m.UserId == userId!.Value || (m.UserId == null && sessionIds.Contains(m.SessionId)))
+                         && (m.ChatJid == chatId || m.ChatJid.StartsWith(bare + "@")))
+                .OrderByDescending(m => m.Timestamp).ThenByDescending(m => m.Id)
+                .Take(limit)
+                .ToListAsync();
+
+            stored.Reverse();
+            return Ok(stored.Select(m => new
+            {
+                id = m.MessageId,
+                from = m.FromMe ? "me" : m.Sender,
+                to = m.ChatJid,
+                body = m.Body,
+                timestamp = m.Timestamp,
+                type = m.Type,
+                mediaUrl = m.MediaUrl,
+                mimeType = m.MimeType
+            }));
+        }
+
         return Ok(messages);
     }
 
@@ -364,7 +395,9 @@ public class WhatsAppApiController : ControllerBase
     }
 
     /// <summary>
-    /// Get all chats
+    /// Get all chats.
+    /// Upserts live results into SQLite (Chats table) so the list survives app-pool
+    /// restarts and deploys. Falls back to the stored list when Dawa is offline.
     /// GET /api/wa/getChats
     /// </summary>
     [HttpGet("getChats")]
@@ -375,14 +408,56 @@ public class WhatsAppApiController : ControllerBase
             return Unauthorized(new { error });
 
         var resolvedSessionId = await GetUserSessionId(userId!.Value, sessionId);
-        if (resolvedSessionId == null)
-            return BadRequest(new { error = sessionId != null
-                ? $"WhatsApp session '{sessionId}' not found or not connected"
-                : "No active WhatsApp session" });
 
-        var chats = await _whatsappService.GetChatsAsync(resolvedSessionId);
+        List<object>? liveChats = null;
+        if (resolvedSessionId != null)
+            liveChats = await _whatsappService.GetChatsAsync(resolvedSessionId);
 
-        return Ok(chats);
+        if (liveChats != null && liveChats.Count > 0)
+        {
+            // Upsert into SQLite so this list survives the next restart/deploy
+            var now = DateTime.UtcNow;
+            foreach (var chat in liveChats)
+            {
+                // chat is an anonymous object — reflect jid/name/phone out of it
+                var type = chat.GetType();
+                var jid  = type.GetProperty("jid")?.GetValue(chat)?.ToString() ?? "";
+                var name = type.GetProperty("name")?.GetValue(chat)?.ToString() ?? "";
+                var phone = type.GetProperty("phone")?.GetValue(chat)?.ToString() ?? "";
+                if (string.IsNullOrEmpty(jid)) continue;
+
+                var existing = await _context.Chats
+                    .FirstOrDefaultAsync(c => c.UserId == userId!.Value && c.Jid == jid);
+                if (existing == null)
+                {
+                    _context.Chats.Add(new Models.StoredChat
+                    {
+                        UserId = userId!.Value,
+                        Jid = jid,
+                        Name = name,
+                        Phone = phone,
+                        LastSeenAt = now
+                    });
+                }
+                else
+                {
+                    existing.Name = name;
+                    existing.Phone = phone;
+                    existing.LastSeenAt = now;
+                }
+            }
+            await _context.SaveChangesAsync();
+            return Ok(liveChats);
+        }
+
+        // Dawa offline or returned nothing — return stored chat list from SQLite
+        var stored = await _context.Chats
+            .Where(c => c.UserId == userId!.Value)
+            .OrderByDescending(c => c.LastSeenAt)
+            .Select(c => (object)new { jid = c.Jid, name = c.Name, phone = c.Phone, archived = false, pinned = false })
+            .ToListAsync();
+
+        return Ok(stored);
     }
 
     /// <summary>
