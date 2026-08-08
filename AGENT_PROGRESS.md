@@ -271,3 +271,36 @@ Verified: backend `dotnet build` clean (0 errors); frontend `tsc --noEmit` + `np
 build` clean.
 Left: nothing new — same human click-through gap noted in the prior entry (no browser
 tool available this session).
+
+## 2026-08-08 — task 869efnkj2
+Done: PR #47 (869edf3na) already added a full post-deploy smoke-check framework, but its
+`PUBLIC_URL` constant (`https://whatsapp.wreckingball.ai`) was used for the API smoke checks
+too — live curl proved that host 404s on `/api/version`; the real API is a separate IIS
+site/hostname, `https://api.whatsapp.wreckingball.ai`. That also meant `_validate_env_production`
+required the WRONG `VITE_API_URL`, which would have rejected PR #46's (open, correct)
+`.env.production` once merged. Split `FRONTEND_URL`/`API_URL`, pointed all API smoke checks
+(`/api/version`, probe login, `GET /api/whatsapp/sessions`) at `API_URL`, kept the bundle-asset
+check on `FRONTEND_URL`, hardened all smoke-check HTTP calls to catch connection-level failures
+(DNS/refused/timeout) as `SmokeCheckFailed` (previously only non-200 was caught), and added a
+clear final success line naming the verified live version + build time + deployed commit SHA.
+Corrected AGENTS.md's architecture diagram and VITE_API_URL instructions to match (they had the
+same wrong assumption baked in from PR #47).
+While pushing this branch, discovered `master` had picked up two small unpushed commits
+(742f336, ac845f8, authored 2026-08-04 by an earlier, never-merged session) making the same
+FRONTEND_URL/API_URL split for the same reason — pure coincidental convergence, not something
+either session could have seen. Merged master into this branch and kept this branch's version
+(the same fix plus the connection-error hardening, version/commit-naming success line, and
+AGENTS.md corrections those two commits didn't include); dropped the leftover
+`PUBLIC_URL = FRONTEND_URL` back-compat alias since nothing else in the file (or repo) still
+references it.
+Verified: `python -m py_compile deploy/deploy.py` clean. Live, read-only exercise of the smoke-
+check functions against the real bridge: `/api/version` 200 + probe login + `GET
+/api/whatsapp/sessions` (1 connected session) succeed against `API_URL`; the same call against
+`FRONTEND_URL` (the pre-fix behavior) raises `SmokeCheckFailed` with a clear 404 message and a
+simulated top-level run exits 1; a fully unreachable host also raises `SmokeCheckFailed` (not an
+unhandled traceback) after the hardening fix. Did not run a real full deploy (build+upload+swap
+against production) — that needs the SSH/probe credentials and touches the live site; the smoke-
+check logic itself is what this task and its verification cover.
+Left: nothing for this task. Real end-to-end deploy exercise (a human or agent running
+`deploy/deploy.py --yes` for an actual release) remains the natural next real-world proof, as
+already noted in PR #47's own test plan.
