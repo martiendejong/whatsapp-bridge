@@ -181,10 +181,35 @@ public sealed class WhatsAppClient : IAsyncDisposable
         if (_noiseProcessor == null || _state != ConnectionState.Connected)
             throw new InvalidOperationException("Client is not connected.");
 
-        // Normalize to JID
-        var jid = to.Contains('@') ? to : $"{new string(to.Where(char.IsDigit).ToArray())}@s.whatsapp.net";
+        var jid = NormalizeSendJid(to);
         var messageId = await _noiseProcessor.SendTextMessageAsync(jid, text, cancellationToken);
         return (messageId, jid);
+    }
+
+    /// <summary>
+    /// Canonicalize a send target to the bare user JID. A device-suffix JID
+    /// ("254715438010:78@s.whatsapp.net", as returned by getChats for some chats) is accepted
+    /// by the server but addresses a single linked device — the message never shows up on the
+    /// recipient's phone, and the store grows a duplicate chat under the suffixed key.
+    /// "@c.us" is the legacy alias for the same user domain. Group ("@g.us"), lid and other
+    /// domains pass through untouched.
+    /// </summary>
+    internal static string NormalizeSendJid(string to)
+    {
+        if (!to.Contains('@'))
+            return $"{new string(to.Where(char.IsDigit).ToArray())}@s.whatsapp.net";
+
+        var at = to.IndexOf('@');
+        var user = to[..at];
+        var domain = to[(at + 1)..];
+
+        if (domain is "s.whatsapp.net" or "c.us")
+        {
+            var colon = user.IndexOf(':');
+            if (colon >= 0) user = user[..colon];
+            return $"{user}@s.whatsapp.net";
+        }
+        return to;
     }
 
     public Task<List<(string Jid, string Name)>> GetContactsAsync(CancellationToken ct)
@@ -299,7 +324,7 @@ public sealed class WhatsAppClient : IAsyncDisposable
         if (_noiseProcessor == null || _state != ConnectionState.Connected)
             throw new InvalidOperationException("Client is not connected.");
 
-        var jid = to.Contains('@') ? to : $"{new string(to.Where(char.IsDigit).ToArray())}@s.whatsapp.net";
+        var jid = NormalizeSendJid(to);
         await _noiseProcessor.SendMediaAsync(jid, fileBytes, mediaType, mimeType, caption, fileName, cancellationToken);
     }
 
