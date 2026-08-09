@@ -19,6 +19,7 @@ public class WhatsAppBridgeService : IAsyncDisposable
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<WhatsAppBridgeService> _logger;
     private readonly TaskIntakeForwarder _taskIntake;
+    private readonly InboundWebhookForwarder _inboundWebhook;
 
     // One Dawa client per sessionId
     private readonly ConcurrentDictionary<string, WhatsAppClient> _clients = new();
@@ -32,13 +33,15 @@ public class WhatsAppBridgeService : IAsyncDisposable
         IConfiguration configuration,
         ILoggerFactory loggerFactory,
         ILogger<WhatsAppBridgeService> logger,
-        TaskIntakeForwarder taskIntake)
+        TaskIntakeForwarder taskIntake,
+        InboundWebhookForwarder inboundWebhook)
     {
         _scopeFactory = scopeFactory;
         _configuration = configuration;
         _loggerFactory = loggerFactory;
         _logger = logger;
         _taskIntake = taskIntake;
+        _inboundWebhook = inboundWebhook;
     }
 
     // ─── Session lifecycle ─────────────────────────────────────────────────────
@@ -744,6 +747,11 @@ public class WhatsAppBridgeService : IAsyncDisposable
             // a slow/failed intake call can never block or crash the inbound pipeline.
             if (!isHistory && !msg.FromMe && _taskIntake.IsEnabled)
                 DispatchTaskIntake(sessionId, msg);
+
+            // Inbound webhook push (jengo-agi direct-reply): same gating and safety
+            // contract as task intake — live inbound only, fire-and-forget, never throws.
+            if (!isHistory && !msg.FromMe)
+                _inboundWebhook.Forward(sessionId, msg);
 
             if (isHistory)
             {
