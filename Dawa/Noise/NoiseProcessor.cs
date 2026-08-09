@@ -892,7 +892,15 @@ public sealed class NoiseProcessor : IAsyncDisposable
 
                     if (msgType == Messages.MessageType.Unknown)
                     {
-                        _logger.LogDebug("Participants path: unknown message type from {Jid} — ACKing and skipping", senderJid);
+                        // Information + raw hex, not Debug: an Unknown drop is the ONLY trace a
+                        // message leaves when the parser lacks its field mapping (the aug-2026
+                        // ephemeralMessage gap silently ate all inbound for days). The hex dump
+                        // lets the next gap be diagnosed straight from the production log.
+                        var stripped = StripSignalPadding(plaintext);
+                        _logger.LogInformation(
+                            "Participants path: unknown message type from {Jid} — ACKing and skipping ({Len} bytes, first={Hex})",
+                            senderJid, stripped.Length,
+                            Convert.ToHexString(stripped[..Math.Min(64, stripped.Length)]));
                         _ = SendAckAsync(id, from, timestamp, participant);
                         continue;
                     }
@@ -1053,7 +1061,12 @@ public sealed class NoiseProcessor : IAsyncDisposable
                 }
                 else
                 {
-                    _logger.LogDebug("Direct enc path: unknown message type from {Jid} — ACKing", from);
+                    // Information + raw hex — see the matching comment on the participants path:
+                    // an Unknown drop must be diagnosable from the production log alone.
+                    _logger.LogInformation(
+                        "Direct enc path: unknown message type from {Jid} — ACKing ({Len} bytes, first={Hex})",
+                        from, protoBytes2.Length,
+                        Convert.ToHexString(protoBytes2[..Math.Min(64, protoBytes2.Length)]));
                 }
                 _ = SendAckAsync(id, from, timestamp, participant);
             }
