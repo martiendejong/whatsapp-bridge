@@ -4303,12 +4303,20 @@ public sealed class NoiseProcessor : IAsyncDisposable
 
     /// <summary>Decompresses zlib-deflated data (strips 2-byte zlib header + 4-byte adler32 trailer).</summary>
     /// <summary>
-    /// Strip Signal Protocol message padding: ISO 7816-4 style padding
-    /// where the actual message is followed by 0x80 and then zero bytes.
-    /// After AES-CBC PKCS7 decryption, this layer must be removed before proto parsing.
+    /// Strip WhatsApp message padding. WhatsApp pads 1:1 message plaintext PKCS7-style with
+    /// 1-16 bytes where the last byte is the pad length (the mirror of PadMessage /
+    /// Baileys writeRandomPadMax16). Leaving the padding in place makes ProtoEncoder walk
+    /// into garbage after the real message: depending on the random pad bytes the parse
+    /// throws, silently overwrites already-parsed fields (e.g. 0x0A 0x00 blanks
+    /// Conversation), or survives — i.e. flaky inbound. ISO 7816-4 (0x80 + zero bytes) is
+    /// kept as a fallback for the paths that historically carried it.
     /// </summary>
     private static byte[] StripSignalPadding(byte[] data)
     {
+        if (data.Length == 0) return data;
+        int pad = data[^1];
+        if (pad >= 1 && pad <= 16 && pad < data.Length)
+            return data[..^pad];
         int end = data.Length - 1;
         while (end > 0 && data[end] == 0x00) end--;
         if (end >= 0 && data[end] == 0x80)
