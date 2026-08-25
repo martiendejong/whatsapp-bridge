@@ -77,6 +77,7 @@ public class WhatsAppBridgeService : IAsyncDisposable
         client.MessageReceived        += (_, msg) => StoreMessage(sessionId, msg);
         client.HistoryMessageReceived += (_, msg) => StoreMessage(sessionId, msg, isHistory: true);
         client.HistorySyncCompleted   += (_, n)   => { _logger.LogInformation("HistorySync: persisting {N} msgs for {Sid}", n, sessionId); PersistMessages(sessionId); };
+        client.MessageStatusUpdated   += (_, evt) => UpdateMessageStatus(sessionId, evt.Jid, evt.MessageId, evt.Status);
 
         client.Connected += (_, _) =>
         {
@@ -154,6 +155,7 @@ public class WhatsAppBridgeService : IAsyncDisposable
         client.MessageReceived        += (_, msg) => StoreMessage(sessionId, msg);
         client.HistoryMessageReceived += (_, msg) => StoreMessage(sessionId, msg, isHistory: true);
         client.HistorySyncCompleted   += (_, n)   => { _logger.LogInformation("HistorySync: persisting {N} msgs for {Sid}", n, sessionId); PersistMessages(sessionId); };
+        client.MessageStatusUpdated   += (_, evt) => UpdateMessageStatus(sessionId, evt.Jid, evt.MessageId, evt.Status);
 
         client.Connected += (_, _) =>
         {
@@ -196,31 +198,89 @@ public class WhatsAppBridgeService : IAsyncDisposable
     public async Task<object?> SendMessageAsync(string sessionId, string to, string body)
     {
         var client = GetConnectedClient(sessionId);
+        (string messageId, string jid) sent;
         try
         {
-            await client.SendMessageAsync(to, body, CancellationToken.None);
+            sent = await client.SendMessageAsync(to, body, CancellationToken.None);
         }
         catch (Exception ex) when (ex is not WhatsAppServiceException)
         {
             _logger.LogError(ex, "SendMessageAsync failed for session {SessionId} to {To}", sessionId, to);
             throw new WhatsAppServiceException(WhatsAppError.MessageFailed(ex.Message), ex);
         }
-        return new { success = true };
+
+        var key = $"{sessionId}:{sent.jid}";
+        var storedMessage = new WhatsAppMessage(
+            Id: sent.messageId,
+            From: "me",
+            To: sent.jid,
+            Body: body,
+            Timestamp: DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            Status: Dawa.Messages.MessageStatus.Sent.ToString());
+        var list = _messageStore.GetOrAdd(key, _ => new List<WhatsAppMessage>());
+        lock (list)
+        {
+            list.Add(storedMessage);
+            if (list.Count > MaxMessagesPerChat) list.RemoveAt(0);
+        }
+
+        // The send path bypasses the StoreMessage funnel, so mirror the outgoing message into
+        // the durable Messages table here as well (task 869ecbkv7).
+        PersistMessageToDatabase(sessionId, sent.jid, sent.messageId, fromMe: true,
+            sender: "me", body: body, type: "text", mediaUrl: null, mediaKey: null, mimeType: null,
+            timestamp: storedMessage.Timestamp, isHistory: false);
+
+        return new { success = true, messageId = sent.messageId };
+    }
+
+    /// <summary>Applies a delivery/read/played status update to a previously-sent message in the store.</summary>
+    private void UpdateMessageStatus(string sessionId, string jid, string messageId, Dawa.Messages.MessageStatus status)
+    {
+        var key = $"{sessionId}:{jid}";
+        if (!_messageStore.TryGetValue(key, out var msgs)) return;
+        lock (msgs)
+        {
+            var idx = msgs.FindIndex(m => m.Id == messageId);
+            if (idx >= 0) msgs[idx] = msgs[idx] with { Status = status.ToString() };
+        }
     }
 
     public async Task<object?> SendReplyAsync(string sessionId, string to, string body, string quotedMsgId, string quotedFromJid)
     {
         var client = GetConnectedClient(sessionId);
+        (string messageId, string jid) sent;
         try
         {
-            await client.SendReplyAsync(to, body, quotedMsgId, quotedFromJid, CancellationToken.None);
+            sent = await client.SendReplyAsync(to, body, quotedMsgId, quotedFromJid, CancellationToken.None);
         }
         catch (Exception ex) when (ex is not WhatsAppServiceException)
         {
             _logger.LogError(ex, "SendReplyAsync failed for session {SessionId} to {To}", sessionId, to);
             throw new WhatsAppServiceException(WhatsAppError.MessageFailed(ex.Message), ex);
         }
-        return new { success = true };
+
+        var key = $"{sessionId}:{sent.jid}";
+        var storedMessage = new WhatsAppMessage(
+            Id: sent.messageId,
+            From: "me",
+            To: sent.jid,
+            Body: body,
+            Timestamp: DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            Status: Dawa.Messages.MessageStatus.Sent.ToString());
+        var list = _messageStore.GetOrAdd(key, _ => new List<WhatsAppMessage>());
+        lock (list)
+        {
+            list.Add(storedMessage);
+            if (list.Count > MaxMessagesPerChat) list.RemoveAt(0);
+        }
+
+        // Mirror SendMessageAsync (task 869ecbkv7): the send path bypasses the StoreMessage
+        // funnel, so persist the outgoing reply into the durable Messages table too.
+        PersistMessageToDatabase(sessionId, sent.jid, sent.messageId, fromMe: true,
+            sender: "me", body: body, type: "text", mediaUrl: null, mediaKey: null, mimeType: null,
+            timestamp: storedMessage.Timestamp, isHistory: false);
+
+        return new { success = true, messageId = sent.messageId };
     }
 
     public async Task<byte[]?> DownloadMediaAsync(string sessionId, string mediaUrl, string mediaKeyBase64, string mimeType)
@@ -439,25 +499,83 @@ public class WhatsAppBridgeService : IAsyncDisposable
         var key = $"{sessionId}:{jid}";
 
         // Find the oldest stored message for this chat so the phone knows where to continue from
+        // ("give me messages older than this one"). Without this anchor the request behaves like
+        // a fresh sync of the newest `count` messages instead of a backfill — the bug behind
+        // "requestHistory returned success but delivered nothing" (task 869ecy6kp).
         string? oldestMsgId     = null;
         bool    oldestFromMe    = false;
         long    oldestTimestamp = 0;
 
-        if (!noAnchor && _messageStore.TryGetValue(key, out var msgs))
+        if (!noAnchor)
         {
-            lock (msgs)
+            // Prefer the durable SQLite store (survives restarts/re-pairs and spans every
+            // SessionId the user has ever paired) over the in-memory cache, which is empty
+            // right after an app-pool restart even though history already exists in SQLite.
+            var dbOldest = await FindOldestStoredMessageAsync(sessionId, jid);
+            if (dbOldest != null)
             {
-                var oldest = msgs.MinBy(m => m.Timestamp);
-                if (oldest != null)
+                oldestMsgId     = dbOldest.Value.MessageId;
+                oldestFromMe    = dbOldest.Value.FromMe;
+                oldestTimestamp = dbOldest.Value.Timestamp * 1000L; // convert seconds → milliseconds
+            }
+            else if (_messageStore.TryGetValue(key, out var msgs))
+            {
+                lock (msgs)
                 {
-                    oldestMsgId     = oldest.Id;
-                    oldestFromMe    = oldest.From == "me";
-                    oldestTimestamp = oldest.Timestamp * 1000L; // convert seconds → milliseconds
+                    var oldest = msgs.MinBy(m => m.Timestamp);
+                    if (oldest != null)
+                    {
+                        oldestMsgId     = oldest.Id;
+                        oldestFromMe    = oldest.From == "me";
+                        oldestTimestamp = oldest.Timestamp * 1000L;
+                    }
                 }
             }
         }
 
-        await client.RequestOnDemandHistorySyncAsync(jid, count, CancellationToken.None);
+        _logger.LogInformation(
+            "RequestOnDemandHistoryAsync: chat={Chat} count={Count} anchor={Anchor}",
+            jid, count, oldestMsgId ?? "(none)");
+
+        await client.RequestOnDemandHistorySyncAsync(jid, count, CancellationToken.None,
+            oldestMsgId, oldestFromMe, oldestTimestamp);
+    }
+
+    /// <summary>
+    /// Finds the oldest durably-stored message for a chat, across every SessionId belonging to
+    /// the same user as <paramref name="sessionId"/> — a re-pair gets a new SessionId, and the
+    /// backfill anchor must not reset just because the user re-scanned the QR code.
+    /// </summary>
+    private async Task<(string MessageId, bool FromMe, long Timestamp)?> FindOldestStoredMessageAsync(string sessionId, string chatJid)
+    {
+        try
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+
+            var userId = await db.WhatsAppSessions
+                .Where(s => s.SessionId == sessionId)
+                .Select(s => (int?)s.UserId)
+                .FirstOrDefaultAsync();
+            if (userId == null) return null;
+
+            var sessionIds = await db.WhatsAppSessions
+                .Where(s => s.UserId == userId.Value)
+                .Select(s => s.SessionId)
+                .ToListAsync();
+
+            var oldest = await db.Messages.AsNoTracking()
+                .Where(m => sessionIds.Contains(m.SessionId) && m.ChatJid == chatJid)
+                .OrderBy(m => m.Timestamp)
+                .FirstOrDefaultAsync();
+
+            return oldest == null ? null : (oldest.MessageId, oldest.FromMe, oldest.Timestamp);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "FindOldestStoredMessageAsync failed for chat {Chat} — falling back to in-memory anchor", chatJid);
+            return null;
+        }
     }
 
     public async Task<List<object>?> FetchMessageHistoryAsync(string sessionId, string jid, int count)
@@ -562,7 +680,22 @@ public class WhatsAppBridgeService : IAsyncDisposable
     public Dawa.Messages.MessageStatus? GetMessageStatus(string sessionId, string messageId)
     {
         if (_clients.TryGetValue(sessionId, out var client))
-            return client.GetMessageStatus(messageId);
+        {
+            var live = client.GetMessageStatus(messageId);
+            if (live != null) return live;
+        }
+
+        // Fall back to the persisted message store — covers messages whose status
+        // was recorded by a prior client instance (e.g. after a reconnect).
+        var prefix = $"{sessionId}:";
+        foreach (var kv in _messageStore)
+        {
+            if (!kv.Key.StartsWith(prefix, StringComparison.Ordinal)) continue;
+            WhatsAppMessage? found;
+            lock (kv.Value) { found = kv.Value.FirstOrDefault(m => m.Id == messageId); }
+            if (found?.Status != null && Enum.TryParse<Dawa.Messages.MessageStatus>(found.Status, out var parsed))
+                return parsed;
+        }
         return null;
     }
 
@@ -673,6 +806,53 @@ public class WhatsAppBridgeService : IAsyncDisposable
 
         // Persist to disk (throttle for history: only persist in batch via caller)
         if (!isHistory) PersistMessages(sessionId);
+
+        // Durable copy in SQLite (task 869ecbkv7): the in-memory store is capped and starts
+        // empty after a restart or re-pair, so everything that decrypts is also appended to
+        // the Messages table. Fire-and-forget with a full guard — a slow or failing DB write
+        // must never block or crash the inbound pipeline.
+        PersistMessageToDatabase(sessionId, msg.RemoteJid, msg.Id, msg.FromMe,
+            msg.FromMe ? "me" : msg.From, msg.Text ?? "", msg.Type.ToString().ToLowerInvariant(),
+            msg.MediaUrl, msg.MediaKey, msg.MimeType, msg.Timestamp, isHistory);
+    }
+
+    /// <summary>
+    /// Appends one message to the durable SQLite Messages table. INSERT OR IGNORE against the
+    /// unique (SessionId, MessageId) index makes replays and restarts idempotent. Never throws.
+    /// MediaKey/MimeType (task 869ecw8du) let the store/messages/media endpoint decrypt the
+    /// CDN blob later — WhatsApp media URLs are useless without the per-message key.
+    /// </summary>
+    private void PersistMessageToDatabase(string sessionId, string chatJid, string messageId,
+        bool fromMe, string sender, string body, string type, string? mediaUrl, string? mediaKey,
+        string? mimeType, long timestamp, bool isHistory)
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                using var scope = _scopeFactory.CreateScope();
+                var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+                // Own the row by USER, not just by session GUID: a QR re-pair REPLACES the
+                // WhatsAppSessions row (new SessionId), which orphaned every pre-re-pair
+                // message for session-scoped queries (2026-08-03). UserId is stable across
+                // re-pairs, so readers filter on it instead.
+                var userId = await db.WhatsAppSessions
+                    .Where(s => s.SessionId == sessionId)
+                    .Select(s => (int?)s.UserId)
+                    .FirstOrDefaultAsync();
+                var receivedAt = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss.fffffff");
+                await db.Database.ExecuteSqlInterpolatedAsync($@"
+                    INSERT OR IGNORE INTO Messages
+                        (SessionId, UserId, ChatJid, MessageId, FromMe, Sender, Body, Type, MediaUrl, MediaKey, MimeType, Timestamp, ReceivedAt, IsHistory)
+                    VALUES
+                        ({sessionId}, {userId}, {chatJid}, {messageId}, {(fromMe ? 1 : 0)}, {sender}, {body}, {type},
+                         {mediaUrl}, {mediaKey}, {mimeType}, {timestamp}, {receivedAt}, {(isHistory ? 1 : 0)})");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Durable message persist failed for [{MessageId}] in {Chat} (message is still in the in-memory store)", messageId, chatJid);
+            }
+        });
     }
 
     /// <summary>

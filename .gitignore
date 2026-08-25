@@ -21,6 +21,8 @@ dist/
 ## Deployment
 *.log
 publish/
+deploy/_publish/
+__pycache__/
 
 ## IDE
 .vs/

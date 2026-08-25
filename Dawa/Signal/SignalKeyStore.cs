@@ -286,6 +286,7 @@ public sealed class SignalKeyStore
             SignedPreKeyId           = bundle.TheirSignedPreKeyId,
             PeerRegistrationId       = bundle.PeerRegistrationId,
             IsEstablished            = false,  // first message will be PreKeyWhisperMessage
+            OurIdentityPublicAtEstablish = auth.SignedIdentityKeyPublic,
         };
 
         _sessions[jid] = session;
@@ -398,6 +399,7 @@ public sealed class SignalKeyStore
             SignedPreKeyId           = pkmsg.SignedPreKeyId,
             PeerRegistrationId       = 0,
             IsEstablished            = true,
+            OurIdentityPublicAtEstablish = auth.SignedIdentityKeyPublic,
         };
 
         _sessions[jid] = session;
@@ -679,6 +681,25 @@ public sealed class SignalKeyStore
         {
             // MAC failed — do NOT commit any working state changes to the live session.
             // The live session remains at its last known-good state.
+
+            // Identity-mismatch detection: a fresh pairing regenerates our own identity
+            // key, which permanently invalidates every session established before it —
+            // no amount of retrying will ever make it decrypt, since the ratchet was
+            // derived via X3DH against an identity/signed-prekey that no longer exists.
+            // Compare the snapshot taken at session-establish time against our CURRENT
+            // identity; a mismatch is unambiguous (unlike a generic MAC failure, which can
+            // also happen for a harmless reason like a duplicate/out-of-order redelivery
+            // of an already-consumed counter). Drop the session so the next delivery falls
+            // through to "no session" and triggers a retry receipt, prompting the sender to
+            // re-key via a fresh pkmsg (InitIncomingSession) instead of failing forever.
+            var isStaleIdentity = session.OurIdentityPublicAtEstablish.Length > 0 &&
+                                   !session.OurIdentityPublicAtEstablish.AsSpan().SequenceEqual(auth.SignedIdentityKeyPublic);
+            if (isStaleIdentity)
+            {
+                _sessions.Remove(jid);
+                SaveSessions();
+            }
+
             var logDir = Path.Combine(AppContext.BaseDirectory, "logs");
             try { Directory.CreateDirectory(logDir); } catch { /* best effort */ }
             try { File.AppendAllText(Path.Combine(logDir, "signal-debug.log"),
@@ -691,8 +712,12 @@ public sealed class SignalKeyStore
                 $"  macKey={Convert.ToHexString(macKey[..8])}\n" +
                 $"  expected={Convert.ToHexString(expectedMac)} received={Convert.ToHexString(receivedMac)}\n" +
                 $"  whisperFrame[0]=0x{whisperFrame[0]:X2} protoLen={protoBytes.Length}\n" +
-                $"  counter={innerMsg.Counter} receiveCounter={session.ReceiveCounter}\n\n");
+                $"  counter={innerMsg.Counter} receiveCounter={session.ReceiveCounter}\n" +
+                (isStaleIdentity ? "  STALE IDENTITY (our key changed since session establish) — session DROPPED, next delivery re-keys via pkmsg\n\n" : "\n"));
             } catch { /* best effort logging */ }
+
+            if (isStaleIdentity)
+                throw new InvalidOperationException($"Stale Signal session for {jid} dropped (our identity changed since establish) — awaiting re-key.");
             throw new CryptographicException("WhisperMessage MAC verification failed.");
         }
 
@@ -884,6 +909,17 @@ public sealed class SignalSession
     /// must be wrapped in a PreKeyWhisperMessage. Set to true after first send.
     /// </summary>
     public bool IsEstablished { get; set; }
+
+    /// <summary>
+    /// Our own identity public key at the time this session was established. A fresh
+    /// pairing regenerates our identity key, which permanently invalidates every session
+    /// established before it (the whole ratchet was derived via X3DH against the OLD
+    /// identity/signed-prekey). Comparing this snapshot against the current auth identity
+    /// at decrypt time is how a stale post-re-pair session gets detected and dropped
+    /// (see MAC-FAIL handling in DecryptWhisperMessage). Empty for sessions persisted
+    /// before this field existed — treated as "unknown", never triggers a drop.
+    /// </summary>
+    public byte[] OurIdentityPublicAtEstablish { get; set; } = [];
 }
 
 // ─── PreKeyBundle ─────────────────────────────────────────────────────────────

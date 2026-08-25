@@ -2,10 +2,12 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './AuthContext';
 import Login from './pages/Login';
 import Register from './pages/Register';
+import IamCallback from './pages/IamCallback';
 import Dashboard from './pages/Dashboard';
 import ApiConnections from './pages/ApiConnections';
 import WhatsAppSessions from './pages/WhatsAppSessions';
 import AccountSettings from './pages/AccountSettings';
+import Messages from './pages/Messages';
 import Navbar from './components/Navbar';
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
@@ -41,6 +43,7 @@ function AppRoutes() {
             </PublicRoute>
           }
         />
+        <Route path="/auth/iam/callback" element={<IamCallback />} />
         <Route
           path="/dashboard"
           element={
@@ -62,6 +65,14 @@ function AppRoutes() {
           element={
             <PrivateRoute>
               <WhatsAppSessions />
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/messages"
+          element={
+            <PrivateRoute>
+              <Messages />
             </PrivateRoute>
           }
         />

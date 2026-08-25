@@ -79,11 +79,14 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
         options => { });
 
 // Services
+builder.Services.AddHttpClient();
 builder.Services.AddScoped<AuthService>();
+builder.Services.AddScoped<IamService>();
 builder.Services.AddScoped<TwoFactorService>();
 builder.Services.AddSingleton<EncryptionService>();
 // Singleton: forwards allow-listed "/task ..." inbound messages to jengo-agi intake (default-OFF, additive)
 builder.Services.AddSingleton<TaskIntakeForwarder>();
+builder.Services.AddScoped<OutboundGuardrailService>();
 // Singleton: holds long-lived Dawa WhatsAppClient instances (one per user session)
 builder.Services.AddSingleton<WhatsAppBridgeService>();
 
@@ -115,11 +118,106 @@ app.UseAuthorization();
 
 app.MapControllers();
 
+// Deploy-time version tracking: lets JengoAGI (or anyone) confirm which version a running
+// instance actually has, instead of guessing from build timestamps/commit counts. The version
+// comes from the assembly's <Version> (WhatsAppBridge.API.csproj), which deploy/bump-version.ps1
+// keeps in sync with the repo-root VERSION file on every release.
+app.MapGet("/api/version", () =>
+{
+    var version = typeof(Program).Assembly.GetName().Version?.ToString() ?? "unknown";
+    return Results.Ok(new { version, buildTimeUtc = System.IO.File.GetLastWriteTimeUtc(typeof(Program).Assembly.Location) });
+}).AllowAnonymous();
+
 // Ensure database is created
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
     db.Database.EnsureCreated();
+
+    // EnsureCreated() no-ops when the database already exists, so tables added later
+    // (like the durable Messages store, task 869ecbkv7) must be self-healed explicitly.
+    db.Database.ExecuteSqlRaw("""
+        CREATE TABLE IF NOT EXISTS Messages (
+            Id INTEGER NOT NULL CONSTRAINT PK_Messages PRIMARY KEY AUTOINCREMENT,
+            SessionId TEXT NOT NULL,
+            ChatJid TEXT NOT NULL,
+            MessageId TEXT NOT NULL,
+            FromMe INTEGER NOT NULL,
+            Sender TEXT NOT NULL,
+            Body TEXT NOT NULL,
+            Type TEXT NOT NULL,
+            MediaUrl TEXT NULL,
+            MediaKey TEXT NULL,
+            MimeType TEXT NULL,
+            Timestamp INTEGER NOT NULL,
+            ReceivedAt TEXT NOT NULL,
+            IsHistory INTEGER NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS IX_Messages_SessionId_MessageId ON Messages (SessionId, MessageId);
+        CREATE INDEX IF NOT EXISTS IX_Messages_ChatJid_Timestamp ON Messages (ChatJid, Timestamp);
+        CREATE INDEX IF NOT EXISTS IX_Messages_ReceivedAt ON Messages (ReceivedAt);
+        """);
+
+    // Self-heal: UserId on Messages (ownership stable across QR re-pairs - a re-pair replaces
+    // the session row/GUID, which orphaned pre-re-pair messages for session-scoped queries).
+    // Backfill from the current session rows where possible; remaining orphans keep NULL and
+    // are still returned via the legacy SessionId fallback in the read endpoints.
+    var hasUserId = db.Database.SqlQueryRaw<int>(
+        "SELECT COUNT(*) AS Value FROM pragma_table_info('Messages') WHERE name = 'UserId'").AsEnumerable().First();
+    if (hasUserId == 0)
+    {
+        db.Database.ExecuteSqlRaw("ALTER TABLE Messages ADD COLUMN UserId INTEGER NULL;");
+        db.Database.ExecuteSqlRaw("CREATE INDEX IF NOT EXISTS IX_Messages_UserId ON Messages (UserId);");
+    }
+    db.Database.ExecuteSqlRaw(
+        "UPDATE Messages SET UserId = (SELECT w.UserId FROM WhatsAppSessions w WHERE w.SessionId = Messages.SessionId) " +
+        "WHERE UserId IS NULL AND EXISTS (SELECT 1 FROM WhatsAppSessions w WHERE w.SessionId = Messages.SessionId);");
+
+    // One-time backfill for the 6 messages orphaned by the 2026-08-03 re-pair incident that
+    // motivated this fix: WhatsAppSessions row 24 (SessionId starting 768fd204) was replaced by
+    // row 27 (4ab31111) before UserId existed, so no live session remains for the generic
+    // backfill above to resolve their owner from. This was already applied once as a manual
+    // datafix during the initial deploy; encoding it here makes it reproducible (e.g. after a
+    // restore from an older backup) instead of living only in a one-off SQL command. Scoped to
+    // UserId IS NULL, so it is a no-op everywhere else and after it has run once here.
+    db.Database.ExecuteSqlRaw(
+        "UPDATE Messages SET UserId = 4 WHERE UserId IS NULL AND SessionId LIKE '768fd204%';");
+
+    // Columns added after the table already existed elsewhere (task 869ecw8du: MediaKey +
+    // MimeType, needed to download-and-decrypt media via the bridge instead of dead-linking
+    // to the encrypted WhatsApp CDN URL). SQLite has no "ADD COLUMN IF NOT EXISTS", so guard
+    // each with a duplicate-column catch instead.
+    foreach (var alterSql in new[]
+             {
+                 "ALTER TABLE Messages ADD COLUMN MediaKey TEXT NULL",
+                 "ALTER TABLE Messages ADD COLUMN MimeType TEXT NULL",
+             })
+    {
+        try
+        {
+            db.Database.ExecuteSqlRaw(alterSql);
+        }
+        catch (Exception ex) when (ex.Message.Contains("duplicate column name", StringComparison.OrdinalIgnoreCase))
+        {
+            // Column already present from a prior startup or the CREATE TABLE above.
+        }
+    }
+
+    // Outbound guardrail audit trail (task 869edf485): EnsureCreated() no-ops on an
+    // already-existing DB, so a table added after go-live must be self-healed explicitly.
+    db.Database.ExecuteSqlRaw("""
+        CREATE TABLE IF NOT EXISTS BlockedOutboundMessages (
+            Id INTEGER NOT NULL CONSTRAINT PK_BlockedOutboundMessages PRIMARY KEY AUTOINCREMENT,
+            UserId INTEGER NULL,
+            Endpoint TEXT NOT NULL,
+            Recipient TEXT NOT NULL,
+            BodyPreview TEXT NOT NULL,
+            Reason TEXT NOT NULL,
+            BlockedAtUtc TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS IX_BlockedOutboundMessages_BlockedAtUtc ON BlockedOutboundMessages (BlockedAtUtc);
+        CREATE INDEX IF NOT EXISTS IX_BlockedOutboundMessages_UserId ON BlockedOutboundMessages (UserId);
+        """);
 }
 
 // Restore WhatsApp sessions on startup — includes "disconnected" sessions that have saved credentials

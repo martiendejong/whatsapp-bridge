@@ -176,14 +176,15 @@ public sealed class WhatsAppClient : IAsyncDisposable
     /// </summary>
     /// <param name="to">Phone number ("31612345678") or full JID ("31612345678@s.whatsapp.net").</param>
     /// <param name="text">Message text.</param>
-    public async Task SendMessageAsync(string to, string text, CancellationToken cancellationToken = default)
+    public async Task<(string MessageId, string Jid)> SendMessageAsync(string to, string text, CancellationToken cancellationToken = default)
     {
         if (_noiseProcessor == null || _state != ConnectionState.Connected)
             throw new InvalidOperationException("Client is not connected.");
 
         // Normalize to JID
         var jid = to.Contains('@') ? to : $"{new string(to.Where(char.IsDigit).ToArray())}@s.whatsapp.net";
-        await _noiseProcessor.SendTextMessageAsync(jid, text, cancellationToken);
+        var messageId = await _noiseProcessor.SendTextMessageAsync(jid, text, cancellationToken);
+        return (messageId, jid);
     }
 
     /// <summary>
@@ -194,14 +195,15 @@ public sealed class WhatsAppClient : IAsyncDisposable
     /// <param name="text">Reply text.</param>
     /// <param name="quotedMsgId">ID of the message being replied to.</param>
     /// <param name="quotedFromJid">JID of the sender of the quoted message.</param>
-    public async Task SendReplyAsync(string to, string text, string quotedMsgId, string quotedFromJid, CancellationToken cancellationToken = default)
+    public async Task<(string MessageId, string Jid)> SendReplyAsync(string to, string text, string quotedMsgId, string quotedFromJid, CancellationToken cancellationToken = default)
     {
         if (_noiseProcessor == null || _state != ConnectionState.Connected)
             throw new InvalidOperationException("Client is not connected.");
 
         var jid = to.Contains('@') ? to : $"{new string(to.Where(char.IsDigit).ToArray())}@s.whatsapp.net";
         var quotedContext = new Dawa.Proto.ContextInfo { StanzaId = quotedMsgId, Participant = quotedFromJid };
-        await _noiseProcessor.SendTextMessageAsync(jid, text, cancellationToken, quotedContext);
+        var messageId = await _noiseProcessor.SendTextMessageAsync(jid, text, cancellationToken, quotedContext);
+        return (messageId, jid);
     }
 
     public Task<List<(string Jid, string Name)>> GetContactsAsync(CancellationToken ct)
@@ -265,11 +267,13 @@ public sealed class WhatsAppClient : IAsyncDisposable
     /// which the receive loop picks up and fires HistoryMessageReceived for each message.
     /// Returns the messages from that chat that arrived during the push notification (or empty on timeout).
     /// </summary>
-    public Task<List<Dawa.Messages.IncomingMessage>> RequestOnDemandHistorySyncAsync(string chatJid, int count, CancellationToken ct)
+    public Task<List<Dawa.Messages.IncomingMessage>> RequestOnDemandHistorySyncAsync(
+        string chatJid, int count, CancellationToken ct,
+        string? oldestMsgId = null, bool oldestMsgFromMe = false, long oldestMsgTimestampMs = 0)
     {
         if (_noiseProcessor == null || _state != ConnectionState.Connected)
             return Task.FromResult(new List<Dawa.Messages.IncomingMessage>());
-        return _noiseProcessor.RequestOnDemandHistorySyncAsync(chatJid, count, ct);
+        return _noiseProcessor.RequestOnDemandHistorySyncAsync(chatJid, count, ct, oldestMsgId, oldestMsgFromMe, oldestMsgTimestampMs);
     }
 
     public List<string> GetGroupJids()
@@ -417,7 +421,7 @@ public sealed class WhatsAppClient : IAsyncDisposable
         => _noiseProcessor?.GetMessageStatus(messageId);
 
     /// <summary>Fired when a message delivery/read receipt is received.</summary>
-    public event EventHandler<(string MessageId, Messages.MessageStatus Status)>? MessageStatusUpdated
+    public event EventHandler<(string MessageId, string Jid, Messages.MessageStatus Status)>? MessageStatusUpdated
     {
         add    { if (_noiseProcessor != null) _noiseProcessor.MessageStatusUpdated += value; }
         remove { if (_noiseProcessor != null) _noiseProcessor.MessageStatusUpdated -= value; }

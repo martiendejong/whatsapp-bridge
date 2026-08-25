@@ -4,6 +4,8 @@
     <TargetFramework>net8.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <!-- Kept in sync with the repo-root VERSION file by deploy/bump-version.ps1 on each release -->
+    <Version>1.0.0</Version>
   </PropertyGroup>
 
   <ItemGroup>
@@ -21,6 +23,11 @@
   <ItemGroup>
     <!-- Dawa: C# WhatsApp client (source lives in /Dawa, no external repo dependency) -->
     <ProjectReference Include="..\..\Dawa\Dawa.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Baked into the DLL so /api/ai-docs is deploy-proof — no reliance on a loose file being copied to the publish output -->
+    <EmbeddedResource Include="..\..\AI-INTEGRATION.md" LogicalName="AI-INTEGRATION.md" />
   </ItemGroup>
 
 </Project>

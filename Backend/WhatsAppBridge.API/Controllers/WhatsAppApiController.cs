@@ -18,17 +18,20 @@ public class WhatsAppApiController : ControllerBase
     private readonly AuthService _authService;
     private readonly WhatsAppBridgeService _whatsappService;
     private readonly EncryptionService _encryptionService;
+    private readonly OutboundGuardrailService _outboundGuardrail;
 
     public WhatsAppApiController(
         AppDbContext context,
         AuthService authService,
         WhatsAppBridgeService whatsappService,
-        EncryptionService encryptionService)
+        EncryptionService encryptionService,
+        OutboundGuardrailService outboundGuardrail)
     {
         _context = context;
         _authService = authService;
         _whatsappService = whatsappService;
         _encryptionService = encryptionService;
+        _outboundGuardrail = outboundGuardrail;
     }
 
     private async Task<(bool success, int? userId, string? error)> ValidateApiToken()
@@ -137,6 +140,10 @@ public class WhatsAppApiController : ControllerBase
             var (success, userId, error) = await ValidateApiToken();
             if (!success)
                 return Unauthorized(new { error });
+
+            var (allowed, blockReason) = await _outboundGuardrail.CheckAsync("sendMessage", request.To, request.Body, userId);
+            if (!allowed)
+                return StatusCode(403, new { error = blockReason, blocked = true });
 
             var sessionId = await GetUserSessionId(userId!.Value, request.SessionId);
             if (sessionId == null)
@@ -263,6 +270,10 @@ public class WhatsAppApiController : ControllerBase
             if (!success)
                 return Unauthorized(new { error });
 
+            var (allowed, blockReason) = await _outboundGuardrail.CheckAsync("sendMedia", request.To, request.Caption ?? "", userId);
+            if (!allowed)
+                return StatusCode(403, new { error = blockReason, blocked = true });
+
             var sessionId = await GetUserSessionId(userId!.Value, request.SessionId);
             if (sessionId == null)
                 return BadRequest(new { error = request.SessionId != null
@@ -329,6 +340,68 @@ public class WhatsAppApiController : ControllerBase
         }
 
         return Ok(messages);
+    }
+
+    /// <summary>
+    /// Durable message log (task 869ecbkv7): reads from the SQLite Messages table instead of
+    /// the capped in-memory store, so it survives app-pool restarts and session re-pairs and
+    /// spans ALL of the caller's sessions (including replaced ones). chatId accepts a full JID
+    /// or a bare phone number. since = unix seconds (only messages with a later WhatsApp
+    /// timestamp). Results are returned oldest-first.
+    /// GET /api/wa/messages?chatId=31612345678&since=1785500000&count=50&fromMe=false
+    /// </summary>
+    [HttpGet("messages")]
+    public async Task<IActionResult> GetDurableMessages(
+        [FromQuery] string? chatId = null,
+        [FromQuery] long? since = null,
+        [FromQuery] int count = 50,
+        [FromQuery] bool? fromMe = null)
+    {
+        var (success, userId, error) = await ValidateApiToken();
+        if (!success)
+            return Unauthorized(new { error });
+
+        count = Math.Clamp(count, 1, 500);
+
+        // All sessions ever owned by this user — a reply that arrived on a since-replaced
+        // session must stay readable after a re-pair.
+        var sessionIds = await _context.WhatsAppSessions
+            .Where(s => s.UserId == userId!.Value)
+            .Select(s => s.SessionId)
+            .ToListAsync();
+
+        var query = _context.Messages.AsNoTracking()
+            .Where(m => (m.UserId == userId!.Value || (m.UserId == null && sessionIds.Contains(m.SessionId))));
+
+        if (!string.IsNullOrWhiteSpace(chatId))
+        {
+            var bare = chatId.Split('@')[0].Split(':')[0];
+            query = query.Where(m => m.ChatJid == chatId || m.ChatJid.StartsWith(bare + "@"));
+        }
+        if (since.HasValue)
+            query = query.Where(m => m.Timestamp > since.Value);
+        if (fromMe.HasValue)
+            query = query.Where(m => m.FromMe == fromMe.Value);
+
+        var messages = await query
+            .OrderByDescending(m => m.Timestamp).ThenByDescending(m => m.Id)
+            .Take(count)
+            .ToListAsync();
+        messages.Reverse();
+
+        return Ok(messages.Select(m => new
+        {
+            id = m.MessageId,
+            chatJid = m.ChatJid,
+            fromMe = m.FromMe,
+            sender = m.Sender,
+            body = m.Body,
+            type = m.Type,
+            mediaUrl = m.MediaUrl,
+            timestamp = m.Timestamp,
+            receivedAt = m.ReceivedAt,
+            isHistory = m.IsHistory
+        }));
     }
 
     /// <summary>
@@ -469,6 +542,10 @@ public class WhatsAppApiController : ControllerBase
         var (success, userId, error) = await ValidateApiToken();
         if (!success)
             return Unauthorized(new { error });
+
+        var (allowed, blockReason) = await _outboundGuardrail.CheckAsync("forwardMessage", request.ToJid, request.Text, userId);
+        if (!allowed)
+            return StatusCode(403, new { error = blockReason, blocked = true });
 
         var sessionId = await GetUserSessionId(userId!.Value, request.SessionId);
         if (sessionId == null)
@@ -694,6 +771,37 @@ public class WhatsAppApiController : ControllerBase
     }
 
     /// <summary>
+    /// Outbound sends refused by the guardrail (task 869edf485): surfaces blocked attempts
+    /// instead of leaving them only in a log line, scoped to the caller's own user.
+    /// GET /api/wa/blockedOutbound?count=50
+    /// </summary>
+    [HttpGet("blockedOutbound")]
+    public async Task<IActionResult> GetBlockedOutbound([FromQuery] int count = 50)
+    {
+        var (success, userId, error) = await ValidateApiToken();
+        if (!success)
+            return Unauthorized(new { error });
+
+        count = Math.Clamp(count, 1, 500);
+
+        var blocked = await _context.BlockedOutboundMessages
+            .AsNoTracking()
+            .Where(b => b.UserId == userId!.Value)
+            .OrderByDescending(b => b.BlockedAtUtc)
+            .Take(count)
+            .ToListAsync();
+
+        return Ok(blocked.Select(b => new
+        {
+            endpoint = b.Endpoint,
+            to = b.Recipient,
+            bodyPreview = b.BodyPreview,
+            reason = b.Reason,
+            blockedAtUtc = b.BlockedAtUtc,
+        }));
+    }
+
+    /// <summary>
     /// Get message delivery/read status
     /// GET /api/wa/messageStatus?messageId=xxx
     /// </summary>
@@ -710,6 +818,25 @@ public class WhatsAppApiController : ControllerBase
 
         var status = _whatsappService.GetMessageStatus(resolvedSessionId!, messageId);
         return Ok(new { messageId, status = status?.ToString() ?? "unknown" });
+    }
+
+    /// <summary>
+    /// Get message delivery/read status (path-based resource route)
+    /// GET /api/{sessionId}/messages/{msgId}/status
+    /// </summary>
+    [HttpGet("/api/{sessionId}/messages/{msgId}/status")]
+    public async Task<IActionResult> GetMessageStatusByPath(string sessionId, string msgId)
+    {
+        var (success, userId, error) = await ValidateApiToken();
+        if (!success)
+            return Unauthorized(new { error });
+
+        var resolvedSessionId = await GetUserSessionId(userId!.Value, sessionId);
+        if (resolvedSessionId == null)
+            return BadRequest(new { error = $"WhatsApp session '{sessionId}' not found or not connected" });
+
+        var status = _whatsappService.GetMessageStatus(resolvedSessionId!, msgId);
+        return Ok(new { messageId = msgId, status = status?.ToString() ?? "unknown" });
     }
 }
 

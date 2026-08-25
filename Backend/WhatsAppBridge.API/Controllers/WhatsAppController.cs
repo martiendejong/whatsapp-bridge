@@ -177,6 +177,169 @@ public class WhatsAppController : ControllerBase
         return Ok(chats ?? new List<object>());
     }
 
+    // ─── Durable message store browser (task 869echefp) ────────────────────────
+
+    /// <summary>
+    /// Chat list from the durable Messages store (869ecbkv7): one entry per conversation with
+    /// a last-message preview. Spans ALL of the user's sessions — a QR re-pair creates a new
+    /// SessionId and history must not disappear from the browser. Display names from the live
+    /// session are merged in best-effort (a disconnected session still shows its history).
+    /// </summary>
+    [HttpGet("sessions/{sessionId}/store/chats")]
+    public async Task<IActionResult> GetStoredChats(string sessionId)
+    {
+        var userId = GetUserId();
+        var session = await _context.WhatsAppSessions
+            .FirstOrDefaultAsync(s => s.SessionId == sessionId && s.UserId == userId);
+        if (session == null) return NotFound(new { error = "Session not found" });
+
+        var sessionIds = await _context.WhatsAppSessions
+            .Where(s => s.UserId == userId)
+            .Select(s => s.SessionId)
+            .ToListAsync();
+
+        var chats = await _context.Messages.AsNoTracking()
+            .Where(m => (m.UserId == userId || (m.UserId == null && sessionIds.Contains(m.SessionId))))
+            .GroupBy(m => m.ChatJid)
+            .Select(g => new
+            {
+                ChatJid = g.Key,
+                MessageCount = g.Count(),
+                LastTimestamp = g.Max(m => m.Timestamp)
+            })
+            .OrderByDescending(c => c.LastTimestamp)
+            .ToListAsync();
+
+        // Last-message preview per chat: chat counts are small, so per-chat top-1 queries keep
+        // the main GroupBy translatable by EF's SQLite provider.
+        var previews = new Dictionary<string, (string Body, bool FromMe, string Type)>();
+        foreach (var chat in chats)
+        {
+            var last = await _context.Messages.AsNoTracking()
+                .Where(m => (m.UserId == userId || (m.UserId == null && sessionIds.Contains(m.SessionId))) && m.ChatJid == chat.ChatJid)
+                .OrderByDescending(m => m.Timestamp).ThenByDescending(m => m.Id)
+                .FirstOrDefaultAsync();
+            if (last != null)
+                previews[chat.ChatJid] = (last.Body, last.FromMe, last.Type);
+        }
+
+        var names = new Dictionary<string, string>();
+        try
+        {
+            var live = await _whatsappService.GetChatsAsync(sessionId);
+            if (live != null)
+            {
+                foreach (var entry in live)
+                {
+                    var jid = entry.GetType().GetProperty("jid")?.GetValue(entry) as string;
+                    var name = entry.GetType().GetProperty("name")?.GetValue(entry) as string;
+                    if (!string.IsNullOrEmpty(jid) && !string.IsNullOrEmpty(name))
+                        names[jid] = name;
+                }
+            }
+        }
+        catch { /* disconnected session: stored history still browsable, just without live names */ }
+
+        return Ok(chats.Select(c => new
+        {
+            chatJid = c.ChatJid,
+            phone = c.ChatJid.Split('@')[0].Split(':')[0],
+            name = names.TryGetValue(c.ChatJid, out var n) ? n : null,
+            messageCount = c.MessageCount,
+            lastTimestamp = c.LastTimestamp,
+            lastBody = previews.TryGetValue(c.ChatJid, out var p) ? p.Body : null,
+            lastType = previews.TryGetValue(c.ChatJid, out var p3) ? p3.Type : null,
+            lastFromMe = previews.TryGetValue(c.ChatJid, out var p2) && p2.FromMe
+        }));
+    }
+
+    /// <summary>
+    /// Message history for one conversation from the durable store, oldest-first. Use
+    /// <paramref name="before"/> (unix seconds) to page further back, <paramref name="since"/>
+    /// to poll for new messages only.
+    /// </summary>
+    [HttpGet("sessions/{sessionId}/store/messages")]
+    public async Task<IActionResult> GetStoredMessages(string sessionId, [FromQuery] string chatJid,
+        [FromQuery] long? before = null, [FromQuery] long? since = null, [FromQuery] int count = 100)
+    {
+        var userId = GetUserId();
+        var session = await _context.WhatsAppSessions
+            .FirstOrDefaultAsync(s => s.SessionId == sessionId && s.UserId == userId);
+        if (session == null) return NotFound(new { error = "Session not found" });
+        if (string.IsNullOrWhiteSpace(chatJid))
+            return BadRequest(new { error = "chatJid is required" });
+
+        var sessionIds = await _context.WhatsAppSessions
+            .Where(s => s.UserId == userId)
+            .Select(s => s.SessionId)
+            .ToListAsync();
+
+        count = Math.Clamp(count, 1, 500);
+        var query = _context.Messages.AsNoTracking()
+            .Where(m => (m.UserId == userId || (m.UserId == null && sessionIds.Contains(m.SessionId))) && m.ChatJid == chatJid);
+        if (before.HasValue)
+            query = query.Where(m => m.Timestamp < before.Value);
+        if (since.HasValue)
+            query = query.Where(m => m.Timestamp > since.Value);
+
+        var messages = await query
+            .OrderByDescending(m => m.Timestamp).ThenByDescending(m => m.Id)
+            .Take(count)
+            .ToListAsync();
+        messages.Reverse();
+
+        return Ok(messages.Select(m => new
+        {
+            id = m.MessageId,
+            chatJid = m.ChatJid,
+            fromMe = m.FromMe,
+            sender = m.Sender,
+            body = m.Body,
+            type = m.Type,
+            mediaUrl = m.MediaUrl,
+            // Media decryption needs MediaKey alongside MediaUrl (task 869ecw8du); rows
+            // persisted before that column existed have a URL the bridge can never open.
+            // The raw key itself is never sent to the frontend — only this readiness flag.
+            mediaAvailable = !string.IsNullOrEmpty(m.MediaUrl) && !string.IsNullOrEmpty(m.MediaKey),
+            timestamp = m.Timestamp,
+            receivedAt = m.ReceivedAt,
+            isHistory = m.IsHistory
+        }));
+    }
+
+    /// <summary>
+    /// Downloads and decrypts a stored message's media via the bridge (task 869ecw8du) —
+    /// WhatsApp CDN links are encrypted and cannot be opened directly by the browser.
+    /// </summary>
+    [HttpGet("sessions/{sessionId}/store/messages/media")]
+    public async Task<IActionResult> GetStoredMessageMedia(string sessionId, [FromQuery] string chatJid, [FromQuery] string messageId)
+    {
+        var userId = GetUserId();
+        var session = await _context.WhatsAppSessions
+            .FirstOrDefaultAsync(s => s.SessionId == sessionId && s.UserId == userId);
+        if (session == null) return NotFound(new { error = "Session not found" });
+        if (string.IsNullOrWhiteSpace(chatJid) || string.IsNullOrWhiteSpace(messageId))
+            return BadRequest(new { error = "chatJid and messageId are required" });
+
+        var sessionIds = await _context.WhatsAppSessions
+            .Where(s => s.UserId == userId)
+            .Select(s => s.SessionId)
+            .ToListAsync();
+
+        var message = await _context.Messages.AsNoTracking()
+            .FirstOrDefaultAsync(m => (m.UserId == userId || (m.UserId == null && sessionIds.Contains(m.SessionId))) && m.ChatJid == chatJid && m.MessageId == messageId);
+        if (message == null) return NotFound(new { error = "Message not found" });
+        if (string.IsNullOrEmpty(message.MediaUrl) || string.IsNullOrEmpty(message.MediaKey))
+            return NotFound(new { error = "Media niet beschikbaar voor dit bericht" });
+
+        var bytes = await _whatsappService.DownloadMediaAsync(
+            message.SessionId, message.MediaUrl, message.MediaKey, message.MimeType ?? "application/octet-stream");
+        if (bytes == null || bytes.Length == 0)
+            return StatusCode(502, new { error = "Media download mislukt" });
+
+        return File(bytes, message.MimeType ?? "application/octet-stream");
+    }
+
     [HttpGet("sessions/{sessionId}/profile-pic/{jid}")]
     public async Task<IActionResult> GetProfilePic(string sessionId, string jid)
     {

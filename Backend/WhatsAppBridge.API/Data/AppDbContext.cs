@@ -13,6 +13,8 @@ public class AppDbContext : DbContext
     public DbSet<ApiConnection> ApiConnections { get; set; }
     public DbSet<WhatsAppSession> WhatsAppSessions { get; set; }
     public DbSet<TwoFactorToken> TwoFactorTokens { get; set; }
+    public DbSet<StoredMessage> Messages { get; set; }
+    public DbSet<BlockedOutboundMessage> BlockedOutboundMessages { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -34,6 +36,29 @@ public class AppDbContext : DbContext
         {
             entity.HasIndex(e => e.SessionId).IsUnique();
             entity.Property(e => e.SessionId).HasMaxLength(100);
+        });
+
+        modelBuilder.Entity<StoredMessage>(entity =>
+        {
+            entity.ToTable("Messages");
+            entity.HasIndex(e => new { e.SessionId, e.MessageId }).IsUnique();
+            entity.HasIndex(e => new { e.ChatJid, e.Timestamp });
+            entity.HasIndex(e => e.ReceivedAt);
+            entity.HasIndex(e => e.UserId);
+            entity.Property(e => e.SessionId).HasMaxLength(100);
+            entity.Property(e => e.ChatJid).HasMaxLength(200);
+            entity.Property(e => e.MessageId).HasMaxLength(200);
+            entity.Property(e => e.Sender).HasMaxLength(200);
+            entity.Property(e => e.Type).HasMaxLength(40);
+        });
+
+        modelBuilder.Entity<BlockedOutboundMessage>(entity =>
+        {
+            entity.HasIndex(e => e.BlockedAtUtc);
+            entity.HasIndex(e => e.UserId);
+            entity.Property(e => e.Endpoint).HasMaxLength(60);
+            entity.Property(e => e.Recipient).HasMaxLength(200);
+            entity.Property(e => e.BodyPreview).HasMaxLength(200);
         });
     }
 }

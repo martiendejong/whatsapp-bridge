@@ -23,7 +23,15 @@ export const auth = {
     api.post('/api/auth/register', { Email: email, Password: password }),
   login: (email: string, password: string) =>
     api.post('/api/auth/login', { Email: email, Password: password }),
+  me: (token: string) =>
+    api.get('/api/auth/me', { headers: { Authorization: `Bearer ${token}` } }),
 };
+
+export const iam = {
+  status: () => api.get('/api/auth/iam/status'),
+};
+
+export { API_BASE_URL };
 
 export const apiConnections = {
   getAll: () => api.get('/api/apiconnections'),
@@ -43,6 +51,19 @@ export const whatsapp = {
     api.post(`/api/whatsapp/sessions/${sessionId}/send`, { To: to, Message: message }),
   getContacts: (sessionId: string) =>
     api.get(`/api/whatsapp/sessions/${sessionId}/contacts`),
+  getStoredChats: (sessionId: string) =>
+    api.get(`/api/whatsapp/sessions/${sessionId}/store/chats`),
+  getStoredMessages: (sessionId: string, chatJid: string, opts?: { since?: number; before?: number; count?: number }) =>
+    api.get(`/api/whatsapp/sessions/${sessionId}/store/messages`, {
+      params: { chatJid, ...opts },
+    }),
+  requestHistory: (sessionId: string, chatJid: string, count = 100) =>
+    api.post(`/api/whatsapp/sessions/${sessionId}/request-history`, { ChatJid: chatJid, Count: count }),
+  getStoredMessageMedia: (sessionId: string, chatJid: string, messageId: string) =>
+    api.get(`/api/whatsapp/sessions/${sessionId}/store/messages/media`, {
+      params: { chatJid, messageId },
+      responseType: 'blob',
+    }),
 };
 
 export default api;

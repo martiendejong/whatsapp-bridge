@@ -1,6 +1,6 @@
-import { useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
-import { auth } from '../api';
+import { useEffect, useState } from 'react';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { auth, iam, API_BASE_URL } from '../api';
 import { useAuth } from '../AuthContext';
 
 export default function Login() {
@@ -8,8 +8,23 @@ export default function Login() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [iamEnabled, setIamEnabled] = useState(false);
   const { login } = useAuth();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+
+  useEffect(() => {
+    iam.status()
+      .then((res) => setIamEnabled(!!res.data.enabled))
+      .catch(() => setIamEnabled(false));
+
+    const iamError = searchParams.get('iam_error');
+    if (iamError === 'two_factor_required') {
+      setError('This account has two-factor authentication enabled. Please log in with your password instead.');
+    } else if (iamError) {
+      setError(`IAM login failed: ${iamError}`);
+    }
+  }, [searchParams]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -57,6 +72,15 @@ export default function Login() {
             {loading ? 'Logging in...' : 'Login'}
           </button>
         </form>
+        {iamEnabled && (
+          <a
+            href={`${API_BASE_URL}/api/auth/iam/login`}
+            className="btn btn-primary"
+            style={{ width: '100%', marginTop: '12px', display: 'block', textAlign: 'center', textDecoration: 'none' }}
+          >
+            Login with IAM
+          </a>
+        )}
         <p style={{ marginTop: '16px', textAlign: 'center' }}>
           Don't have an account? <Link to="/register">Register</Link>
         </p>

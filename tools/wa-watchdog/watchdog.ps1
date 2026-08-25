@@ -3,10 +3,20 @@
 # bitten us and alerts Martien via WhatsApp (the bridge itself):
 #   1. No connected WhatsApp session          -> re-pair needed (the 401 logout of 13-jul)
 #   2. "Authentication failure: 405" events   -> WA rejected our client version at pairing
-#   3. "Authentication failure: 401" events   -> WA invalidated device creds (logged out)
+#   3. "Authentication failure: 401" events   -> WA invalidated device creds (logged out),
+#                                                 but only alerted when NO session is connected -
+#                                                 the WA protocol log line carries no SessionId,
+#                                                 so a dead/legacy session retried at startup logs
+#                                                 the identical text as a genuine live-session death.
 #   4. Version drift while disconnected       -> self-update (WaVersionProvider) not keeping up
 #   5. New Baileys release                    -> upstream protocol changes worth reviewing
-# Credentials live in config.json NEXT TO this script on the server - never in the repo.
+# Credentials live in config.json NEXT TO this script on the server - never in the repo:
+#   apiBase, bridgeEmail, waToken, alertTo, activeVersionFile.
+# waToken is the plaintext token of the "jengo" ApiConnection (long-lived, does not rotate with
+# the frontend login password - that's what broke this check on 2026-07-31/08-02). It is used
+# both to send alerts (Bearer, /api/wa/sendMessage) and for the session-health check below
+# (X-Api-Token/X-Email, /api/whatsapp/sessions). To inspect or rotate it: log into the bridge UI
+# as bridgeEmail -> Settings -> API Connections -> "jengo".
 # State (dedup, last-checked timestamps) in state.json. Log in watchdog.log.
 
 param([switch]$TestAlert)
@@ -48,22 +58,22 @@ function MarkAlerted([string]$key) {
 }
 
 # ---- 1. Session health via bridge API -------------------------------------
+# Auth via the dedicated long-lived API token (see header comment) instead of a frontend
+# login+password - that password rotates and broke this check twice already.
 $sessionConnected = $false
 try {
-    $login = Invoke-RestMethod -Uri "$($config.apiBase)/api/auth/login" -Method Post -ContentType 'application/json' `
-        -Body (@{ Email = $config.bridgeEmail; Password = $config.bridgePassword } | ConvertTo-Json) -TimeoutSec 30
     $sessions = Invoke-RestMethod -Uri "$($config.apiBase)/api/whatsapp/sessions" -TimeoutSec 30 `
-        -Headers @{ Authorization = "Bearer $($login.token)" }
+        -Headers @{ 'X-Api-Token' = $config.waToken; 'X-Email' = $config.bridgeEmail }
     $connected = @($sessions | Where-Object { $_.status -eq 'connected' })
     $sessionConnected = $connected.Count -gt 0
     if (-not $sessionConnected -and (ShouldAlert 'session-down')) {
         [void]$alerts.Add(@{ key = 'session-down'; body = "WhatsApp bridge has NO connected session (statuses: $(@($sessions | ForEach-Object { $_.status }) -join ', ' )). Outgoing+incoming DOWN. Re-pair: https://whatsapp.wreckingball.ai -> Connect WhatsApp -> scan QR." })
     }
-    Log "session check: connected=$sessionConnected"
+    Log "session check: connected=$sessionConnected sessionIds=$(($connected | ForEach-Object { $_.sessionId }) -join ', ')"
 } catch {
     Log "session check FAILED: $($_.Exception.Message)"
     if (ShouldAlert 'api-down') {
-        [void]$alerts.Add(@{ key = 'api-down'; body = "WhatsApp bridge API is not responding ($($_.Exception.Message)). Check app pool WhatsAppBridgeAPIPool on 85.215.217.154." })
+        [void]$alerts.Add(@{ key = 'api-down'; body = "WhatsApp bridge API is not responding, or the watchdog's API token is no longer valid ($($_.Exception.Message)). Check app pool WhatsAppBridgeAPIPool on 85.215.217.154, and that config.json's waToken is still an active ApiConnection." })
     }
 }
 
@@ -77,10 +87,17 @@ try {
     if ($n405 -gt 0 -and (ShouldAlert 'auth-405')) {
         [void]$alerts.Add(@{ key = 'auth-405'; body = "WhatsApp 405-rejected $n405 connection attempt(s) since $($since.ToString('dd-MM HH:mm')) - client version outdated and self-update did not cover it. Check wa-version-active.json vs Baileys baileys-version.json; Dawa may need a code update." })
     }
-    if ($n401 -gt 0 -and (ShouldAlert 'auth-401')) {
-        [void]$alerts.Add(@{ key = 'auth-401'; body = "WhatsApp invalidated the device credentials ($n401 x 401 since $($since.ToString('dd-MM HH:mm'))). Session logged out - QR re-pair needed at https://whatsapp.wreckingball.ai." })
+    # 401 events carry no SessionId in the log line (Dawa/Noise/NoiseProcessor.cs logs only the WA
+    # protocol reason code), so a dead/legacy session retried at startup produces byte-identical log
+    # text to a genuine live-session logout (the false alarm of 2026-07-31/08-01). The only reliable
+    # signal available is whether a connected session exists right now (from section 1, above) - if
+    # one does, these 401s are noise from a session that isn't the one actually serving traffic.
+    if ($n401 -gt 0 -and $sessionConnected) {
+        Log "event check: $n401 x 401 since $($since.ToString('dd-MM HH:mm')) suppressed - a connected session exists"
+    } elseif ($n401 -gt 0 -and (ShouldAlert 'auth-401')) {
+        [void]$alerts.Add(@{ key = 'auth-401'; body = "WhatsApp invalidated the device credentials ($n401 x 401 since $($since.ToString('dd-MM HH:mm'))). No session is currently connected - session logged out, QR re-pair needed at https://whatsapp.wreckingball.ai." })
     }
-    Log "event check since $($since.ToString('o')): 405=$n405 401=$n401"
+    Log "event check since $($since.ToString('o')): 405=$n405 401=$n401 sessionConnected=$sessionConnected"
 } catch {
     Log "event check FAILED: $($_.Exception.Message)"
 }

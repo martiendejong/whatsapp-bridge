@@ -151,4 +151,35 @@ public class AuthService
             await _context.SaveChangesAsync();
         }
     }
+
+    public async Task<User?> GetUserByIdAsync(int userId) => await _context.Users.FindAsync(userId);
+
+    // Maps an IAM identity to the matching bridge account by email (case-insensitive). If no
+    // local account exists yet, one is created SSO-only: PasswordHash is a random, never-shared
+    // value so password login stays impossible for that account until the user sets one via
+    // update-password, while satisfying the column's NOT NULL constraint.
+    public async Task<User> FindOrCreateFromIamAsync(string email)
+    {
+        var normalizedEmail = email.Trim().ToLowerInvariant();
+        var user = await _context.Users.FirstOrDefaultAsync(u => u.Email.ToLower() == normalizedEmail);
+
+        if (user != null)
+        {
+            user.LastLoginAt = DateTime.UtcNow;
+            await _context.SaveChangesAsync();
+            return user;
+        }
+
+        user = new User
+        {
+            Email = email.Trim(),
+            PasswordHash = BCrypt.Net.BCrypt.HashPassword(Convert.ToBase64String(RandomNumberGenerator.GetBytes(32))),
+            LastLoginAt = DateTime.UtcNow,
+        };
+
+        _context.Users.Add(user);
+        await _context.SaveChangesAsync();
+
+        return user;
+    }
 }
