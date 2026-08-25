@@ -304,3 +304,18 @@ check logic itself is what this task and its verification cover.
 Left: nothing for this task. Real end-to-end deploy exercise (a human or agent running
 `deploy/deploy.py --yes` for an actual release) remains the natural next real-world proof, as
 already noted in PR #47's own test plan.
+
+## 2026-08-25 — task 869cfzz29
+Done: finished the SHOULD HAVE gap from the 2026-07-23 session (which had a complete
+`SendReplyAsync` commit locally but was blocked on gh auth). Martien confirmed `gh auth switch`
+now works; used `gh auth token --user martiendejong` (worked despite GH_TOKEN being set) to
+push. Merged 22 commits of `master` in — one real conflict: `SendTextMessageAsync`'s signature
+(master had changed it to `Task<string>` for message-id/silent-fail tracking, this branch added
+the optional `ContextInfo? quotedContext` param) — resolved by combining both. Also added
+message-store + DB persistence to `SendReplyAsync` mirroring `SendMessageAsync` (task
+869ecbkv7), so a sent reply now actually shows up in `GET /messages` instead of vanishing.
+PR #53 opened.
+Verified: `dotnet build` clean (0 errors) on Dawa/Backend/DawaTest; `DawaTest --selftest` 9/9
+pass post-merge.
+Left: no live-phone round-trip this session (needs a paired device) — API/proto path verified
+via build + merge reconciliation only.
