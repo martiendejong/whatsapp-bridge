@@ -577,8 +577,41 @@ public class WhatsAppApiController : ControllerBase
 
         try
         {
-            var bytes = await _whatsappService.DownloadMediaAsync(sessionId!, request.MediaUrl, request.MediaKey, request.MimeType ?? "application/octet-stream");
-            return File(bytes ?? Array.Empty<byte>(), request.MimeType ?? "application/octet-stream");
+            var mediaUrl = request.MediaUrl;
+            var mediaKey = request.MediaKey;
+            var mimeType = request.MimeType;
+
+            // Task 869ejuycr: resolve by chatJid+messageId instead of a manually-extracted
+            // mediaUrl/mediaKey — serves the already-decrypted local cache directly when
+            // available (instant, no re-decrypt), falling back to the message's own stored
+            // MediaUrl/MediaKey otherwise. Lets a caller (e.g. an agent reading getMessages)
+            // fetch the actual file without ever having to handle the raw key itself.
+            if (!string.IsNullOrEmpty(request.ChatJid) && !string.IsNullOrEmpty(request.MessageId))
+            {
+                var stored = await _context.Messages.AsNoTracking().FirstOrDefaultAsync(m =>
+                    m.SessionId == sessionId && m.ChatJid == request.ChatJid && m.MessageId == request.MessageId);
+                if (stored == null)
+                    return NotFound(new { error = "Message not found" });
+
+                if (!string.IsNullOrEmpty(stored.LocalMediaPath) && System.IO.File.Exists(stored.LocalMediaPath))
+                {
+                    var cachedBytes = await System.IO.File.ReadAllBytesAsync(stored.LocalMediaPath);
+                    return File(cachedBytes, stored.MimeType ?? "application/octet-stream");
+                }
+
+                if (string.IsNullOrEmpty(stored.MediaUrl) || string.IsNullOrEmpty(stored.MediaKey))
+                    return NotFound(new { error = "Media niet beschikbaar voor dit bericht" });
+
+                mediaUrl = stored.MediaUrl;
+                mediaKey = stored.MediaKey;
+                mimeType = stored.MimeType ?? mimeType;
+            }
+
+            if (string.IsNullOrEmpty(mediaUrl) || string.IsNullOrEmpty(mediaKey))
+                return BadRequest(new { error = "mediaUrl/mediaKey or chatJid/messageId required" });
+
+            var bytes = await _whatsappService.DownloadMediaAsync(sessionId!, mediaUrl, mediaKey, mimeType ?? "application/octet-stream");
+            return File(bytes ?? Array.Empty<byte>(), mimeType ?? "application/octet-stream");
         }
         catch (Exception ex)
         {
@@ -924,7 +957,15 @@ public record SendMessageRequest(string To, string Body, string? SessionId = nul
 public record SendReplyRequest(string To, string Body, string QuotedMessageId, string QuotedFromJid, string? SessionId = null);
 public record RequestHistoryRequest(string ChatId, int Count = 50, bool NoAnchor = false, string? SessionId = null);
 public record SendMediaRequest(string To, string MediaUrl, string? Caption = null, string? SessionId = null);
-public record DownloadMediaRequest(string MediaUrl, string MediaKey, string? MimeType = null, string? SessionId = null);
+public record DownloadMediaRequest(
+    string? MediaUrl = null,
+    string? MediaKey = null,
+    string? MimeType = null,
+    string? SessionId = null,
+    // Task 869ejuycr: alternative to MediaUrl/MediaKey — fetch by chatJid+messageId to use the
+    // already-decrypted local cache without the caller ever handling the raw encryption key.
+    string? ChatJid = null,
+    string? MessageId = null);
 public record RevokeMessageRequest(string ChatJid, string MessageId, bool FromMe = true, string? SessionId = null);
 public record ForwardMessageRequest(string ToJid, string Text, string? SessionId = null);
 public record SendTypingRequest(string ChatJid, bool IsTyping = true, string? SessionId = null);

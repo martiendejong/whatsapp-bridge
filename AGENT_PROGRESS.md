@@ -319,3 +319,26 @@ Verified: `dotnet build` clean (0 errors) on Dawa/Backend/DawaTest; `DawaTest --
 pass post-merge.
 Left: no live-phone round-trip this session (needs a paired device) — API/proto path verified
 via build + merge reconciliation only.
+
+## 2026-08-26 — task 869ejuycr
+Done: completed WIP found abandoned in this worktree (Whisper transcription + eager media
+decrypt, see PR body). Added: `api/wa/downloadMedia` now also accepts `chatJid`+`messageId`
+and serves the already-decrypted local cache directly, falling back to the message's own
+stored MediaUrl/MediaKey for on-demand decrypt (mirrors the existing UI-facing
+`store/messages/media` endpoint) — closes the gap where the agent-facing API had no way to
+fetch media without already holding the raw key. Repo had been renamed/restructured since
+this worktree's branch was created (`whatsappbridge`→`whatsapp-bridge`, `master`→`develop`+
+`main`, old origin URL 404s) — merged `develop` in (one real conflict, AGENTS.md repo-name
+section, took develop's side).
+Verified: `dotnet build` clean (0 errors) on Dawa/Backend. Whisper path verified live and
+end-to-end via an isolated console harness (`ProjectReference` to this project, no changes
+to the class): resolved the OpenAI key purely via the Prospergenics vault (no `OpenAI:ApiKey`
+config set, forcing the vault path), transcribed a real OpenAI-TTS-synthesized Dutch audio
+clip, transcript matched the spoken text. Media-cache-serving verified by code review only
+(mirrors the already-shipped `GetStoredMessageMedia` pattern) — no live WhatsApp device
+paired this session to send a real photo/voice message through ingest.
+Left: nothing agent-doable. `Vault:ApiKey` (bootstrap key for vault.prospergenics.com) still
+needs setting on the deployed server's `appsettings.Local.json`/env for transcription to be
+live in production — same one-time deploy-config step every other vault-backed secret in
+this repo already needs (see `appsettings.Local.example.json`); without it transcription
+silently stays disabled (fails closed, by design) but nothing else breaks.
