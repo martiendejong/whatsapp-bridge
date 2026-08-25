@@ -1468,7 +1468,7 @@ public sealed class NoiseProcessor : IAsyncDisposable
     // ─── Send message ───────────────────────────────────────────────────────
 
     /// <summary>Sends an encrypted text message to a JID using Signal Protocol.</summary>
-    public async Task<string> SendTextMessageAsync(string jid, string text, CancellationToken ct)
+    public async Task<string> SendTextMessageAsync(string jid, string text, CancellationToken ct, Proto.ContextInfo? quotedContext = null)
     {
         // 1. Normalize JID
         var normalizedJid = jid.Contains('@') ? jid : $"{jid.TrimStart('+')}@s.whatsapp.net";
@@ -1541,7 +1541,13 @@ public sealed class NoiseProcessor : IAsyncDisposable
         }
 
         // 5. Proto-encode the message with random PKCS7-style padding (Baileys: writeRandomPadMax16)
-        var msgRaw = new WAMessage { Conversation = text }.ToByteArray();
+        // A quoted reply must be an ExtendedTextMessage carrying ContextInfo — plain Conversation
+        // has no field to attach the quoted stanza id/participant to.
+        WAMessage BuildContent() => quotedContext == null
+            ? new WAMessage { Conversation = text }
+            : new WAMessage { ExtendedTextMessage = new Proto.ExtendedTextMessage { Text = text, ContextInfo = quotedContext } };
+
+        var msgRaw = BuildContent().ToByteArray();
 
         // 6. Build padded proto for recipient devices (direct message)
         var recipientProto = PadMessage(msgRaw);
@@ -1555,7 +1561,7 @@ public sealed class NoiseProcessor : IAsyncDisposable
                 DeviceSentMessage = new DeviceSentMessage
                 {
                     DestinationJid = normalizedJid,
-                    Message = new WAMessage { Conversation = text },
+                    Message = BuildContent(),
                 }
             };
             senderProto = PadMessage(deviceSentMsg.ToByteArray());

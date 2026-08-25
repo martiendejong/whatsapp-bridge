@@ -245,6 +245,44 @@ public class WhatsAppBridgeService : IAsyncDisposable
         }
     }
 
+    public async Task<object?> SendReplyAsync(string sessionId, string to, string body, string quotedMsgId, string quotedFromJid)
+    {
+        var client = GetConnectedClient(sessionId);
+        (string messageId, string jid) sent;
+        try
+        {
+            sent = await client.SendReplyAsync(to, body, quotedMsgId, quotedFromJid, CancellationToken.None);
+        }
+        catch (Exception ex) when (ex is not WhatsAppServiceException)
+        {
+            _logger.LogError(ex, "SendReplyAsync failed for session {SessionId} to {To}", sessionId, to);
+            throw new WhatsAppServiceException(WhatsAppError.MessageFailed(ex.Message), ex);
+        }
+
+        var key = $"{sessionId}:{sent.jid}";
+        var storedMessage = new WhatsAppMessage(
+            Id: sent.messageId,
+            From: "me",
+            To: sent.jid,
+            Body: body,
+            Timestamp: DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            Status: Dawa.Messages.MessageStatus.Sent.ToString());
+        var list = _messageStore.GetOrAdd(key, _ => new List<WhatsAppMessage>());
+        lock (list)
+        {
+            list.Add(storedMessage);
+            if (list.Count > MaxMessagesPerChat) list.RemoveAt(0);
+        }
+
+        // Mirror SendMessageAsync (task 869ecbkv7): the send path bypasses the StoreMessage
+        // funnel, so persist the outgoing reply into the durable Messages table too.
+        PersistMessageToDatabase(sessionId, sent.jid, sent.messageId, fromMe: true,
+            sender: "me", body: body, type: "text", mediaUrl: null, mediaKey: null, mimeType: null,
+            timestamp: storedMessage.Timestamp, isHistory: false);
+
+        return new { success = true, messageId = sent.messageId };
+    }
+
     public async Task<byte[]?> DownloadMediaAsync(string sessionId, string mediaUrl, string mediaKeyBase64, string mimeType)
     {
         try { return await WhatsAppClient.DownloadMediaAsync(mediaUrl, mediaKeyBase64, mimeType); }
