@@ -301,6 +301,12 @@ public class WhatsAppController : ControllerBase
             // persisted before that column existed have a URL the bridge can never open.
             // The raw key itself is never sent to the frontend — only this readiness flag.
             mediaAvailable = !string.IsNullOrEmpty(m.MediaUrl) && !string.IsNullOrEmpty(m.MediaKey),
+            // True once the plaintext file has been cached on disk (task 869ejuycr) — the
+            // UI/agent can fetch it via store/messages/media below without a CDN round-trip.
+            mediaReady = !string.IsNullOrEmpty(m.LocalMediaPath),
+            // Whisper transcript for audio messages (task 869ejuycr). Null until transcription
+            // completes (fire-and-forget at ingest) or for non-audio messages.
+            transcript = m.Transcript,
             timestamp = m.Timestamp,
             receivedAt = m.ReceivedAt,
             isHistory = m.IsHistory
@@ -309,7 +315,11 @@ public class WhatsAppController : ControllerBase
 
     /// <summary>
     /// Downloads and decrypts a stored message's media via the bridge (task 869ecw8du) —
-    /// WhatsApp CDN links are encrypted and cannot be opened directly by the browser.
+    /// WhatsApp CDN links are encrypted and cannot be opened directly by the browser. Serves the
+    /// already-decrypted local cache when available (task 869ejuycr — media is decrypted
+    /// automatically at ingest, so this is normally a disk read, not a CDN round-trip); falls
+    /// back to on-demand decrypt for rows from before that cache existed or where it failed, so
+    /// existing playback/download behavior is unaffected.
     /// </summary>
     [HttpGet("sessions/{sessionId}/store/messages/media")]
     public async Task<IActionResult> GetStoredMessageMedia(string sessionId, [FromQuery] string chatJid, [FromQuery] string messageId)
@@ -331,6 +341,12 @@ public class WhatsAppController : ControllerBase
         if (message == null) return NotFound(new { error = "Message not found" });
         if (string.IsNullOrEmpty(message.MediaUrl) || string.IsNullOrEmpty(message.MediaKey))
             return NotFound(new { error = "Media niet beschikbaar voor dit bericht" });
+
+        if (!string.IsNullOrEmpty(message.LocalMediaPath) && System.IO.File.Exists(message.LocalMediaPath))
+        {
+            var cachedBytes = await System.IO.File.ReadAllBytesAsync(message.LocalMediaPath);
+            return File(cachedBytes, message.MimeType ?? "application/octet-stream");
+        }
 
         var bytes = await _whatsappService.DownloadMediaAsync(
             message.SessionId, message.MediaUrl, message.MediaKey, message.MimeType ?? "application/octet-stream");

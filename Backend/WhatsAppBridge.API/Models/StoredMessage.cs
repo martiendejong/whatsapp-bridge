@@ -53,4 +53,20 @@ public class StoredMessage
 
     /// <summary>True when this row came from a history-sync replay rather than live delivery.</summary>
     public bool IsHistory { get; set; }
+
+    /// <summary>
+    /// Whisper transcript, filled in automatically shortly after an audio message arrives
+    /// (task 869ejuycr). Null for non-audio messages or while transcription is still pending
+    /// (fire-and-forget — never blocks message ingest).
+    /// </summary>
+    public string? Transcript { get; set; }
+
+    /// <summary>
+    /// Absolute path to the already-decrypted media file on local disk, populated automatically
+    /// at ingest time for any message with MediaUrl+MediaKey (task 869ejuycr) — so the plaintext
+    /// file itself, not just the encrypted CDN link + key, is available without a further
+    /// network round-trip. Null while decryption is pending or if it failed (readers fall back
+    /// to on-demand decrypt via MediaUrl/MediaKey in that case).
+    /// </summary>
+    public string? LocalMediaPath { get; set; }
 }

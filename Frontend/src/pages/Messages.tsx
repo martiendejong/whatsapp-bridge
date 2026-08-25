@@ -22,6 +22,7 @@ interface StoredMessage {
   type: string;
   mediaUrl: string | null;
   mediaAvailable: boolean;
+  transcript?: string | null;
   timestamp: number;
   isHistory: boolean;
 }
@@ -281,6 +282,14 @@ export default function Messages() {
                               {mediaLabel(m.type)} · media niet beschikbaar
                             </span>
                           )}
+                        </div>
+                      )}
+                      {m.type === 'audio' && m.transcript && (
+                        <div style={{
+                          marginTop: 6, fontSize: 13, color: '#3a3a3a', fontStyle: 'italic',
+                          borderLeft: '3px solid #d0d0d0', paddingLeft: 8,
+                        }}>
+                          “{m.transcript}”
                         </div>
                       )}
                       <div style={{ fontSize: 11, color: '#8a8a8a', textAlign: 'right', marginTop: 2 }}>

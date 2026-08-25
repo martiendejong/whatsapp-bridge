@@ -271,3 +271,85 @@ Verified: backend `dotnet build` clean (0 errors); frontend `tsc --noEmit` + `np
 build` clean.
 Left: nothing new — same human click-through gap noted in the prior entry (no browser
 tool available this session).
+
+## 2026-08-08 — task 869efnkj2
+Done: PR #47 (869edf3na) already added a full post-deploy smoke-check framework, but its
+`PUBLIC_URL` constant (`https://whatsapp.wreckingball.ai`) was used for the API smoke checks
+too — live curl proved that host 404s on `/api/version`; the real API is a separate IIS
+site/hostname, `https://api.whatsapp.wreckingball.ai`. That also meant `_validate_env_production`
+required the WRONG `VITE_API_URL`, which would have rejected PR #46's (open, correct)
+`.env.production` once merged. Split `FRONTEND_URL`/`API_URL`, pointed all API smoke checks
+(`/api/version`, probe login, `GET /api/whatsapp/sessions`) at `API_URL`, kept the bundle-asset
+check on `FRONTEND_URL`, hardened all smoke-check HTTP calls to catch connection-level failures
+(DNS/refused/timeout) as `SmokeCheckFailed` (previously only non-200 was caught), and added a
+clear final success line naming the verified live version + build time + deployed commit SHA.
+Corrected AGENTS.md's architecture diagram and VITE_API_URL instructions to match (they had the
+same wrong assumption baked in from PR #47).
+While pushing this branch, discovered `master` had picked up two small unpushed commits
+(742f336, ac845f8, authored 2026-08-04 by an earlier, never-merged session) making the same
+FRONTEND_URL/API_URL split for the same reason — pure coincidental convergence, not something
+either session could have seen. Merged master into this branch and kept this branch's version
+(the same fix plus the connection-error hardening, version/commit-naming success line, and
+AGENTS.md corrections those two commits didn't include); dropped the leftover
+`PUBLIC_URL = FRONTEND_URL` back-compat alias since nothing else in the file (or repo) still
+references it.
+Verified: `python -m py_compile deploy/deploy.py` clean. Live, read-only exercise of the smoke-
+check functions against the real bridge: `/api/version` 200 + probe login + `GET
+/api/whatsapp/sessions` (1 connected session) succeed against `API_URL`; the same call against
+`FRONTEND_URL` (the pre-fix behavior) raises `SmokeCheckFailed` with a clear 404 message and a
+simulated top-level run exits 1; a fully unreachable host also raises `SmokeCheckFailed` (not an
+unhandled traceback) after the hardening fix. Did not run a real full deploy (build+upload+swap
+against production) — that needs the SSH/probe credentials and touches the live site; the smoke-
+check logic itself is what this task and its verification cover.
+Left: nothing for this task. Real end-to-end deploy exercise (a human or agent running
+`deploy/deploy.py --yes` for an actual release) remains the natural next real-world proof, as
+already noted in PR #47's own test plan.
+
+## 2026-08-25 — task 869cfzz29
+Done: finished the SHOULD HAVE gap from the 2026-07-23 session (which had a complete
+`SendReplyAsync` commit locally but was blocked on gh auth). Martien confirmed `gh auth switch`
+now works; used `gh auth token --user martiendejong` (worked despite GH_TOKEN being set) to
+push. Merged 22 commits of `master` in — one real conflict: `SendTextMessageAsync`'s signature
+(master had changed it to `Task<string>` for message-id/silent-fail tracking, this branch added
+the optional `ContextInfo? quotedContext` param) — resolved by combining both. Also added
+message-store + DB persistence to `SendReplyAsync` mirroring `SendMessageAsync` (task
+869ecbkv7), so a sent reply now actually shows up in `GET /messages` instead of vanishing.
+PR #53 opened.
+Verified: `dotnet build` clean (0 errors) on Dawa/Backend/DawaTest; `DawaTest --selftest` 9/9
+pass post-merge.
+Left: no live-phone round-trip this session (needs a paired device) — API/proto path verified
+via build + merge reconciliation only.
+
+## 2026-08-26 — task 869ejuycr
+Done: completed WIP found abandoned in this worktree (Whisper transcription + eager media
+decrypt, see PR body). Added: `api/wa/downloadMedia` now also accepts `chatJid`+`messageId`
+and serves the already-decrypted local cache directly, falling back to the message's own
+stored MediaUrl/MediaKey for on-demand decrypt (mirrors the existing UI-facing
+`store/messages/media` endpoint) — closes the gap where the agent-facing API had no way to
+fetch media without already holding the raw key. Repo had been renamed/restructured since
+this worktree's branch was created (`whatsappbridge`→`whatsapp-bridge`, `master`→`develop`+
+`main`, old origin URL 404s) — merged `develop` in (one real conflict, AGENTS.md repo-name
+section, took develop's side).
+Verified: `dotnet build` clean (0 errors) on Dawa/Backend. Whisper path verified live and
+end-to-end via an isolated console harness (`ProjectReference` to this project, no changes
+to the class): resolved the OpenAI key purely via the Prospergenics vault (no `OpenAI:ApiKey`
+config set, forcing the vault path), transcribed a real OpenAI-TTS-synthesized Dutch audio
+clip, transcript matched the spoken text. Media-cache-serving verified by code review only
+(mirrors the already-shipped `GetStoredMessageMedia` pattern) — no live WhatsApp device
+paired this session to send a real photo/voice message through ingest.
+Left: nothing agent-doable. `Vault:ApiKey` (bootstrap key for vault.prospergenics.com) still
+needs setting on the deployed server's `appsettings.Local.json`/env for transcription to be
+live in production — same one-time deploy-config step every other vault-backed secret in
+this repo already needs (see `appsettings.Local.example.json`); without it transcription
+silently stays disabled (fails closed, by design) but nothing else breaks.
+
+## 2026-08-26 — task 869ejuycr (round 2, review fix)
+Done: fixed the one gap from PR #5's review — `GetMessages`'s SQLite fallback branch
+(`WhatsAppApiController.cs`, hit on every app-pool restart/redeploy until a chat gets a
+fresh message) built its anonymous response without `transcript`/`mediaKey`, even though
+`StoredMessage.Transcript`/`MediaKey` were right there on the queried row. Added both
+fields to that projection, mirroring the already-correct `GetDurableMessages` projection a
+few lines below. PR #112 (jengo-agi) needed no changes per the same review.
+Verified: `dotnet build` clean (0 errors) on Dawa/Backend. No test project covers this
+controller (same as noted in round 1).
+Left: nothing agent-doable. Same `Vault:ApiKey` deploy-config step as round 1 still applies.

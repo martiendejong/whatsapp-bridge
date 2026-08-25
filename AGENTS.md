@@ -20,16 +20,18 @@ served a 500.30. None of the legacy scripts verify a build before uploading it, 
 upload before serving it, or can undo a bad deploy. `deploy/deploy.py` gates all three:
 
 - Refuses to build/upload if `Frontend/.env.production` doesn't declare exactly
-  `VITE_API_URL=https://api.whatsapp.wreckingball.ai`, and refuses again if the built JS bundle
-  doesn't actually contain that URL.
+  `VITE_API_URL=https://api.whatsapp.wreckingball.ai`, and refuses again if the built JS
+  bundle doesn't actually contain that URL.
 - Uploads to a temp remote folder, verifies every uploaded file's size against the local
   file, then moves the temp folder into place server-side — never serves a partial upload.
 - Always replaces the full backend DLL set (delete-then-move-all), never a single-DLL swap
   (that's what caused the 2026-07-31 500.30). Server-only files (`appsettings.Production.json`,
   `appsettings.Secrets.json`, the SQLite DB) are excluded from both the upload and the delete.
-- Runs post-deploy smoke checks against the live site (`/api/version`, a probe login, the
-  live bundle asset, WhatsApp session continuity) and **automatically rolls back** from the
-  pre-deploy backup if any of them fail.
+- Runs post-deploy smoke checks — `GET /api/version` (health) plus a probe login and
+  `GET /api/whatsapp/sessions` (authenticated functional call) against the live API host,
+  the live bundle asset, and WhatsApp session continuity — and **automatically rolls back**
+  from the pre-deploy backup if any of them fail. On success it prints the verified live
+  version and the deployed commit; on failure it exits non-zero with the exact evidence.
 
 ```bash
 # Prove a broken bundle gets refused — build + gate check only, touches no server:
@@ -63,16 +65,22 @@ working, deployable version — only updated from `develop` once verified. Deplo
 ## Production Architecture
 
 ```
-Browser → IIS (whatsapp.wreckingball.ai, port 443)
-            ├─ Frontend static files — C:\inetpub\whatsappbridge-web\
-            └─ Backend API (ASP.NET Core, OutOfProcess) — C:\inetpub\whatsappbridge-api\
-                 └─ WhatsApp Service (Node.js, port 3000) — C:\Services\WhatsAppBridge\
+                     ┌─ IIS site "WhatsAppBridgeWeb" (whatsapp.wreckingball.ai, port 443)
+                     │    └─ Frontend static files — C:\inetpub\whatsappbridge-web\
+Browser/API client ──┤
+                     └─ IIS site "WhatsAppBridgeAPI" (api.whatsapp.wreckingball.ai, port 443)
+                          └─ Backend API (ASP.NET Core, OutOfProcess) — C:\inetpub\whatsappbridge-api\
+                               └─ WhatsApp Service (Node.js, port 3000) — C:\Services\WhatsAppBridge\
 ```
 
-The frontend calls the API through IIS on the public URL — never `:5001` directly, which
-bypasses the `MS-ASPNETCORE-TOKEN` IIS sets and produces 500s. This is exactly the class of
-bug `deploy/deploy.py`'s bundle-URL gate exists to catch. See `DEPLOYMENT.md` for the full
-incident history.
+Frontend and backend are **two separate IIS sites on two separate hostnames**, not one
+same-origin site — a request to `whatsapp.wreckingball.ai/api/...` 404s (confirmed live
+2026-08-08, task 869efnkj2). The built frontend bundle must call `api.whatsapp.wreckingball.ai`
+directly (never `:5001`, which bypasses the `MS-ASPNETCORE-TOKEN` IIS sets and produces 500s).
+This is exactly the class of bug `deploy/deploy.py`'s bundle-URL gate exists to catch. See
+`DEPLOYMENT.md` for the full incident history (some of it predates the `api.` subdomain split
+and refers to the older single-host layout — treat this section as authoritative for the
+current topology).
 
 ## How to Run Locally
 
@@ -91,7 +99,8 @@ cd Frontend && npm run dev
 - Never single-DLL-swap the backend, locally or remotely — always a full publish +
   full-set replace (`deploy/deploy.py` does this correctly; nothing else should touch
   `C:\inetpub\whatsappbridge-api` directly).
-- `Frontend/.env.production` must declare `VITE_API_URL=https://whatsapp.wreckingball.ai`
-  exactly (no port, no trailing slash) — `deploy/deploy.py` refuses to build otherwise.
+- `Frontend/.env.production` must declare `VITE_API_URL=https://api.whatsapp.wreckingball.ai`
+  exactly (the API hostname, not the frontend one; no port, no trailing slash) —
+  `deploy/deploy.py` refuses to build otherwise.
 - Credentials (SSH, probe login) come from vault, never hardcoded in a script — several of
   the legacy `deploy/` scripts violate this; don't follow that pattern in new code.

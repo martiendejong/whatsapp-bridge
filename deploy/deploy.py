@@ -18,9 +18,12 @@ nothing could undo one automatically. This script:
      single-DLL swap — that is what caused the 2026-07-31 500.30 incident.
      Server-only config/db files are excluded from both the upload and the
      delete (`BACKEND_CONFIG_EXCLUDE`).
-  4. Runs post-deploy smoke checks against the live public URL (version, a
-     probe login, the live bundle asset, WhatsApp session continuity) and
-     automatically rolls back from the pre-deploy backup if any check fails.
+  4. Runs post-deploy smoke checks — GET /api/version (health) and a probe login +
+     GET /api/whatsapp/sessions (authenticated functional call) against the live API
+     host, plus the live bundle asset and WhatsApp session continuity — and
+     automatically rolls back from the pre-deploy backup if any check fails. On
+     success it prints the verified live version and the deployed commit; on
+     failure it exits non-zero with the exact evidence (status code / mismatch).
 
 Usage:
     python deploy/deploy.py --check-only     # build + gate check only, no network — use this
@@ -36,7 +39,7 @@ Credentials (never hardcoded — set as environment variables before a real depl
                                           Production Server" (Prospergenics vault, project 6)
     WHATSAPPBRIDGE_PROBE_EMAIL           optional, defaults to info@martiendejong.nl
     WHATSAPPBRIDGE_PROBE_PASSWORD        vault: "WhatsApp Bridge frontend login (martiendejong)"
-                                          (Prospergenics vault, project 4/"websites", id 52)
+                                          (Prospergenics vault, project 8/"Martien", id 52)
 If not set and stdin is a real terminal, the script prompts (no echo). In a non-interactive
 agent session, export them first.
 """
@@ -57,9 +60,12 @@ FRONTEND_DIR = REPO_ROOT / "Frontend"
 ENV_PRODUCTION_FILE = FRONTEND_DIR / ".env.production"
 REMOTE_HELPER_LOCAL_PATH = REPO_ROOT / "deploy" / "remote_helpers.ps1"
 
+# Frontend and backend are separate IIS sites/hostnames on the same server — the frontend
+# bundle calls API_URL, never FRONTEND_URL. A deploy.py version that checked FRONTEND_URL for
+# the API smoke checks would 404 on every real deploy (confirmed live 2026-08-08, task
+# 869efnkj2) since FRONTEND_URL only serves the static SPA, not /api/*.
 FRONTEND_URL = "https://whatsapp.wreckingball.ai"
 API_URL = "https://api.whatsapp.wreckingball.ai"
-PUBLIC_URL = FRONTEND_URL  # kept for smoke-check back-compat (version, probe login, bundle)
 SSH_HOST = "85.215.217.154"
 SSH_PORT = 22
 SSH_USER = "administrator"
@@ -164,7 +170,8 @@ def _validate_env_production():
         raise DeployAborted(
             f"{ENV_PRODUCTION_FILE} has VITE_API_URL={value!r}, expected {API_URL!r}. This is "
             f"the same class of bug that broke login before (e.g. the 2026-03-08 incident, where "
-            f"an extra ':5001' bypassed IIS entirely). Fix the file before deploying."
+            f"an extra ':5001' bypassed IIS entirely, or pointing at the frontend hostname instead "
+            f"of the API hostname). Fix the file before deploying."
         )
     return value
 
@@ -319,46 +326,67 @@ def sftp_upload_tree(sftp, local_dir: Path, remote_dir: str, exclude_names=froze
 # Post-deploy smoke checks.
 # ---------------------------------------------------------------------------
 
-def smoke_check_version(base_url):
+def _smoke_request(method, url, **kwargs):
+    """Runs a smoke-check HTTP call, converting any network-level failure (DNS, refused
+    connection, timeout — not just a bad status code) into a SmokeCheckFailed so a broken
+    deploy always fails loudly with clear evidence instead of an unhandled traceback."""
     import requests
-    r = requests.get(f"{base_url}/api/version", timeout=15)
+    try:
+        return requests.request(method, url, timeout=15, **kwargs)
+    except requests.exceptions.RequestException as e:
+        raise SmokeCheckFailed(f"{method} {url} failed: {e}") from e
+
+
+def smoke_check_version(base_url):
+    """Health check: GET /api/version must return 200. Returns the parsed body so the
+    caller can name the verified version in the final success output."""
+    r = _smoke_request("GET", f"{base_url}/api/version")
     if r.status_code != 200:
-        raise SmokeCheckFailed(f"GET /api/version returned {r.status_code}, expected 200")
-    log(f"[smoke] /api/version OK: {r.json()}")
+        raise SmokeCheckFailed(f"GET {base_url}/api/version returned {r.status_code}, expected 200")
+    data = r.json()
+    log(f"[smoke] {base_url}/api/version OK: {data}")
+    return data
+
+
+def get_local_commit():
+    result = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=str(REPO_ROOT),
+                             capture_output=True, text=True)
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout.strip()
+    return "unknown"
 
 
 def smoke_check_login(base_url, email, password):
-    import requests
-    r = requests.post(f"{base_url}/api/auth/login", json={"email": email, "password": password}, timeout=15)
+    r = _smoke_request("POST", f"{base_url}/api/auth/login", json={"email": email, "password": password})
     if r.status_code != 200:
-        raise SmokeCheckFailed(f"POST /api/auth/login returned {r.status_code}, expected 200")
+        raise SmokeCheckFailed(f"POST {base_url}/api/auth/login returned {r.status_code}, expected 200")
     token = r.json().get("token")
     log(f"[smoke] /api/auth/login OK{'' if token else ' (2FA pending, no token)'}")
     return token
 
 
 def smoke_check_bundle_asset(base_url, dist_dir, required_url):
-    import requests
     js_files = sorted(p for p in dist_dir.rglob("*.js") if p.is_file())
     asset = next((f for f in js_files if f.name.startswith("index")), js_files[0])
     rel = str(asset.relative_to(dist_dir)).replace("\\", "/")
 
-    r = requests.get(f"{base_url}/{rel}", timeout=15)
+    r = _smoke_request("GET", f"{base_url}/{rel}")
     if r.status_code != 200:
-        raise SmokeCheckFailed(f"GET /{rel} (live bundle asset) returned {r.status_code}, expected 200")
+        raise SmokeCheckFailed(f"GET {base_url}/{rel} (live bundle asset) returned {r.status_code}, expected 200")
     if required_url not in r.text:
-        raise SmokeCheckFailed(f"Live bundle asset /{rel} does not contain the required API URL {required_url!r}")
+        raise SmokeCheckFailed(f"Live bundle asset {base_url}/{rel} does not contain the required API URL {required_url!r}")
     log(f"[smoke] live bundle asset /{rel} OK, contains API URL")
 
 
 def get_connected_session_ids(base_url, email, password):
-    import requests
+    """The authenticated functional call: login, then GET the sessions list with the
+    resulting bearer token."""
     token = smoke_check_login(base_url, email, password)
     if not token:
         return set(), token
-    r = requests.get(f"{base_url}/api/whatsapp/sessions", headers={"Authorization": f"Bearer {token}"}, timeout=15)
+    r = _smoke_request("GET", f"{base_url}/api/whatsapp/sessions", headers={"Authorization": f"Bearer {token}"})
     if r.status_code != 200:
-        raise SmokeCheckFailed(f"GET /api/whatsapp/sessions returned {r.status_code}, expected 200")
+        raise SmokeCheckFailed(f"GET {base_url}/api/whatsapp/sessions returned {r.status_code}, expected 200")
     sessions = r.json()
     connected = {s["sessionId"] for s in sessions if str(s.get("status", "")).lower() in ("connected", "open")}
     return connected, token
@@ -396,7 +424,10 @@ def main():
         return 0
 
     if not args.yes:
-        answer = input(f"About to deploy to {PUBLIC_URL} ({SSH_HOST}). Continue? [y/N] ").strip().lower()
+        answer = input(
+            f"About to deploy to {FRONTEND_URL} (frontend) / {API_URL} (API) on {SSH_HOST}. "
+            f"Continue? [y/N] "
+        ).strip().lower()
         if answer != "y":
             log("Aborted by user.")
             return 1
@@ -468,8 +499,9 @@ def main():
                 else:
                     log("[3/5] --skip-frontend set, skipping frontend deploy.")
 
-                log(f"[4/5] Running post-deploy smoke checks against {API_URL} (API) and {FRONTEND_URL} (frontend)...")
-                smoke_check_version(API_URL)
+                log(f"[4/5] Running post-deploy smoke checks against {API_URL} (API) and "
+                    f"{FRONTEND_URL} (frontend) ...")
+                version_info = smoke_check_version(API_URL)
                 if frontend_dist_dir:
                     smoke_check_bundle_asset(FRONTEND_URL, frontend_dist_dir, required_url)
                 post_connected, _ = get_connected_session_ids(API_URL, probe_email, probe_password)
@@ -499,7 +531,12 @@ def main():
 
             log("[5/5] All smoke checks passed.")
             run_helper(ssh, "Prune", BackupRoot=REMOTE_BACKUP_ROOT, KeepBackups=str(KEEP_BACKUPS))
-            log(f"Deployment succeeded. Pre-deploy backup retained at {backup_dir}.")
+            commit_sha = get_local_commit()
+            log(
+                f"Deployment succeeded — verified live version {version_info.get('version')} "
+                f"(build {version_info.get('buildTimeUtc')}), deployed from commit {commit_sha}. "
+                f"Pre-deploy backup retained at {backup_dir}."
+            )
             return 0
         finally:
             sftp.close()

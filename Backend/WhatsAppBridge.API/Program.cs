@@ -87,6 +87,9 @@ builder.Services.AddSingleton<EncryptionService>();
 // Singleton: forwards allow-listed "/task ..." inbound messages to jengo-agi intake (default-OFF, additive)
 builder.Services.AddSingleton<TaskIntakeForwarder>();
 builder.Services.AddScoped<OutboundGuardrailService>();
+// Singleton: transcribes inbound audio via OpenAI Whisper (task 869ejuycr). Resolves its API
+// key lazily from config or the Prospergenics vault — see WhisperTranscriptionService.
+builder.Services.AddSingleton<WhisperTranscriptionService>();
 // Singleton: holds long-lived Dawa WhatsAppClient instances (one per user session)
 builder.Services.AddSingleton<WhatsAppBridgeService>();
 
@@ -151,7 +154,9 @@ using (var scope = app.Services.CreateScope())
             MimeType TEXT NULL,
             Timestamp INTEGER NOT NULL,
             ReceivedAt TEXT NOT NULL,
-            IsHistory INTEGER NOT NULL
+            IsHistory INTEGER NOT NULL,
+            Transcript TEXT NULL,
+            LocalMediaPath TEXT NULL
         );
         CREATE UNIQUE INDEX IF NOT EXISTS IX_Messages_SessionId_MessageId ON Messages (SessionId, MessageId);
         CREATE INDEX IF NOT EXISTS IX_Messages_ChatJid_Timestamp ON Messages (ChatJid, Timestamp);
@@ -191,6 +196,9 @@ using (var scope = app.Services.CreateScope())
              {
                  "ALTER TABLE Messages ADD COLUMN MediaKey TEXT NULL",
                  "ALTER TABLE Messages ADD COLUMN MimeType TEXT NULL",
+                 // Task 869ejuycr: Whisper transcript + eagerly-decrypted local media cache path.
+                 "ALTER TABLE Messages ADD COLUMN Transcript TEXT NULL",
+                 "ALTER TABLE Messages ADD COLUMN LocalMediaPath TEXT NULL",
              })
     {
         try
