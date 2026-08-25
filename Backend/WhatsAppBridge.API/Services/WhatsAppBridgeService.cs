@@ -19,6 +19,7 @@ public class WhatsAppBridgeService : IAsyncDisposable
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<WhatsAppBridgeService> _logger;
     private readonly TaskIntakeForwarder _taskIntake;
+    private readonly WhisperTranscriptionService _whisper;
 
     // One Dawa client per sessionId
     private readonly ConcurrentDictionary<string, WhatsAppClient> _clients = new();
@@ -32,13 +33,15 @@ public class WhatsAppBridgeService : IAsyncDisposable
         IConfiguration configuration,
         ILoggerFactory loggerFactory,
         ILogger<WhatsAppBridgeService> logger,
-        TaskIntakeForwarder taskIntake)
+        TaskIntakeForwarder taskIntake,
+        WhisperTranscriptionService whisper)
     {
         _scopeFactory = scopeFactory;
         _configuration = configuration;
         _loggerFactory = loggerFactory;
         _logger = logger;
         _taskIntake = taskIntake;
+        _whisper = whisper;
     }
 
     // ─── Session lifecycle ─────────────────────────────────────────────────────
@@ -852,8 +855,116 @@ public class WhatsAppBridgeService : IAsyncDisposable
             {
                 _logger.LogWarning(ex, "Durable message persist failed for [{MessageId}] in {Chat} (message is still in the in-memory store)", messageId, chatJid);
             }
+
+            // Media enrichment (task 869ejuycr): eagerly decrypt + (for audio) transcribe via
+            // Whisper. Runs after the INSERT above so the row exists to UPDATE. Sequenced inside
+            // this same fire-and-forget task (not a separate Task.Run) to avoid a race where the
+            // UPDATE below could otherwise land before the INSERT commits. Fully self-contained
+            // try/catch — a failure here must never surface back into the inbound pipeline.
+            if (!string.IsNullOrEmpty(mediaUrl) && !string.IsNullOrEmpty(mediaKey))
+            {
+                await EnrichMediaAsync(sessionId, chatJid, messageId, type, mediaUrl, mediaKey, mimeType);
+            }
         });
     }
+
+    /// <summary>
+    /// Decrypts a message's media eagerly and caches the plaintext on local disk so it — not
+    /// just the encrypted CDN link + key — is immediately available to any reader (task
+    /// 869ejuycr). For audio messages, additionally transcribes via Whisper and writes the
+    /// transcript both to SQLite and into the in-memory store (getMessages, the primary API
+    /// surface jengo-agi's poller reads, serves from memory — not SQLite). Never throws.
+    /// </summary>
+    private async Task EnrichMediaAsync(string sessionId, string chatJid, string messageId,
+        string type, string mediaUrl, string mediaKey, string? mimeType)
+    {
+        try
+        {
+            var bytes = await WhatsAppClient.DownloadMediaAsync(mediaUrl, mediaKey, mimeType ?? "application/octet-stream");
+            if (bytes == null || bytes.Length == 0)
+            {
+                _logger.LogInformation("Media enrichment: decrypt returned no bytes for [{MessageId}] (CDN link may have expired)", messageId);
+                return;
+            }
+
+            string? localPath = null;
+            try
+            {
+                var mediaRoot = _configuration["WhatsApp:MediaStorageDirectory"];
+                if (string.IsNullOrWhiteSpace(mediaRoot))
+                    mediaRoot = Path.Combine(AppContext.BaseDirectory, "media-store");
+                var dir = Path.Combine(mediaRoot, sessionId);
+                Directory.CreateDirectory(dir);
+                var safeId = new string(messageId.Where(c => char.IsLetterOrDigit(c) || c is '-' or '_').ToArray());
+                if (string.IsNullOrEmpty(safeId)) safeId = Guid.NewGuid().ToString("N");
+                localPath = Path.Combine(dir, safeId + ExtensionForMime(mimeType));
+                await File.WriteAllBytesAsync(localPath, bytes);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Media enrichment: failed to cache decrypted media for [{MessageId}] — on-demand decrypt endpoints remain available as a fallback", messageId);
+                localPath = null;
+            }
+
+            string? transcript = null;
+            if (string.Equals(type, "audio", StringComparison.OrdinalIgnoreCase))
+            {
+                if (await _whisper.IsEnabledAsync())
+                    transcript = await _whisper.TranscribeAsync(bytes, mimeType);
+                else
+                    _logger.LogDebug("Whisper not configured — skipping transcription for [{MessageId}]", messageId);
+            }
+
+            if (localPath == null && transcript == null) return;
+
+            using var scope = _scopeFactory.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            await db.Database.ExecuteSqlInterpolatedAsync($@"
+                UPDATE Messages SET
+                    LocalMediaPath = COALESCE({localPath}, LocalMediaPath),
+                    Transcript = COALESCE({transcript}, Transcript)
+                WHERE SessionId = {sessionId} AND MessageId = {messageId}");
+
+            if (transcript != null)
+                UpdateInMemoryTranscript(sessionId, chatJid, messageId, transcript);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Media enrichment failed for [{MessageId}]", messageId);
+        }
+    }
+
+    /// <summary>
+    /// Reflects a just-completed transcript into the capped in-memory message store — the store
+    /// getMessages() serves from (jengo-agi's poller reads this API, not the SQLite durable log).
+    /// </summary>
+    private void UpdateInMemoryTranscript(string sessionId, string chatJid, string messageId, string transcript)
+    {
+        var key = $"{sessionId}:{chatJid}";
+        if (!_messageStore.TryGetValue(key, out var list)) return;
+        lock (list)
+        {
+            var idx = list.FindIndex(m => m.Id == messageId);
+            if (idx >= 0) list[idx] = list[idx] with { Transcript = transcript };
+        }
+    }
+
+    private static string ExtensionForMime(string? mimeType) => (mimeType ?? "").Split(';')[0].Trim() switch
+    {
+        "audio/ogg" => ".ogg",
+        "audio/opus" => ".opus",
+        "audio/mp4" => ".m4a",
+        "audio/mpeg" => ".mp3",
+        "audio/wav" or "audio/x-wav" => ".wav",
+        "audio/webm" => ".webm",
+        "image/jpeg" => ".jpg",
+        "image/png" => ".png",
+        "image/webp" => ".webp",
+        "image/gif" => ".gif",
+        "video/mp4" => ".mp4",
+        "application/pdf" => ".pdf",
+        _ => "",
+    };
 
     /// <summary>
     /// Fire-and-forget dispatch of an inbound message to the task-intake forwarder.

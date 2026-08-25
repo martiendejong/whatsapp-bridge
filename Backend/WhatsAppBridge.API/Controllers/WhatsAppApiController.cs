@@ -398,6 +398,11 @@ public class WhatsAppApiController : ControllerBase
             body = m.Body,
             type = m.Type,
             mediaUrl = m.MediaUrl,
+            mediaAvailable = !string.IsNullOrEmpty(m.MediaUrl) && !string.IsNullOrEmpty(m.MediaKey),
+            mediaReady = !string.IsNullOrEmpty(m.LocalMediaPath),
+            // Whisper transcript for audio messages (task 869ejuycr) — filled in automatically
+            // shortly after ingest, no separate call needed.
+            transcript = m.Transcript,
             timestamp = m.Timestamp,
             receivedAt = m.ReceivedAt,
             isHistory = m.IsHistory
@@ -876,5 +881,8 @@ public record WhatsAppMessage(
     string? QuotedFrom = null,
     string? QuotedText = null,
     string? QuotedType = null,
-    string? Status = null);
+    string? Status = null,
+    // Whisper transcript for audio messages, filled in shortly after ingest (task 869ejuycr).
+    // Null until transcription completes (or for non-audio messages).
+    string? Transcript = null);
 public record WhatsAppContact(string Id, string Name, string Number);
