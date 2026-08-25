@@ -14,6 +14,7 @@ public class AppDbContext : DbContext
     public DbSet<WhatsAppSession> WhatsAppSessions { get; set; }
     public DbSet<TwoFactorToken> TwoFactorTokens { get; set; }
     public DbSet<StoredMessage> Messages { get; set; }
+    public DbSet<StoredChat> Chats { get; set; }
     public DbSet<BlockedOutboundMessage> BlockedOutboundMessages { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -50,6 +51,16 @@ public class AppDbContext : DbContext
             entity.Property(e => e.MessageId).HasMaxLength(200);
             entity.Property(e => e.Sender).HasMaxLength(200);
             entity.Property(e => e.Type).HasMaxLength(40);
+        });
+
+        modelBuilder.Entity<StoredChat>(entity =>
+        {
+            entity.ToTable("Chats");
+            entity.HasIndex(e => new { e.UserId, e.Jid }).IsUnique();
+            entity.HasIndex(e => e.UserId);
+            entity.Property(e => e.Jid).HasMaxLength(200);
+            entity.Property(e => e.Phone).HasMaxLength(50);
+            entity.Property(e => e.Name).HasMaxLength(500);
         });
 
         modelBuilder.Entity<BlockedOutboundMessage>(entity =>

@@ -31,6 +31,12 @@ param(
         "whatsappbridge.db",
         "whatsappbridge.db-shm",
         "whatsappbridge.db-wal"
+    ),
+    # Server-only directories a deploy must never delete. Dawa stores the WhatsApp
+    # session credentials and the JSON message cache here — wiping it forces a QR
+    # re-scan and loses in-memory message history on the next restart.
+    [string[]]$ExcludeDirectories = @(
+        "whatsapp-sessions"
     )
 )
 
@@ -74,7 +80,9 @@ function Invoke-SwapBackend {
     Get-ChildItem $BackendLiveDir -File | Where-Object {
         ($ExcludeNames -notcontains $_.Name) -and ($_.Name -ne "app_offline.htm")
     } | Remove-Item -Force
-    Get-ChildItem $BackendLiveDir -Directory | Remove-Item -Recurse -Force
+    Get-ChildItem $BackendLiveDir -Directory | Where-Object {
+        $ExcludeDirectories -notcontains $_.Name
+    } | Remove-Item -Recurse -Force
 
     Move-TreeInto -SourceDir $BackendTempDir -DestDir $BackendLiveDir
 
@@ -113,7 +121,9 @@ function Invoke-Rollback {
         Get-ChildItem $BackendLiveDir -File -ErrorAction SilentlyContinue |
             Where-Object { ($ExcludeNames -notcontains $_.Name) -and ($_.Name -ne "app_offline.htm") } |
             Remove-Item -Force
-        Get-ChildItem $BackendLiveDir -Directory -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+        Get-ChildItem $BackendLiveDir -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $ExcludeDirectories -notcontains $_.Name } |
+            Remove-Item -Recurse -Force
         # /XF keeps the live server-only files (e.g. whatsappbridge.db) untouched — a rollback
         # must never overwrite them with the pre-deploy snapshot, or it silently loses any
         # message data received during the deploy window.

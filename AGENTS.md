@@ -57,10 +57,10 @@ exact env vars and vault credential names.
 | Frontend | React + TypeScript + Vite (`Frontend/`) |
 | Auth | JWT Bearer (+ optional 2FA) |
 
-**Repo:** https://github.com/martiendejong/whatsappbridge
-**Production:** https://whatsapp.wreckingball.ai (frontend) / https://api.whatsapp.wreckingball.ai
-(backend API) — server `85.215.217.154`
-**Trunk branch:** `master` (no `develop` — all PRs target `master`)
+**Repo:** https://github.com/martiendejong/whatsapp-bridge
+**Production:** https://whatsapp.wreckingball.ai (server `85.215.217.154`)
+**Branches:** `develop` = latest development version, all PRs target it. `main` = latest
+working, deployable version — only updated from `develop` once verified. Deploys run from `main`.
 
 ## Production Architecture
 

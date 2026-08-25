@@ -226,6 +226,23 @@ using (var scope = app.Services.CreateScope())
         CREATE INDEX IF NOT EXISTS IX_BlockedOutboundMessages_BlockedAtUtc ON BlockedOutboundMessages (BlockedAtUtc);
         CREATE INDEX IF NOT EXISTS IX_BlockedOutboundMessages_UserId ON BlockedOutboundMessages (UserId);
         """);
+
+    // Durable chat list (fix/message-persistence-survives-deploy): getChats upserts every live
+    // result here and falls back to it when Dawa is offline, so known contacts survive
+    // restarts and re-pairs. Same self-heal reason as above: EnsureCreated() no-ops on an
+    // existing DB, and this deployment does not run EF migrations.
+    db.Database.ExecuteSqlRaw("""
+        CREATE TABLE IF NOT EXISTS Chats (
+            Id INTEGER NOT NULL CONSTRAINT PK_Chats PRIMARY KEY AUTOINCREMENT,
+            UserId INTEGER NOT NULL,
+            Jid TEXT NOT NULL,
+            Name TEXT NOT NULL,
+            Phone TEXT NOT NULL,
+            LastSeenAt TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS IX_Chats_UserId_Jid ON Chats (UserId, Jid);
+        CREATE INDEX IF NOT EXISTS IX_Chats_UserId ON Chats (UserId);
+        """);
 }
 
 // Restore WhatsApp sessions on startup — includes "disconnected" sessions that have saved credentials

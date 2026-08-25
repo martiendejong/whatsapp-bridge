@@ -18,6 +18,25 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
+// Expired/invalid token: the SPA only checks that a token EXISTS, so a stale JWT left the UI
+// "logged in" while every call 401'd (symptom: 'Kon sessies niet laden' on /messages).
+// On any 401 outside the auth endpoints: drop the token and force a fresh login.
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    const status = error?.response?.status;
+    const url: string = error?.config?.url ?? '';
+    if (status === 401 && !url.includes('/api/auth/')) {
+      localStorage.removeItem('token');
+      localStorage.removeItem('user');
+      if (!window.location.pathname.startsWith('/login')) {
+        window.location.href = '/login';
+      }
+    }
+    return Promise.reject(error);
+  }
+);
+
 export const auth = {
   register: (email: string, password: string) =>
     api.post('/api/auth/register', { Email: email, Password: password }),

@@ -355,6 +355,29 @@ public sealed class NoiseProcessor : IAsyncDisposable
                     _logger.LogDebug("Received periodic success token (session already authenticated, skipping re-init).");
                 }
                 break;
+            case "stream:features":
+                // WhatsApp sends stream:features (instead of "success") when restoring an existing session.
+                // We must still perform the post-auth setup to switch from passive → active mode.
+                if (!_sessionAuthenticated)
+                {
+                    _sessionAuthenticated = true;
+                    _logger.LogInformation("Session restored via stream:features — running post-auth setup.");
+                    Authenticated?.Invoke(this, _auth);
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            await UploadPreKeysAsync(ct);
+                            await SendActiveAsync(ct);
+                            await SendPresenceAsync(ct);
+                            await SendAppStateSyncAsync(ct);
+                        }
+                        catch (Exception ex) { _logger.LogWarning(ex, "Post-auth setup failed (non-fatal)"); }
+                    });
+                    _keepAliveCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    _ = Task.Run(() => KeepAliveLoopAsync(_keepAliveCts.Token));
+                }
+                break;
             case "failure":
                 _logger.LogWarning("Authentication failure: {Reason}", node.GetAttr("reason"));
                 break;
