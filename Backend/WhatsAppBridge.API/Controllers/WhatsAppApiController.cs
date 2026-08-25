@@ -366,7 +366,9 @@ public class WhatsAppApiController : ControllerBase
                 timestamp = m.Timestamp,
                 type = m.Type,
                 mediaUrl = m.MediaUrl,
-                mimeType = m.MimeType
+                mediaKey = m.MediaKey,
+                mimeType = m.MimeType,
+                transcript = m.Transcript
             }));
         }
 

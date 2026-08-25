@@ -342,3 +342,14 @@ needs setting on the deployed server's `appsettings.Local.json`/env for transcri
 live in production — same one-time deploy-config step every other vault-backed secret in
 this repo already needs (see `appsettings.Local.example.json`); without it transcription
 silently stays disabled (fails closed, by design) but nothing else breaks.
+
+## 2026-08-26 — task 869ejuycr (round 2, review fix)
+Done: fixed the one gap from PR #5's review — `GetMessages`'s SQLite fallback branch
+(`WhatsAppApiController.cs`, hit on every app-pool restart/redeploy until a chat gets a
+fresh message) built its anonymous response without `transcript`/`mediaKey`, even though
+`StoredMessage.Transcript`/`MediaKey` were right there on the queried row. Added both
+fields to that projection, mirroring the already-correct `GetDurableMessages` projection a
+few lines below. PR #112 (jengo-agi) needed no changes per the same review.
+Verified: `dotnet build` clean (0 errors) on Dawa/Backend. No test project covers this
+controller (same as noted in round 1).
+Left: nothing agent-doable. Same `Vault:ApiKey` deploy-config step as round 1 still applies.
