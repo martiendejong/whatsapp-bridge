@@ -86,6 +86,8 @@ builder.Services.AddScoped<TwoFactorService>();
 builder.Services.AddSingleton<EncryptionService>();
 // Singleton: forwards allow-listed "/task ..." inbound messages to jengo-agi intake (default-OFF, additive)
 builder.Services.AddSingleton<TaskIntakeForwarder>();
+// Singleton: pushes every live inbound message to jengo-agi for direct replies (default-OFF, additive)
+builder.Services.AddSingleton<InboundWebhookForwarder>();
 builder.Services.AddScoped<OutboundGuardrailService>();
 // Singleton: transcribes inbound audio via OpenAI Whisper (task 869ejuycr). Resolves its API
 // key lazily from config or the Prospergenics vault — see WhisperTranscriptionService.

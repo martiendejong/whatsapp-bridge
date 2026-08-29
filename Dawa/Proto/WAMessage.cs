@@ -293,18 +293,27 @@ public sealed class WAMessage
     public string? Conversation { get; set; }                        // field 1
     public SenderKeyDistributionMessage? SenderKeyDist { get; set; } // field 2
     public ImageMessage? ImageMessage { get; set; }                  // field 3
-    public AudioMessage? AudioMessage { get; set; }                  // field 4
+    public AudioMessage? AudioMessage { get; set; }                  // field 8
     public ExtendedTextMessage? ExtendedTextMessage { get; set; }    // field 6
-    public VideoMessage? VideoMessage { get; set; }                  // field 5
-    public StickerMessage? StickerMessage { get; set; }              // field 50
+    public VideoMessage? VideoMessage { get; set; }                  // field 9
+    public StickerMessage? StickerMessage { get; set; }              // field 26
     public ProtocolMessage? ProtocolMsg { get; set; }                // field 12
-    public DocumentMessage? DocumentMessage { get; set; }               // field 15
+    public DocumentMessage? DocumentMessage { get; set; }               // field 7
     public DeviceSentMessage? DeviceSentMessage { get; set; }           // field 31
     public MessageContextInfo? MessageContextInfo { get; set; }         // field 35
-    public HistorySyncNotification? HistorySyncNotification { get; set; } // field 46
-    public ReactionMessage? ReactionMessage { get; set; }               // field 85
+    public HistorySyncNotification? HistorySyncNotification { get; set; } // unused — history sync arrives via ProtocolMessage
+    public ReactionMessage? ReactionMessage { get; set; }               // field 46
     public PeerDataOperationRequestMessage?  PeerDataOperation { get; set; } // field 145
     public PeerDataOperationResponseMessage? PeerDataResponse  { get; set; } // field 146
+
+    /// <summary>
+    /// Inner message from a FutureProofMessage wrapper: ephemeralMessage (40, disappearing
+    /// messages), viewOnceMessage (37/55/59), documentWithCaptionMessage (53) or
+    /// editedMessage (58). A chat with a disappearing-message timer wraps EVERY message in
+    /// ephemeralMessage — without unwrapping, all inbound text in such chats parses to
+    /// nothing and is dropped as Unknown (root cause of the silent inbound loss, aug-2026).
+    /// </summary>
+    public WAMessage? Wrapped { get; set; }
 
     /// <summary>Extracts the text from whatever message type this is.</summary>
     public string? GetText()
@@ -315,6 +324,8 @@ public sealed class WAMessage
             return ExtendedTextMessage.Text;
         if (DeviceSentMessage?.Message != null)
             return DeviceSentMessage.Message.GetText();
+        if (Wrapped != null)
+            return Wrapped.GetText();
         // Caption from media messages
         if (ImageMessage    != null && !string.IsNullOrEmpty(ImageMessage.Caption))    return ImageMessage.Caption;
         if (VideoMessage    != null && !string.IsNullOrEmpty(VideoMessage.Caption))    return VideoMessage.Caption;
@@ -326,6 +337,11 @@ public sealed class WAMessage
     public Messages.MessageType GetMessageType()
     {
         if (DeviceSentMessage?.Message != null) return DeviceSentMessage.Message.GetMessageType();
+        if (Wrapped != null)
+        {
+            var wrappedType = Wrapped.GetMessageType();
+            if (wrappedType != Messages.MessageType.Unknown) return wrappedType;
+        }
         if (!string.IsNullOrEmpty(Conversation))    return Messages.MessageType.Text;
         if (ExtendedTextMessage != null)            return Messages.MessageType.Text;
         if (ImageMessage    != null)                return Messages.MessageType.Image;
@@ -346,6 +362,8 @@ public sealed class WAMessage
     {
         var inner = DeviceSentMessage?.Message;
         if (inner != null) return inner.GetAllFields();
+        if (Wrapped != null && Wrapped.GetMessageType() != Messages.MessageType.Unknown)
+            return Wrapped.GetAllFields();
 
         var type = GetMessageType();
         var text = GetText();
@@ -428,10 +446,10 @@ public sealed class WAMessage
         var buf = new List<byte>();
         ProtoEncoder.WriteString(buf, 1, Conversation);
         if (ImageMessage != null)    ProtoEncoder.WriteMessage(buf, 3,  ImageMessage.ToByteArray());
-        if (AudioMessage != null)    ProtoEncoder.WriteMessage(buf, 4,  AudioMessage.ToByteArray());
+        if (AudioMessage != null)    ProtoEncoder.WriteMessage(buf, 8,  AudioMessage.ToByteArray());
         if (ExtendedTextMessage != null)
             ProtoEncoder.WriteMessage(buf, 6, ExtendedTextMessage.ToByteArray());
-        if (DocumentMessage != null) ProtoEncoder.WriteMessage(buf, 15, DocumentMessage.ToByteArray());
+        if (DocumentMessage != null) ProtoEncoder.WriteMessage(buf, 7, DocumentMessage.ToByteArray());
         if (DeviceSentMessage != null)
             ProtoEncoder.WriteMessage(buf, 31, DeviceSentMessage.ToByteArray());
         return [.. buf];
@@ -449,22 +467,49 @@ public sealed class WAMessage
                 case 1:  msg.Conversation = r.ReadString(); break;
                 case 2:  msg.SenderKeyDist = SenderKeyDistributionMessage.ParseFrom(r.ReadBytes()); break;
                 case 3:  msg.ImageMessage = ImageMessage.ParseFrom(r.ReadBytes()); break;
-                case 4:  msg.AudioMessage = AudioMessage.ParseFrom(r.ReadBytes()); break;
-                case 5:  msg.VideoMessage = VideoMessage.ParseFrom(r.ReadBytes()); break;
                 case 6:  msg.ExtendedTextMessage = ExtendedTextMessage.ParseFrom(r.ReadBytes()); break;
+                case 7:  msg.DocumentMessage = DocumentMessage.ParseFrom(r.ReadBytes()); break;
+                case 8:  msg.AudioMessage = AudioMessage.ParseFrom(r.ReadBytes()); break;
+                case 9:  msg.VideoMessage = VideoMessage.ParseFrom(r.ReadBytes()); break;
                 case 12: msg.ProtocolMsg = ProtocolMessage.ParseFrom(r.ReadBytes()); break;
-                case 15: msg.DocumentMessage = DocumentMessage.ParseFrom(r.ReadBytes()); break;
-                case 50: msg.StickerMessage = StickerMessage.ParseFrom(r.ReadBytes()); break;
+                case 26: msg.StickerMessage = StickerMessage.ParseFrom(r.ReadBytes()); break;
                 case 31: msg.DeviceSentMessage = DeviceSentMessage.ParseFrom(r.ReadBytes()); break;
                 case 35: msg.MessageContextInfo = MessageContextInfo.ParseFrom(r.ReadBytes()); break;
-                case 46:  msg.HistorySyncNotification = HistorySyncNotification.Decode(r.ReadBytes()); break;
-                case 85:  msg.ReactionMessage = ReactionMessage.ParseFrom(r.ReadBytes()); break;
+                case 46: msg.ReactionMessage = ReactionMessage.ParseFrom(r.ReadBytes()); break;
+                // FutureProofMessage wrappers — all carry the real Message in inner field 1.
+                case 37:  // viewOnceMessage
+                case 40:  // ephemeralMessage (disappearing-messages chats wrap EVERYTHING in this)
+                case 53:  // documentWithCaptionMessage
+                case 55:  // viewOnceMessageV2
+                case 58:  // editedMessage
+                case 59:  // viewOnceMessageV2Extension
+                    msg.Wrapped = ParseFutureProof(r.ReadBytes()) ?? msg.Wrapped; break;
                 case 145: msg.PeerDataOperation = null; r.Skip(wire); break; // outgoing only — skip
                 case 146: msg.PeerDataResponse = PeerDataOperationResponseMessage.Decode(r.ReadBytes()); break;
                 default: r.Skip(wire); break;
             }
         }
         return msg;
+    }
+
+    /// <summary>FutureProofMessage { Message message = 1; } — returns the inner message, or null.</summary>
+    private static WAMessage? ParseFutureProof(byte[] data)
+    {
+        try
+        {
+            var r = ProtoEncoder.CreateReader(data);
+            while (r.HasMore)
+            {
+                var (field, wire) = r.ReadTag();
+                if (field == 1) return ParseFrom(r.ReadBytes());
+                r.Skip(wire);
+            }
+        }
+        catch
+        {
+            // A malformed wrapper must never take down the whole message parse.
+        }
+        return null;
     }
 
     public byte[] ToByteArrayWithPeerDataOperation()
@@ -479,7 +524,7 @@ public sealed class WAMessage
     {
         var buf = new List<byte>();
         if (ReactionMessage != null)
-            ProtoEncoder.WriteMessage(buf, 85, ReactionMessage.ToByteArray());
+            ProtoEncoder.WriteMessage(buf, 46, ReactionMessage.ToByteArray());
         return [.. buf];
     }
 
@@ -496,7 +541,7 @@ public sealed class WAMessage
     /// </summary>
     public ContextInfo? GetContextInfo()
     {
-        var inner = DeviceSentMessage?.Message;
+        var inner = DeviceSentMessage?.Message ?? Wrapped;
         if (inner != null) return inner.GetContextInfo();
         return ImageMessage?.ContextInfo
             ?? AudioMessage?.ContextInfo
@@ -522,8 +567,8 @@ public sealed class WAMessage
     {
         var buf = new List<byte>();
         if (ImageMessage != null)    ProtoEncoder.WriteMessage(buf, 3,  ImageMessage.ToByteArray());
-        if (AudioMessage != null)    ProtoEncoder.WriteMessage(buf, 4,  AudioMessage.ToByteArray());
-        if (DocumentMessage != null) ProtoEncoder.WriteMessage(buf, 15, DocumentMessage.ToByteArray());
+        if (AudioMessage != null)    ProtoEncoder.WriteMessage(buf, 8,  AudioMessage.ToByteArray());
+        if (DocumentMessage != null) ProtoEncoder.WriteMessage(buf, 7, DocumentMessage.ToByteArray());
         return [.. buf];
     }
 }
