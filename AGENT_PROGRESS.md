@@ -353,3 +353,29 @@ few lines below. PR #112 (jengo-agi) needed no changes per the same review.
 Verified: `dotnet build` clean (0 errors) on Dawa/Backend. No test project covers this
 controller (same as noted in round 1).
 Left: nothing agent-doable. Same `Vault:ApiKey` deploy-config step as round 1 still applies.
+
+## 2026-08-30 — task 897
+Done: found this worktree's WIP already complete and untouched for ~4.5h (abandoned
+session, confirmed dead via 3 repeated `git status`/`git diff` hash checks over several
+minutes) — `OutboundGuardrailService` had a real volume cap (max/recipient/24h + global/hour,
+new `OutboundSendLogs` table) and the quiet-hours "any recipient" exception was already
+gone (any non-allow-listed recipient is blocked unconditionally now, any time of day).
+`jengo-system-private/tools/morning-team-briefing.py` and `bugatti-infra.md` step 5 were
+already rewritten (uncommitted, shared repo) to route team signals through ClickUp instead
+of direct WhatsApp sends. `C:\scripts\bugatti-uptime-check.ps1` on 85.215.217.154 (not in
+any git repo, found via SSH) was already live-deployed with the state-change-only alert fix,
+confirmed running clean (10-min cycle, all `[prod]`/`[test] OK`, no repeated DOWN alerts).
+Committed and pushed the guardrail/db/appsettings changes; separately committed the two
+jengo-system-private files. Re-checked live session status per the task's own "How to
+review": `31641406266` (the bridge's own number) is still `disconnected`
+(`lastSeenAt=2026-08-29T19:00:15`) — needs a human QR re-pair, not something this fix
+restores by itself; that was never this task's scope (it addresses what caused the ban,
+not the re-pair itself).
+Verified: `dotnet build` clean (0 errors) on Backend/Dawa. Wrote an isolated console harness
+(`ProjectReference`, no class changes, in-memory-config + throwaway SQLite) calling
+`OutboundGuardrailService.CheckAsync` directly: a non-allow-listed recipient is blocked
+unconditionally (proves the quiet-hours exception is gone); an allow-listed recipient is
+allowed 3/3 times under a `MaxPerRecipientPer24h=3` test config then blocked on the 4th with
+a "volume cap reached" reason; both blocks land in `BlockedOutboundMessages` (the table
+`GET /api/wa/blockedOutbound` reads) and the 3 allowed sends land in `OutboundSendLogs`.
+Left: nothing agent-doable. Re-pairing `31641406266` is a manual QR-scan step for Martien.

@@ -229,6 +229,19 @@ using (var scope = app.Services.CreateScope())
         CREATE INDEX IF NOT EXISTS IX_BlockedOutboundMessages_UserId ON BlockedOutboundMessages (UserId);
         """);
 
+    // Outbound guardrail volume-cap accounting (task 897): every ALLOWED send, so the
+    // guardrail can count sends per recipient/24h and globally/hour. Same self-heal reason
+    // as BlockedOutboundMessages above.
+    db.Database.ExecuteSqlRaw("""
+        CREATE TABLE IF NOT EXISTS OutboundSendLogs (
+            Id INTEGER NOT NULL CONSTRAINT PK_OutboundSendLogs PRIMARY KEY AUTOINCREMENT,
+            Recipient TEXT NOT NULL,
+            SentAtUtc TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS IX_OutboundSendLogs_Recipient_SentAtUtc ON OutboundSendLogs (Recipient, SentAtUtc);
+        CREATE INDEX IF NOT EXISTS IX_OutboundSendLogs_SentAtUtc ON OutboundSendLogs (SentAtUtc);
+        """);
+
     // Durable chat list (fix/message-persistence-survives-deploy): getChats upserts every live
     // result here and falls back to it when Dawa is offline, so known contacts survive
     // restarts and re-pairs. Same self-heal reason as above: EnsureCreated() no-ops on an
