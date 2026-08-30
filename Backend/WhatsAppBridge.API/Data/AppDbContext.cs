@@ -16,6 +16,7 @@ public class AppDbContext : DbContext
     public DbSet<StoredMessage> Messages { get; set; }
     public DbSet<StoredChat> Chats { get; set; }
     public DbSet<BlockedOutboundMessage> BlockedOutboundMessages { get; set; }
+    public DbSet<OutboundSendLog> OutboundSendLogs { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -70,6 +71,13 @@ public class AppDbContext : DbContext
             entity.Property(e => e.Endpoint).HasMaxLength(60);
             entity.Property(e => e.Recipient).HasMaxLength(200);
             entity.Property(e => e.BodyPreview).HasMaxLength(200);
+        });
+
+        modelBuilder.Entity<OutboundSendLog>(entity =>
+        {
+            entity.HasIndex(e => new { e.Recipient, e.SentAtUtc });
+            entity.HasIndex(e => e.SentAtUtc);
+            entity.Property(e => e.Recipient).HasMaxLength(200);
         });
     }
 }
