@@ -353,3 +353,11 @@ few lines below. PR #112 (jengo-agi) needed no changes per the same review.
 Verified: `dotnet build` clean (0 errors) on Dawa/Backend. No test project covers this
 controller (same as noted in round 1).
 Left: nothing agent-doable. Same `Vault:ApiKey` deploy-config step as round 1 still applies.
+
+## 2026-08-30 — task 897 (WIP)
+Plan: add a volume cap (max/recipient/24h + global/hour) to `OutboundGuardrailService`,
+remove the quiet-hours "any recipient" exception so non-Martien numbers are never
+auto-messaged, stop `morning-team-briefing.py` and `bugatti-infra.md` step 5 messaging
+team members directly, and fix `bugatti-uptime-check.ps1` (on 85.215.217.154, found via
+SSH — not in any git repo) to alert only on state transitions instead of every 60 min
+during a sustained outage, redirecting its target to Martien.
