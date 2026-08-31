@@ -21,6 +21,7 @@ public class WhatsAppBridgeService : IAsyncDisposable
     private readonly TaskIntakeForwarder _taskIntake;
     private readonly WhisperTranscriptionService _whisper;
     private readonly InboundWebhookForwarder _inboundWebhook;
+    private readonly CoachOsIntakeForwarder _coachOsIntake;
 
     // One Dawa client per sessionId
     private readonly ConcurrentDictionary<string, WhatsAppClient> _clients = new();
@@ -36,7 +37,8 @@ public class WhatsAppBridgeService : IAsyncDisposable
         ILogger<WhatsAppBridgeService> logger,
         TaskIntakeForwarder taskIntake,
         WhisperTranscriptionService whisper,
-        InboundWebhookForwarder inboundWebhook)
+        InboundWebhookForwarder inboundWebhook,
+        CoachOsIntakeForwarder coachOsIntake)
     {
         _scopeFactory = scopeFactory;
         _configuration = configuration;
@@ -45,6 +47,7 @@ public class WhatsAppBridgeService : IAsyncDisposable
         _taskIntake = taskIntake;
         _whisper = whisper;
         _inboundWebhook = inboundWebhook;
+        _coachOsIntake = coachOsIntake;
     }
 
     // ─── Session lifecycle ─────────────────────────────────────────────────────
@@ -794,6 +797,13 @@ public class WhatsAppBridgeService : IAsyncDisposable
             if (!isHistory && !msg.FromMe)
                 _inboundWebhook.Forward(sessionId, msg);
 
+            // CoachOS service-route intake (task 1067): only for senders NOT on the outbound
+            // guardrail allow-list (allow-listed team members keep the existing route and get
+            // no CoachOS chat — checked inside DispatchCoachOsIntake). Same gating/safety
+            // contract as the two hooks above — live inbound only, fire-and-forget, never throws.
+            if (!isHistory && !msg.FromMe && _coachOsIntake.IsEnabled)
+                DispatchCoachOsIntake(sessionId, msg);
+
             if (isHistory)
             {
                 // Insert in chronological order (history messages may arrive out of order)
@@ -999,6 +1009,59 @@ public class WhatsAppBridgeService : IAsyncDisposable
             catch (Exception ex)
             {
                 _logger.LogError(ex, "TaskIntake dispatch error for session {Sid}", sessionId);
+            }
+        });
+    }
+
+    /// <summary>
+    /// Fire-and-forget dispatch of an inbound message to the CoachOS service-route intake (task
+    /// 1067). Skips allow-listed senders entirely (they keep the existing route and never get a
+    /// CoachOS chat), records the inbound contact for the guardrail's reply-window check, asks
+    /// coachingplatform for an AI reply, and — only if the guardrail's own
+    /// OutboundGuardrailService.CheckAsync (endpoint CoachOsReplyEndpoint) allows it — sends the
+    /// reply back via the existing SendMessageAsync path. Any error is swallowed here — this
+    /// must never affect the inbound pipeline.
+    /// </summary>
+    private void DispatchCoachOsIntake(string sessionId, Dawa.Messages.IncomingMessage msg)
+    {
+        var replyTo = msg.RemoteJid;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                using var scope = _scopeFactory.CreateScope();
+                var guardrail = scope.ServiceProvider.GetRequiredService<OutboundGuardrailService>();
+
+                // Allow-listed team members follow the existing route — no CoachOS chat for them.
+                if (guardrail.IsAllowListed(msg.From))
+                    return;
+
+                if (string.IsNullOrWhiteSpace(msg.Text))
+                    return; // nothing to intake (media-only messages are not handled by this route yet)
+
+                // Record this genuine inbound contact BEFORE calling out to coachingplatform —
+                // the guardrail's reply-window check reads this row, and recording it first means
+                // even a slow/failed AI call still leaves an accurate "we saw this person" trail.
+                await guardrail.RecordInboundContactAsync(msg.From);
+
+                var replyText = await _coachOsIntake.GetAiReplyAsync(msg.From, msg.PushName, msg.Text);
+                if (string.IsNullOrWhiteSpace(replyText))
+                    return;
+
+                var (allowed, reason) = await guardrail.CheckAsync(
+                    OutboundGuardrailService.CoachOsReplyEndpoint, msg.From, replyText, userId: null);
+                if (!allowed)
+                {
+                    _logger.LogWarning("CoachOsIntake: reply to {From} blocked by guardrail: {Reason}", msg.From, reason);
+                    return;
+                }
+
+                await SendMessageAsync(sessionId, replyTo, replyText);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "CoachOsIntake dispatch error for session {Sid}", sessionId);
             }
         });
     }

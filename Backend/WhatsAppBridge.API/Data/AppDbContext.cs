@@ -17,6 +17,7 @@ public class AppDbContext : DbContext
     public DbSet<StoredChat> Chats { get; set; }
     public DbSet<BlockedOutboundMessage> BlockedOutboundMessages { get; set; }
     public DbSet<OutboundSendLog> OutboundSendLogs { get; set; }
+    public DbSet<InboundContact> InboundContacts { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -78,6 +79,12 @@ public class AppDbContext : DbContext
             entity.HasIndex(e => new { e.Recipient, e.SentAtUtc });
             entity.HasIndex(e => e.SentAtUtc);
             entity.Property(e => e.Recipient).HasMaxLength(200);
+        });
+
+        modelBuilder.Entity<InboundContact>(entity =>
+        {
+            entity.HasIndex(e => e.Sender).IsUnique();
+            entity.Property(e => e.Sender).HasMaxLength(200);
         });
     }
 }
