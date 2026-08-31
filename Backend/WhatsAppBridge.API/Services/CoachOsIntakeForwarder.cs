@@ -70,7 +70,6 @@ public sealed class CoachOsIntakeForwarder
         {
             var payload = new CoachOsIntakePayload
             {
-                TenantSlug = _options.TenantSlug!,
                 Phone = phone,
                 PushName = string.IsNullOrWhiteSpace(pushName) ? null : pushName,
                 Text = text,
@@ -79,6 +78,10 @@ public sealed class CoachOsIntakeForwarder
             using var request = new HttpRequestMessage(HttpMethod.Post, _options.Endpoint);
             if (!string.IsNullOrEmpty(_options.ApiKey))
                 request.Headers.Add("X-Api-Key", _options.ApiKey);
+            // coachingplatform resolves the tenant DB from this header for every unauthenticated/
+            // machine-to-machine endpoint (same convention its public chat/intake endpoints use
+            // when there's no JWT) — NOT from a JSON body field, so this must be a real header.
+            request.Headers.Add("X-Tenant", _options.TenantSlug);
             request.Content = JsonContent.Create(payload, options: JsonOptions);
 
             using var response = await _http.SendAsync(request);
@@ -129,7 +132,6 @@ public sealed class CoachOsIntakeForwarder
 
     private sealed class CoachOsIntakePayload
     {
-        [JsonPropertyName("tenantSlug")] public string TenantSlug { get; set; } = "";
         [JsonPropertyName("phone")] public string Phone { get; set; } = "";
         [JsonPropertyName("pushName")] public string? PushName { get; set; }
         [JsonPropertyName("text")] public string Text { get; set; } = "";
