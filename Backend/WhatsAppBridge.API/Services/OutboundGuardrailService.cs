@@ -30,11 +30,36 @@ namespace WhatsAppBridge.API.Services;
 /// A blocked send is logged (ILogger) AND persisted to BlockedOutboundMessages so it is
 /// discoverable via GET /api/wa/blockedOutbound, not silently dropped.
 ///
+/// Task 1067 (2026-08-31, default OFF): a narrow, explicit exception to "unknown recipients are
+/// never auto-messaged" for exactly ONE caller — the CoachOS service route, which lets a
+/// non-allow-listed sender get an AI reply via the coaching app instead of being silently
+/// dropped. This is intentionally NOT a general allow-list bypass:
+///   - Only requests tagged with <see cref="CoachOsReplyEndpoint"/> are eligible at all.
+///   - <see cref="OutboundGuardrailOptions.ReplyRouteEnabled"/> is its own independent flag
+///     (default false) — the CoachOS forwarder having its own "Enabled" flag on is not enough;
+///     the guardrail must separately opt in too (defense in depth, same principle as the rest
+///     of this class).
+///   - Even then, the recipient must have a row in InboundContacts (written ONLY by
+///     RecordInboundContactAsync, called ONLY from a genuine, live, non-history inbound message)
+///     with a timestamp inside the last <see cref="OutboundGuardrailOptions.ReplyWindowHours"/>
+///     hours — i.e. this exact person actually messaged the bridge recently. No inbound row, no
+///     exception: outbound to a truly unknown number is still unconditionally blocked.
+///   - The existing MaxPerRecipientPer24h / MaxGlobalPerHour rate limits are NOT bypassed —
+///     a reply that clears the reply-window check still has to clear both caps below.
+///
 /// Registered as Scoped (writes to AppDbContext) and bound from configuration section
 /// "OutboundGuardrail".
 /// </summary>
 public sealed class OutboundGuardrailService
 {
+    /// <summary>
+    /// The only "endpoint" value CheckAsync will ever consider for the reply-window exception.
+    /// Only WhatsAppBridgeService's CoachOS dispatch path passes this — the normal
+    /// sendMessage/sendMedia/forwardMessage endpoints in WhatsAppApiController pass their own
+    /// literal endpoint names, so this exception can never apply to a direct API caller.
+    /// </summary>
+    public const string CoachOsReplyEndpoint = "coachOsReply";
+
     private readonly OutboundGuardrailOptions _options;
     private readonly AppDbContext _context;
     private readonly ILogger<OutboundGuardrailService> _logger;
@@ -47,6 +72,29 @@ public sealed class OutboundGuardrailService
         configuration.GetSection("OutboundGuardrail").Bind(_options);
         if (_options.AllowList.Count == 0)
             _options.AllowList = new List<string> { "31633984381" }; // Martien — safe default even if config binding produced an empty list
+    }
+
+    /// <summary>True if <paramref name="to"/> normalizes to an entry on the configured allow-list.</summary>
+    public bool IsAllowListed(string to) => _options.AllowList.Any(a => Normalize(a) == Normalize(to));
+
+    /// <summary>
+    /// Records that a genuine inbound message just arrived from <paramref name="from"/>. Call
+    /// this ONLY for live, non-history, non-self inbound messages — this timestamp is the sole
+    /// basis for the CoachOS reply-window exception in CheckAsync, so recording a false or stale
+    /// entry would directly weaken the guardrail.
+    /// </summary>
+    public async Task RecordInboundContactAsync(string from)
+    {
+        var normalized = Normalize(from);
+        if (string.IsNullOrEmpty(normalized)) return;
+
+        var nowUtc = DateTime.UtcNow;
+        var existing = await _context.InboundContacts.FirstOrDefaultAsync(c => c.Sender == normalized);
+        if (existing == null)
+            _context.InboundContacts.Add(new InboundContact { Sender = normalized, LastInboundAtUtc = nowUtc });
+        else
+            existing.LastInboundAtUtc = nowUtc;
+        await _context.SaveChangesAsync();
     }
 
     /// <summary>
@@ -64,10 +112,31 @@ public sealed class OutboundGuardrailService
 
         if (!isAllowListed)
         {
-            var reason = $"Blocked: '{to}' is not on the outbound allow-list. Team-communication " +
-                         "requests should route through ClickUp for approval instead of a direct WhatsApp send.";
-            await RecordBlockAsync(endpoint, to, body, userId, reason);
-            return (false, reason);
+            if (endpoint == CoachOsReplyEndpoint && _options.ReplyRouteEnabled)
+            {
+                var cutoffUtc = DateTime.UtcNow.AddHours(-Math.Max(0, _options.ReplyWindowHours));
+                var hasRecentInbound = await _context.InboundContacts
+                    .AnyAsync(c => c.Sender == normalizedTo && c.LastInboundAtUtc >= cutoffUtc);
+
+                if (!hasRecentInbound)
+                {
+                    var noWindowReason = $"Blocked: no inbound WhatsApp message from '{to}' within the " +
+                                          $"{_options.ReplyWindowHours}h reply window — the CoachOS service route " +
+                                          "only replies to numbers that genuinely messaged the bridge recently.";
+                    await RecordBlockAsync(endpoint, to, body, userId, noWindowReason);
+                    return (false, noWindowReason);
+                }
+
+                // Recent genuine inbound confirmed — fall through to the same rate-limit checks
+                // below that an allow-listed recipient is subject to. No early "allowed" return.
+            }
+            else
+            {
+                var reason = $"Blocked: '{to}' is not on the outbound allow-list. Team-communication " +
+                             "requests should route through ClickUp for approval instead of a direct WhatsApp send.";
+                await RecordBlockAsync(endpoint, to, body, userId, reason);
+                return (false, reason);
+            }
         }
 
         var nowUtc = DateTime.UtcNow;
@@ -146,4 +215,14 @@ public class OutboundGuardrailOptions
 
     /// <summary>Max sends total (any recipient) in a rolling 1h window.</summary>
     public int MaxGlobalPerHour { get; set; } = 10;
+
+    /// <summary>
+    /// Task 1067, default false: independent opt-in for the CoachOS service-route reply
+    /// exception (see class doc comment). Must be explicitly true in config in addition to
+    /// CoachOsIntake:Enabled — the guardrail does not trust the forwarder's own flag alone.
+    /// </summary>
+    public bool ReplyRouteEnabled { get; set; } = false;
+
+    /// <summary>How many hours after a genuine inbound message the CoachOS reply exception stays open.</summary>
+    public int ReplyWindowHours { get; set; } = 24;
 }

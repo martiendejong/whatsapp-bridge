@@ -88,6 +88,9 @@ builder.Services.AddSingleton<EncryptionService>();
 builder.Services.AddSingleton<TaskIntakeForwarder>();
 // Singleton: pushes every live inbound message to jengo-agi for direct replies (default-OFF, additive)
 builder.Services.AddSingleton<InboundWebhookForwarder>();
+// Singleton: asks coachingplatform (CoachOS) for an AI reply for non-allow-listed senders
+// (task 1067, default-OFF, additive). Never sends anything itself — see class doc comment.
+builder.Services.AddSingleton<CoachOsIntakeForwarder>();
 builder.Services.AddScoped<OutboundGuardrailService>();
 // Singleton: transcribes inbound audio via OpenAI Whisper (task 869ejuycr). Resolves its API
 // key lazily from config or the Prospergenics vault — see WhisperTranscriptionService.
@@ -240,6 +243,19 @@ using (var scope = app.Services.CreateScope())
         );
         CREATE INDEX IF NOT EXISTS IX_OutboundSendLogs_Recipient_SentAtUtc ON OutboundSendLogs (Recipient, SentAtUtc);
         CREATE INDEX IF NOT EXISTS IX_OutboundSendLogs_SentAtUtc ON OutboundSendLogs (SentAtUtc);
+        """);
+
+    // CoachOS service-route reply-window tracking (task 1067): every genuine inbound message's
+    // sender + timestamp, so OutboundGuardrailService can prove a reply is answering a real prior
+    // inbound message before allowing it through the allow-list exception. Same self-heal reason
+    // as the tables above.
+    db.Database.ExecuteSqlRaw("""
+        CREATE TABLE IF NOT EXISTS InboundContacts (
+            Id INTEGER NOT NULL CONSTRAINT PK_InboundContacts PRIMARY KEY AUTOINCREMENT,
+            Sender TEXT NOT NULL,
+            LastInboundAtUtc TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS IX_InboundContacts_Sender ON InboundContacts (Sender);
         """);
 
     // Durable chat list (fix/message-persistence-survives-deploy): getChats upserts every live
