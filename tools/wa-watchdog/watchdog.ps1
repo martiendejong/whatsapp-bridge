@@ -12,6 +12,8 @@
 #   5. New Baileys release                    -> upstream protocol changes worth reviewing
 # Credentials live in config.json NEXT TO this script on the server - never in the repo:
 #   apiBase, bridgeEmail, waToken, alertTo, activeVersionFile.
+#   Optional: heartbeatScript (path to Send-Heartbeat.ps1) and heartbeatConfig (path passed
+#   through as -ConfigPath) for the fallback alert below; both have sensible defaults.
 # waToken is the plaintext token of the "jengo" ApiConnection (long-lived, does not rotate with
 # the frontend login password - that's what broke this check on 2026-07-31/08-02). It is used
 # both to send alerts (Bearer, /api/wa/sendMessage) and for the session-health check below
@@ -133,6 +135,46 @@ if ($TestAlert) {
     [void]$alerts.Add(@{ key = "test-$((Get-Date).Ticks)"; body = 'Test alert - WhatsApp Bridge watchdog is live on 85.215.217.154 (runs every 6h). You will only hear from me when something needs attention.' })
 }
 
+# ---- Fallback alert channel (task 856) --------------------------------------
+# When the WhatsApp send below fails, the outage silences its own alarm (the 27-08 session
+# loss went unnoticed exactly this way). Fallback = the shared dead-man's-switch library
+# (jengo-system-private/tools/heartbeat/Send-Heartbeat.ps1): an instant ntfy.sh push (plus
+# the healthchecks.io /fail ping once that account exists), deliberately NOT WhatsApp.
+# Send-Heartbeat is guaranteed harmless (missing script/config/network = silent no-op), and
+# it reads C:\tools\heartbeat-config.json (ntfyTopic) unless heartbeatConfig overrides it.
+function Resolve-HeartbeatScript {
+    $candidates = @()
+    if ($config.PSObject.Properties['heartbeatScript'] -and -not [string]::IsNullOrWhiteSpace($config.heartbeatScript)) {
+        $candidates += $config.heartbeatScript
+    }
+    $candidates += @(
+        'C:\projects\jengo\jengo-system-private\tools\heartbeat\Send-Heartbeat.ps1',
+        'E:\projects\jengo\jengo-system-private\tools\heartbeat\Send-Heartbeat.ps1',
+        (Join-Path $root 'Send-Heartbeat.ps1')
+    )
+    foreach ($c in $candidates) { if (Test-Path $c) { return $c } }
+    return $null
+}
+function Send-FallbackAlert([string]$key, [string]$body) {
+    try {
+        $script = Resolve-HeartbeatScript
+        if ($null -eq $script) {
+            Log "FALLBACK ALERT SKIPPED ($key): Send-Heartbeat.ps1 not found (set heartbeatScript in config.json)"
+            return
+        }
+        $hbArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script,
+                    '-Check', 'wa-watchdog', '-Fail', '-Message', "[WA-Watchdog fallback - WhatsApp send failed] $body")
+        if ($config.PSObject.Properties['heartbeatConfig'] -and -not [string]::IsNullOrWhiteSpace($config.heartbeatConfig)) {
+            $hbArgs += @('-ConfigPath', $config.heartbeatConfig)
+        }
+        & powershell.exe @hbArgs | Out-Null
+        Log "FALLBACK ALERT ($key): heartbeat fired via $script (exit=$LASTEXITCODE)"
+    } catch {
+        # Never let the fallback path break the remaining alerts.
+        Log "FALLBACK ALERT FAILED ($key): $($_.Exception.Message)"
+    }
+}
+
 # ---- Send alerts ------------------------------------------------------------
 foreach ($a in $alerts) {
     $sent = $false
@@ -143,6 +185,8 @@ foreach ($a in $alerts) {
         $sent = $true
     } catch {
         Log "ALERT SEND FAILED ($($a.key)): $($_.Exception.Message)"
+        # Only when the WhatsApp send actually failed - never on every alert.
+        Send-FallbackAlert $a.key $a.body
     }
     Log "ALERT [$($a.key)] sent=$sent : $($a.body)"
     MarkAlerted $a.key
