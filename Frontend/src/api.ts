@@ -78,6 +78,8 @@ export const whatsapp = {
     }),
   requestHistory: (sessionId: string, chatJid: string, count = 100) =>
     api.post(`/api/whatsapp/sessions/${sessionId}/request-history`, { ChatJid: chatJid, Count: count }),
+  setContactName: (jid: string, name: string) =>
+    api.put('/api/whatsapp/contacts/name', { Jid: jid, Name: name }),
   getStoredMessageMedia: (sessionId: string, chatJid: string, messageId: string) =>
     api.get(`/api/whatsapp/sessions/${sessionId}/store/messages/media`, {
       params: { chatJid, messageId },
