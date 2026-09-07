@@ -1,0 +1,14 @@
+{
+  "name": "whatsappbridge-baileys-sidecar",
+  "version": "1.0.0",
+  "description": "Baileys engine sidecar for WhatsAppBridge.API - NDJSON over stdio, one process per session",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js --session-dir ./session"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.16",
+    "pino": "^9.6.0"
+  }
+}

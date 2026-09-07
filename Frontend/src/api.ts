@@ -85,4 +85,10 @@ export const whatsapp = {
     }),
 };
 
+export const admin = {
+  getEngine: () => api.get('/api/admin/engine'),
+  setEngine: (engine: string, restartSessions: boolean) =>
+    api.put('/api/admin/engine', { engine, restartSessions }),
+};
+
 export default api;

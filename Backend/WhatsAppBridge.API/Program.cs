@@ -95,7 +95,9 @@ builder.Services.AddScoped<OutboundGuardrailService>();
 // Singleton: transcribes inbound audio via OpenAI Whisper (task 869ejuycr). Resolves its API
 // key lazily from config or the Prospergenics vault — see WhisperTranscriptionService.
 builder.Services.AddSingleton<WhisperTranscriptionService>();
-// Singleton: holds long-lived Dawa WhatsAppClient instances (one per user session)
+// Singleton: admin-selected WhatsApp engine ("dawa"/"baileys"), persisted in AppSettings
+builder.Services.AddSingleton<EngineSettingsService>();
+// Singleton: holds long-lived WhatsApp engine instances (one per user session)
 builder.Services.AddSingleton<WhatsAppBridgeService>();
 
 // CORS
@@ -258,6 +260,25 @@ using (var scope = app.Services.CreateScope())
         CREATE UNIQUE INDEX IF NOT EXISTS IX_InboundContacts_Sender ON InboundContacts (Sender);
         """);
 
+    // Global key/value settings (engine switch feature): holds the admin-selected WhatsApp
+    // engine ("dawa"/"baileys"). Same self-heal reason as the tables above.
+    db.Database.ExecuteSqlRaw("""
+        CREATE TABLE IF NOT EXISTS AppSettings (
+            Key TEXT NOT NULL PRIMARY KEY,
+            Value TEXT NOT NULL
+        );
+        """);
+
+    // Engine column on sessions (informational: which engine the session last connected with).
+    try
+    {
+        db.Database.ExecuteSqlRaw("ALTER TABLE WhatsAppSessions ADD COLUMN Engine TEXT NULL;");
+    }
+    catch (Exception ex) when (ex.Message.Contains("duplicate column name", StringComparison.OrdinalIgnoreCase))
+    {
+        // Column already present from a prior startup.
+    }
+
     // Durable chat list (fix/message-persistence-survives-deploy): getChats upserts every live
     // result here and falls back to it when Dawa is offline, so known contacts survive
     // restarts and re-pairs. Same self-heal reason as above: EnsureCreated() no-ops on an
@@ -284,15 +305,16 @@ using (var scope = app.Services.CreateScope())
     var sessionsRoot = app.Configuration["WhatsApp:SessionsDirectory"]
         ?? Path.Combine(AppContext.BaseDirectory, "whatsapp-sessions");
 
-    // Restore any session that has a saved creds.json, regardless of last-known DB status.
-    // Do NOT filter by status — "failed" sessions have creds and can still reconnect.
+    // Restore any session that has saved creds for the selected engine, regardless of
+    // last-known DB status ("failed" sessions have creds and can still reconnect).
+    // RestoreSessionAsync itself checks the engine-specific creds location
+    // (creds.json for Dawa, baileys-auth/creds.json for Baileys) and skips otherwise.
     var allSessions = db.WhatsAppSessions
         .Select(s => s.SessionId)
         .ToList();
     foreach (var sessionId in allSessions)
     {
-        var credsPath = Path.Combine(sessionsRoot, sessionId, "creds.json");
-        if (File.Exists(credsPath))
+        if (Directory.Exists(Path.Combine(sessionsRoot, sessionId)))
             await whatsappService.RestoreSessionAsync(sessionId);
     }
 }
