@@ -143,6 +143,21 @@ def build_backend():
     entry_dll = publish_dir / "WhatsAppBridge.API.dll"
     if not entry_dll.exists():
         raise DeployAborted(f"Publish output is missing the entry assembly: {entry_dll}")
+
+    # Baileys engine sidecar (engine-switch feature): the csproj copies baileys-sidecar/
+    # (index.js + package.json) into the publish output; install its node_modules here so
+    # the server never needs to run npm itself. Non-fatal when npm is unavailable — the
+    # bridge runs fine on the default Dawa engine without it.
+    sidecar_dir = publish_dir / "baileys-sidecar"
+    if sidecar_dir.exists():
+        try:
+            log("[backend] npm install for baileys-sidecar (Baileys engine)...")
+            run(["npm", "install", "--omit=dev", "--no-audit", "--no-fund"], cwd=sidecar_dir)
+        except (DeployAborted, FileNotFoundError) as ex:
+            log(f"[backend] WARNING: baileys-sidecar npm install failed ({ex}). "
+                "Deploy continues — Dawa engine unaffected, but switching to the Baileys "
+                "engine will fail until node_modules exists in the deployed baileys-sidecar/.")
+
     return publish_dir
 
 

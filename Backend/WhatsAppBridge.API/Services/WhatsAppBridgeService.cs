@@ -4,13 +4,15 @@ using System.Collections.Concurrent;
 using WhatsAppBridge.API.Controllers;
 using WhatsAppBridge.API.Data;
 using WhatsAppBridge.API.Models;
+using WhatsAppBridge.API.Services.Engines;
 
 namespace WhatsAppBridge.API.Services;
 
 /// <summary>
-/// Manages per-user WhatsApp sessions using Dawa (C# native client).
-/// Replaces the former Node.js/Baileys HTTP bridge.
-/// Registered as Singleton — holds long-lived WhatsAppClient instances.
+/// Manages per-user WhatsApp sessions through a pluggable engine: Dawa (C# native client,
+/// the default) or Baileys (Node.js sidecar). The admin-selected engine (EngineSettingsService)
+/// is applied whenever a session (re)connects.
+/// Registered as Singleton — holds long-lived engine instances.
 /// </summary>
 public class WhatsAppBridgeService : IAsyncDisposable
 {
@@ -22,9 +24,10 @@ public class WhatsAppBridgeService : IAsyncDisposable
     private readonly WhisperTranscriptionService _whisper;
     private readonly InboundWebhookForwarder _inboundWebhook;
     private readonly CoachOsIntakeForwarder _coachOsIntake;
+    private readonly EngineSettingsService _engineSettings;
 
-    // One Dawa client per sessionId
-    private readonly ConcurrentDictionary<string, WhatsAppClient> _clients = new();
+    // One engine per sessionId
+    private readonly ConcurrentDictionary<string, IWhatsAppEngine> _clients = new();
 
     // In-memory message store: key = "{sessionId}:{remoteJid}", value = ordered messages (newest last)
     private readonly ConcurrentDictionary<string, List<WhatsAppMessage>> _messageStore = new();
@@ -38,7 +41,8 @@ public class WhatsAppBridgeService : IAsyncDisposable
         TaskIntakeForwarder taskIntake,
         WhisperTranscriptionService whisper,
         InboundWebhookForwarder inboundWebhook,
-        CoachOsIntakeForwarder coachOsIntake)
+        CoachOsIntakeForwarder coachOsIntake,
+        EngineSettingsService engineSettings)
     {
         _scopeFactory = scopeFactory;
         _configuration = configuration;
@@ -48,12 +52,64 @@ public class WhatsAppBridgeService : IAsyncDisposable
         _whisper = whisper;
         _inboundWebhook = inboundWebhook;
         _coachOsIntake = coachOsIntake;
+        _engineSettings = engineSettings;
+    }
+
+    // ─── Engine selection ─────────────────────────────────────────────────────
+
+    private string GetSessionsRoot() => _configuration["WhatsApp:SessionsDirectory"]
+        ?? Path.Combine(AppContext.BaseDirectory, "whatsapp-sessions");
+
+    private async Task<IWhatsAppEngine> CreateEngineAsync(string sessionDir)
+    {
+        var engine = await _engineSettings.GetEngineAsync();
+        return engine == EngineSettingsService.BaileysEngine
+            ? new BaileysEngine(sessionDir, _configuration, _loggerFactory)
+            : new DawaEngine(sessionDir, _loggerFactory);
+    }
+
+    /// <summary>
+    /// Whether the given engine has saved credentials for this session directory.
+    /// Dawa and Baileys store creds in different (incompatible) formats, so a session
+    /// switching engines needs a fresh QR pairing on the new engine.
+    /// </summary>
+    public static bool EngineHasSavedSession(string engine, string sessionDir) =>
+        engine == EngineSettingsService.BaileysEngine
+            ? File.Exists(Path.Combine(sessionDir, "baileys-auth", "creds.json"))
+            : File.Exists(Path.Combine(sessionDir, "creds.json"));
+
+    /// <summary>Live engine info per active session — used by the admin engine endpoint.</summary>
+    public List<object> GetActiveSessionEngines() =>
+        _clients.Select(kv => (object)new
+        {
+            sessionId = kv.Key,
+            engine = kv.Value.EngineName,
+            isConnected = kv.Value.IsConnected,
+        }).ToList();
+
+    /// <summary>
+    /// Disconnects every active session and restores each with the currently-selected engine.
+    /// Sessions without saved creds for the new engine end up "disconnected" and need a QR
+    /// re-pair from the sessions page.
+    /// </summary>
+    public async Task<int> RestartAllSessionsAsync()
+    {
+        var sessionIds = _clients.Keys.ToList();
+        foreach (var sessionId in sessionIds)
+            await DisconnectSessionAsync(sessionId);
+        var restored = 0;
+        foreach (var sessionId in sessionIds)
+        {
+            if (await RestoreSessionAsync(sessionId)) restored++;
+        }
+        return restored;
     }
 
     // ─── Session lifecycle ─────────────────────────────────────────────────────
 
     /// <summary>
-    /// Creates a Dawa client for the session and waits up to 30s for a QR code.
+    /// Creates an engine (per the admin-selected engine setting) for the session and waits up
+    /// to 30s for a QR code.
     /// Returns the QR string on success, null if it times out (QR will arrive later via event).
     /// </summary>
     public async Task<string?> InitializeSessionAsync(string sessionId)
@@ -62,12 +118,11 @@ public class WhatsAppBridgeService : IAsyncDisposable
         if (_clients.TryRemove(sessionId, out var existing))
             await existing.DisposeAsync();
 
-        var sessionsRoot = _configuration["WhatsApp:SessionsDirectory"]
-            ?? Path.Combine(AppContext.BaseDirectory, "whatsapp-sessions");
-        var sessionDir = Path.Combine(sessionsRoot, sessionId);
+        var sessionDir = Path.Combine(GetSessionsRoot(), sessionId);
 
-        var client = WhatsAppClient.Create(sessionDir, _loggerFactory);
+        var client = await CreateEngineAsync(sessionDir);
         _clients[sessionId] = client;
+        _ = UpdateSessionAsync(sessionId, s => s.Engine = client.EngineName);
 
         // Load persisted messages from previous sessions
         LoadPersistedMessages(sessionId);
@@ -138,22 +193,32 @@ public class WhatsAppBridgeService : IAsyncDisposable
 
     /// <summary>
     /// Silently restores a saved session on startup without waiting for QR.
-    /// Only works if creds.json exists in the session directory.
+    /// Only works if the currently-selected engine has saved creds in the session directory
+    /// (creds.json for Dawa, baileys-auth/creds.json for Baileys).
+    /// Returns true when a restore was actually started.
     /// </summary>
-    public Task RestoreSessionAsync(string sessionId)
+    public async Task<bool> RestoreSessionAsync(string sessionId)
     {
-        var sessionsRoot = _configuration["WhatsApp:SessionsDirectory"]
-            ?? Path.Combine(AppContext.BaseDirectory, "whatsapp-sessions");
-        var sessionDir = Path.Combine(sessionsRoot, sessionId);
+        var sessionDir = Path.Combine(GetSessionsRoot(), sessionId);
 
         if (!Directory.Exists(sessionDir))
-            return Task.CompletedTask;
+            return false;
 
         if (_clients.ContainsKey(sessionId))
-            return Task.CompletedTask;
+            return false;
 
-        var client = WhatsAppClient.Create(sessionDir, _loggerFactory);
+        var engineName = await _engineSettings.GetEngineAsync();
+        if (!EngineHasSavedSession(engineName, sessionDir))
+        {
+            _logger.LogInformation(
+                "Session {SessionId} has no saved creds for engine '{Engine}' — skipping restore (QR re-pair needed)",
+                sessionId, engineName);
+            return false;
+        }
+
+        var client = await CreateEngineAsync(sessionDir);
         _clients[sessionId] = client;
+        _ = UpdateSessionAsync(sessionId, s => s.Engine = client.EngineName);
 
         // Load persisted messages from previous sessions
         LoadPersistedMessages(sessionId);
@@ -189,7 +254,7 @@ public class WhatsAppBridgeService : IAsyncDisposable
 
         // Fire and forget — reconnects in background
         _ = client.ConnectAsync(CancellationToken.None);
-        return Task.CompletedTask;
+        return true;
     }
 
     public async Task<bool> DisconnectSessionAsync(string sessionId)
@@ -1075,16 +1140,17 @@ public class WhatsAppBridgeService : IAsyncDisposable
             return new { error = "session not in _clients" };
         return new
         {
+            engine = client.EngineName,
             isConnected = client.IsConnected,
             myJid = client.MyJid,
-            cacheDebugInfo = client.GetCacheDebugInfo(),
+            cacheDebugInfo = client.GetDebugInfo(),
         };
     }
 
-    public bool TryGetClient(string sessionId, out WhatsAppClient? client)
+    public bool TryGetClient(string sessionId, out IWhatsAppEngine? client)
         => _clients.TryGetValue(sessionId, out client);
 
-    private WhatsAppClient GetConnectedClient(string sessionId)
+    private IWhatsAppEngine GetConnectedClient(string sessionId)
     {
         if (!_clients.TryGetValue(sessionId, out var client))
             throw new WhatsAppServiceException(WhatsAppError.SessionNotFound(sessionId));

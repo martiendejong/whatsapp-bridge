@@ -811,7 +811,15 @@ public class WhatsAppController : ControllerBase
             return NotFound(new { error = "Session not found" });
         if (!client.IsConnected)
             return StatusCode(503, new { error = "Session is not connected" });
-        await client.SendManualRetryReceiptAsync(body.SenderJid, body.MsgId, body.Timestamp, CancellationToken.None);
+        try
+        {
+            await client.SendManualRetryReceiptAsync(body.SenderJid, body.MsgId, body.Timestamp, CancellationToken.None);
+        }
+        catch (NotSupportedException ex)
+        {
+            // Baileys engine handles retry receipts internally — this manual escape hatch is Dawa-only.
+            return BadRequest(new { error = ex.Message, engine = client.EngineName });
+        }
         return Ok(new { success = true, message = $"Retry receipt sent for {body.MsgId} to {body.SenderJid}" });
     }
 

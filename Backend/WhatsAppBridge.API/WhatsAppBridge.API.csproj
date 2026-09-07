@@ -30,4 +30,11 @@
     <EmbeddedResource Include="..\..\AI-INTEGRATION.md" LogicalName="AI-INTEGRATION.md" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Baileys sidecar (Node.js) travels with the publish output so BaileysEngine finds it
+         next to the DLL. node_modules is installed server-side (deploy.py runs npm install). -->
+    <Content Include="..\..\baileys-sidecar\index.js" Link="baileys-sidecar\index.js" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\baileys-sidecar\package.json" Link="baileys-sidecar\package.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

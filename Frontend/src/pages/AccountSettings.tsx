@@ -1,6 +1,127 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useAuth } from '../AuthContext';
-import api from '../api';
+import api, { admin } from '../api';
+
+interface ActiveSessionEngine {
+  sessionId: string;
+  engine: string;
+  isConnected: boolean;
+}
+
+function EngineSettings() {
+  const [engine, setEngine] = useState('');
+  const [selected, setSelected] = useState('');
+  const [availableEngines, setAvailableEngines] = useState<string[]>([]);
+  const [activeSessions, setActiveSessions] = useState<ActiveSessionEngine[]>([]);
+  const [restartSessions, setRestartSessions] = useState(true);
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const load = async () => {
+    try {
+      const res = await admin.getEngine();
+      setEngine(res.data.engine);
+      setSelected(res.data.engine);
+      setAvailableEngines(res.data.availableEngines || []);
+      setActiveSessions(res.data.activeSessions || []);
+    } catch (err: any) {
+      setError(err.response?.data?.error || 'Failed to load engine settings');
+    }
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const handleSave = async () => {
+    setError('');
+    setMessage('');
+    setLoading(true);
+    try {
+      const res = await admin.setEngine(selected, restartSessions);
+      setMessage(res.data.note || `Engine set to ${res.data.engine}`);
+      await load();
+    } catch (err: any) {
+      setError(err.response?.data?.error || 'Failed to switch engine');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const engineLabel = (e: string) =>
+    e === 'dawa' ? 'Dawa (built-in C# client)' : e === 'baileys' ? 'Baileys (Node.js sidecar)' : e;
+
+  return (
+    <div className="bg-white shadow rounded-lg p-6">
+      <h2 className="text-xl font-semibold mb-1">WhatsApp Engine <span className="text-xs font-normal text-gray-500">(admin)</span></h2>
+      <p className="text-sm text-gray-600 mb-4">
+        Which client implementation the bridge uses to talk to WhatsApp. Dawa and Baileys store
+        credentials separately: the first time a session connects on the other engine it needs a
+        new QR scan. Avoid switching back and forth rapidly — each pairing registers a new
+        linked device.
+      </p>
+
+      {message && (
+        <div className="mb-4 p-3 bg-green-100 border border-green-400 text-green-700 rounded text-sm">{message}</div>
+      )}
+      {error && (
+        <div className="mb-4 p-3 bg-red-100 border border-red-400 text-red-700 rounded text-sm">{error}</div>
+      )}
+
+      <div className="space-y-3">
+        {availableEngines.map((e) => (
+          <label key={e} className="flex items-center gap-3 cursor-pointer">
+            <input
+              type="radio"
+              name="engine"
+              value={e}
+              checked={selected === e}
+              onChange={() => setSelected(e)}
+            />
+            <span className="text-gray-900">{engineLabel(e)}</span>
+            {engine === e && (
+              <span className="inline-flex px-2 py-0.5 text-xs font-semibold rounded-full bg-blue-100 text-blue-800">current</span>
+            )}
+          </label>
+        ))}
+
+        <label className="flex items-center gap-3 cursor-pointer pt-2">
+          <input
+            type="checkbox"
+            checked={restartSessions}
+            onChange={(e) => setRestartSessions(e.target.checked)}
+          />
+          <span className="text-sm text-gray-700">Reconnect active sessions immediately</span>
+        </label>
+
+        <button
+          onClick={handleSave}
+          disabled={loading || !selected || selected === engine}
+          className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition"
+        >
+          {loading ? 'Switching...' : 'Switch Engine'}
+        </button>
+      </div>
+
+      {activeSessions.length > 0 && (
+        <div className="mt-6">
+          <h3 className="text-sm font-medium text-gray-700 mb-2">Active sessions</h3>
+          <ul className="space-y-1">
+            {activeSessions.map((s) => (
+              <li key={s.sessionId} className="text-sm text-gray-600">
+                <span className="font-mono">{s.sessionId.slice(0, 8)}…</span>
+                {' · '}{engineLabel(s.engine)}
+                {' · '}
+                <span className={s.isConnected ? 'text-green-700' : 'text-red-700'}>
+                  {s.isConnected ? 'connected' : 'disconnected'}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default function AccountSettings() {
   const { user, login, token } = useAuth();
@@ -217,6 +338,9 @@ export default function AccountSettings() {
             </button>
           </form>
         </div>
+
+        {/* WhatsApp engine (admin only) */}
+        {user?.isAdmin && <EngineSettings />}
       </div>
     </div>
   );
