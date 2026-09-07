@@ -936,6 +936,70 @@ public class WhatsAppApiController : ControllerBase
     }
 
     /// <summary>
+    /// Contact display names known to the bridge: the WhatsApp-provided name plus the caller's
+    /// own override (customName). The effective display name is customName > name.
+    /// GET /api/wa/contactNames
+    /// </summary>
+    [HttpGet("contactNames")]
+    public async Task<IActionResult> GetContactNames()
+    {
+        var (success, userId, error) = await ValidateApiToken();
+        if (!success)
+            return Unauthorized(new { error });
+
+        var rows = await _context.Chats.AsNoTracking()
+            .Where(c => c.UserId == userId!.Value)
+            .OrderBy(c => c.Phone)
+            .ToListAsync();
+
+        return Ok(rows.Select(c => new
+        {
+            jid = c.Jid,
+            phone = c.Phone,
+            name = string.IsNullOrEmpty(c.Name) ? null : c.Name,
+            customName = c.CustomName,
+        }));
+    }
+
+    /// <summary>
+    /// Sets (or clears, with an empty/absent name) the display-name override for a contact.
+    /// Accepts a bare phone number or a full JID. The override wins over WhatsApp-provided
+    /// names everywhere the bridge shows names (messages page, store/chats, contactNames).
+    /// POST /api/wa/setContactName  { "jid": "31612345678", "name": "Piet" }
+    /// </summary>
+    [HttpPost("setContactName")]
+    public async Task<IActionResult> SetContactName([FromBody] SetContactNameApiRequest request)
+    {
+        var (success, userId, error) = await ValidateApiToken();
+        if (!success)
+            return Unauthorized(new { error });
+
+        if (string.IsNullOrWhiteSpace(request.Jid))
+            return BadRequest(new { error = "jid is required (bare number or full JID)" });
+
+        var jid = request.Jid.Contains('@') ? request.Jid.Trim() : $"{request.Jid.Trim()}@s.whatsapp.net";
+        var customName = string.IsNullOrWhiteSpace(request.Name) ? null : request.Name.Trim();
+
+        var row = await _context.Chats.FirstOrDefaultAsync(c => c.UserId == userId!.Value && c.Jid == jid);
+        if (row == null)
+        {
+            row = new Models.StoredChat
+            {
+                UserId = userId!.Value,
+                Jid = jid,
+                Name = "",
+                Phone = jid.Split('@')[0].Split(':')[0],
+                LastSeenAt = DateTime.UtcNow,
+            };
+            _context.Chats.Add(row);
+        }
+        row.CustomName = customName;
+        await _context.SaveChangesAsync();
+
+        return Ok(new { success = true, jid, customName });
+    }
+
+    /// <summary>
     /// Get message delivery/read status (path-based resource route)
     /// GET /api/{sessionId}/messages/{msgId}/status
     /// </summary>
@@ -956,6 +1020,7 @@ public class WhatsAppApiController : ControllerBase
 }
 
 public record SendMessageRequest(string To, string Body, string? SessionId = null);
+public record SetContactNameApiRequest(string Jid, string? Name = null);
 public record SendReplyRequest(string To, string Body, string QuotedMessageId, string QuotedFromJid, string? SessionId = null);
 public record RequestHistoryRequest(string ChatId, int Count = 50, bool NoAnchor = false, string? SessionId = null);
 public record SendMediaRequest(string To, string MediaUrl, string? Caption = null, string? SessionId = null);

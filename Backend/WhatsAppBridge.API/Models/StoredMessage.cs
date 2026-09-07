@@ -55,6 +55,12 @@ public class StoredMessage
     public bool IsHistory { get; set; }
 
     /// <summary>
+    /// WhatsApp push name (display name) of the sender as it arrived with the message.
+    /// Null for outgoing messages and for rows persisted before this column existed.
+    /// </summary>
+    public string? PushName { get; set; }
+
+    /// <summary>
     /// Whisper transcript, filled in automatically shortly after an audio message arrives
     /// (task 869ejuycr). Null for non-audio messages or while transcription is still pending
     /// (fire-and-forget — never blocks message ingest).

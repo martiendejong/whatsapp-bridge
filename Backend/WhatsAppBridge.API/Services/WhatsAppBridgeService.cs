@@ -899,7 +899,8 @@ public class WhatsAppBridgeService : IAsyncDisposable
         // must never block or crash the inbound pipeline.
         PersistMessageToDatabase(sessionId, msg.RemoteJid, msg.Id, msg.FromMe,
             msg.FromMe ? "me" : msg.From, msg.Text ?? "", msg.Type.ToString().ToLowerInvariant(),
-            msg.MediaUrl, msg.MediaKey, msg.MimeType, msg.Timestamp, isHistory);
+            msg.MediaUrl, msg.MediaKey, msg.MimeType, msg.Timestamp, isHistory,
+            msg.FromMe ? null : msg.PushName);
     }
 
     /// <summary>
@@ -910,7 +911,7 @@ public class WhatsAppBridgeService : IAsyncDisposable
     /// </summary>
     private void PersistMessageToDatabase(string sessionId, string chatJid, string messageId,
         bool fromMe, string sender, string body, string type, string? mediaUrl, string? mediaKey,
-        string? mimeType, long timestamp, bool isHistory)
+        string? mimeType, long timestamp, bool isHistory, string? pushName = null)
     {
         _ = Task.Run(async () =>
         {
@@ -929,10 +930,10 @@ public class WhatsAppBridgeService : IAsyncDisposable
                 var receivedAt = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss.fffffff");
                 await db.Database.ExecuteSqlInterpolatedAsync($@"
                     INSERT OR IGNORE INTO Messages
-                        (SessionId, UserId, ChatJid, MessageId, FromMe, Sender, Body, Type, MediaUrl, MediaKey, MimeType, Timestamp, ReceivedAt, IsHistory)
+                        (SessionId, UserId, ChatJid, MessageId, FromMe, Sender, Body, Type, MediaUrl, MediaKey, MimeType, Timestamp, ReceivedAt, IsHistory, PushName)
                     VALUES
                         ({sessionId}, {userId}, {chatJid}, {messageId}, {(fromMe ? 1 : 0)}, {sender}, {body}, {type},
-                         {mediaUrl}, {mediaKey}, {mimeType}, {timestamp}, {receivedAt}, {(isHistory ? 1 : 0)})");
+                         {mediaUrl}, {mediaKey}, {mimeType}, {timestamp}, {receivedAt}, {(isHistory ? 1 : 0)}, {pushName})");
             }
             catch (Exception ex)
             {

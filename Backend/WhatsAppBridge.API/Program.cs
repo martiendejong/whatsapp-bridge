@@ -163,7 +163,8 @@ using (var scope = app.Services.CreateScope())
             ReceivedAt TEXT NOT NULL,
             IsHistory INTEGER NOT NULL,
             Transcript TEXT NULL,
-            LocalMediaPath TEXT NULL
+            LocalMediaPath TEXT NULL,
+            PushName TEXT NULL
         );
         CREATE UNIQUE INDEX IF NOT EXISTS IX_Messages_SessionId_MessageId ON Messages (SessionId, MessageId);
         CREATE INDEX IF NOT EXISTS IX_Messages_ChatJid_Timestamp ON Messages (ChatJid, Timestamp);
@@ -206,6 +207,8 @@ using (var scope = app.Services.CreateScope())
                  // Task 869ejuycr: Whisper transcript + eagerly-decrypted local media cache path.
                  "ALTER TABLE Messages ADD COLUMN Transcript TEXT NULL",
                  "ALTER TABLE Messages ADD COLUMN LocalMediaPath TEXT NULL",
+                 // Sender display names on the messages page (push name captured per message).
+                 "ALTER TABLE Messages ADD COLUMN PushName TEXT NULL",
              })
     {
         try
@@ -290,11 +293,23 @@ using (var scope = app.Services.CreateScope())
             Jid TEXT NOT NULL,
             Name TEXT NOT NULL,
             Phone TEXT NOT NULL,
-            LastSeenAt TEXT NOT NULL
+            LastSeenAt TEXT NOT NULL,
+            CustomName TEXT NULL
         );
         CREATE UNIQUE INDEX IF NOT EXISTS IX_Chats_UserId_Jid ON Chats (UserId, Jid);
         CREATE INDEX IF NOT EXISTS IX_Chats_UserId ON Chats (UserId);
         """);
+
+    // User-supplied display-name override per contact (sender-names feature). After the
+    // CREATE above so the table is guaranteed to exist on every upgrade path.
+    try
+    {
+        db.Database.ExecuteSqlRaw("ALTER TABLE Chats ADD COLUMN CustomName TEXT NULL;");
+    }
+    catch (Exception ex) when (ex.Message.Contains("duplicate column name", StringComparison.OrdinalIgnoreCase))
+    {
+        // Column already present from a prior startup or the CREATE TABLE above.
+    }
 }
 
 // Restore WhatsApp sessions on startup — includes "disconnected" sessions that have saved credentials

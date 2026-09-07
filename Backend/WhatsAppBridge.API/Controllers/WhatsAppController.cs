@@ -213,6 +213,7 @@ public class WhatsAppController : ControllerBase
         // Last-message preview per chat: chat counts are small, so per-chat top-1 queries keep
         // the main GroupBy translatable by EF's SQLite provider.
         var previews = new Dictionary<string, (string Body, bool FromMe, string Type)>();
+        var pushNames = new Dictionary<string, string>();
         foreach (var chat in chats)
         {
             var last = await _context.Messages.AsNoTracking()
@@ -221,7 +222,24 @@ public class WhatsAppController : ControllerBase
                 .FirstOrDefaultAsync();
             if (last != null)
                 previews[chat.ChatJid] = (last.Body, last.FromMe, last.Type);
+
+            // Name fallback when neither a custom nor a WhatsApp chat name is known: the most
+            // recent push name the sender attached to an inbound message.
+            var pushName = await _context.Messages.AsNoTracking()
+                .Where(m => (m.UserId == userId || (m.UserId == null && sessionIds.Contains(m.SessionId)))
+                            && m.ChatJid == chat.ChatJid && !m.FromMe && m.PushName != null && m.PushName != "")
+                .OrderByDescending(m => m.Timestamp).ThenByDescending(m => m.Id)
+                .Select(m => m.PushName)
+                .FirstOrDefaultAsync();
+            if (!string.IsNullOrEmpty(pushName))
+                pushNames[chat.ChatJid] = pushName;
         }
+
+        // Durable per-contact names: WhatsApp-provided (Name, from getChats upserts) and the
+        // user's own override (CustomName, set via the UI or the machine API).
+        var storedNames = await _context.Chats.AsNoTracking()
+            .Where(c => c.UserId == userId)
+            .ToDictionaryAsync(c => c.Jid, c => new { c.Name, c.CustomName });
 
         var names = new Dictionary<string, string>();
         try
@@ -244,7 +262,13 @@ public class WhatsAppController : ControllerBase
         {
             chatJid = c.ChatJid,
             phone = c.ChatJid.Split('@')[0].Split(':')[0],
-            name = names.TryGetValue(c.ChatJid, out var n) ? n : null,
+            // Resolution order: user override > live WhatsApp name > durable WhatsApp name > push name
+            name = (storedNames.TryGetValue(c.ChatJid, out var sn) && !string.IsNullOrEmpty(sn.CustomName)) ? sn.CustomName
+                : names.TryGetValue(c.ChatJid, out var n) ? n
+                : (sn != null && !string.IsNullOrEmpty(sn.Name)) ? sn.Name
+                : pushNames.TryGetValue(c.ChatJid, out var pn) ? pn
+                : null,
+            customName = storedNames.TryGetValue(c.ChatJid, out var sn2) ? sn2.CustomName : null,
             messageCount = c.MessageCount,
             lastTimestamp = c.LastTimestamp,
             lastBody = previews.TryGetValue(c.ChatJid, out var p) ? p.Body : null,
@@ -288,12 +312,24 @@ public class WhatsAppController : ControllerBase
             .ToListAsync();
         messages.Reverse();
 
+        // Sender display names: user override per contact JID wins, then the push name that
+        // arrived with the message itself. The frontend falls back to the bare phone number.
+        var senderJids = messages.Where(m => !m.FromMe).Select(m => m.Sender).Distinct().ToList();
+        var customNames = await _context.Chats.AsNoTracking()
+            .Where(c => c.UserId == userId && senderJids.Contains(c.Jid) && c.CustomName != null && c.CustomName != "")
+            .ToDictionaryAsync(c => c.Jid, c => c.CustomName!);
+
         return Ok(messages.Select(m => new
         {
             id = m.MessageId,
             chatJid = m.ChatJid,
             fromMe = m.FromMe,
             sender = m.Sender,
+            senderPhone = m.FromMe ? null : m.Sender.Split('@')[0].Split(':')[0],
+            senderName = m.FromMe ? null
+                : customNames.TryGetValue(m.Sender, out var cn) ? cn
+                : !string.IsNullOrEmpty(m.PushName) ? m.PushName
+                : null,
             body = m.Body,
             type = m.Type,
             mediaUrl = m.MediaUrl,
@@ -311,6 +347,42 @@ public class WhatsAppController : ControllerBase
             receivedAt = m.ReceivedAt,
             isHistory = m.IsHistory
         }));
+    }
+
+    public record SetContactNameRequest(string Jid, string? Name);
+
+    /// <summary>
+    /// Sets (or clears, with an empty name) the user's own display-name override for a contact
+    /// JID. Wins over WhatsApp-provided names everywhere names are shown; also settable via the
+    /// machine API (POST /api/wa/setContactName).
+    /// </summary>
+    [HttpPut("contacts/name")]
+    public async Task<IActionResult> SetContactName([FromBody] SetContactNameRequest request)
+    {
+        var userId = GetUserId();
+        if (string.IsNullOrWhiteSpace(request.Jid))
+            return BadRequest(new { error = "jid is required" });
+
+        var jid = request.Jid.Contains('@') ? request.Jid.Trim() : $"{request.Jid.Trim()}@s.whatsapp.net";
+        var customName = string.IsNullOrWhiteSpace(request.Name) ? null : request.Name.Trim();
+
+        var row = await _context.Chats.FirstOrDefaultAsync(c => c.UserId == userId && c.Jid == jid);
+        if (row == null)
+        {
+            row = new Models.StoredChat
+            {
+                UserId = userId,
+                Jid = jid,
+                Name = "",
+                Phone = jid.Split('@')[0].Split(':')[0],
+                LastSeenAt = DateTime.UtcNow,
+            };
+            _context.Chats.Add(row);
+        }
+        row.CustomName = customName;
+        await _context.SaveChangesAsync();
+
+        return Ok(new { jid, customName });
     }
 
     /// <summary>
