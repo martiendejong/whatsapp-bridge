@@ -91,6 +91,7 @@ builder.Services.AddSingleton<InboundWebhookForwarder>();
 // Singleton: asks coachingplatform (CoachOS) for an AI reply for non-allow-listed senders
 // (task 1067, default-OFF, additive). Never sends anything itself — see class doc comment.
 builder.Services.AddSingleton<CoachOsIntakeForwarder>();
+builder.Services.AddScoped<OutboundRoutingService>();
 builder.Services.AddScoped<OutboundGuardrailService>();
 // Singleton: transcribes inbound audio via OpenAI Whisper (task 869ejuycr). Resolves its API
 // key lazily from config or the Prospergenics vault — see WhisperTranscriptionService.
@@ -256,6 +257,57 @@ using (var scope = app.Services.CreateScope())
         CREATE INDEX IF NOT EXISTS IX_OutboundSendLogs_SentAtUtc ON OutboundSendLogs (SentAtUtc);
         """);
 
+    // Category + BodyHash arrived after this table was already live, and SQLite has no
+    // "ADD COLUMN IF NOT EXISTS" — so ask the schema first. Without these two the routing
+    // redirect cannot tell a duplicate fan-out from a genuine repeat alert.
+    AddColumnIfMissing(db, "OutboundSendLogs", "Category", "TEXT NULL");
+    AddColumnIfMissing(db, "OutboundSendLogs", "BodyHash", "TEXT NULL");
+    db.Database.ExecuteSqlRaw(
+        "CREATE INDEX IF NOT EXISTS IX_OutboundSendLogs_Recipient_BodyHash_SentAtUtc " +
+        "ON OutboundSendLogs (Recipient, BodyHash, SentAtUtc);");
+
+    // Outbound routing policy: who may be messaged, about what, and at what hour in THEIR
+    // timezone. Empty on a fresh deployment, which OutboundRoutingService reads as
+    // "not configured yet" so nothing changes until contacts are actually added.
+    db.Database.ExecuteSqlRaw("""
+        CREATE TABLE IF NOT EXISTS OutboundContacts (
+            Id INTEGER NOT NULL CONSTRAINT PK_OutboundContacts PRIMARY KEY AUTOINCREMENT,
+            Phone TEXT NOT NULL,
+            Name TEXT NOT NULL,
+            Alias TEXT NULL,
+            Enabled INTEGER NOT NULL DEFAULT 1,
+            TimeZoneId TEXT NOT NULL DEFAULT 'Europe/Amsterdam',
+            WindowStartHour INTEGER NOT NULL DEFAULT 0,
+            WindowEndHour INTEGER NOT NULL DEFAULT 24,
+            Categories TEXT NOT NULL DEFAULT '*',
+            FallbackPhone TEXT NULL,
+            CreatedAtUtc TEXT NOT NULL,
+            UpdatedAtUtc TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS IX_OutboundContacts_Phone ON OutboundContacts (Phone);
+        CREATE INDEX IF NOT EXISTS IX_OutboundContacts_Alias ON OutboundContacts (Alias);
+        """);
+
+    // Seed the policy once, from config. Only on a genuinely empty table — this must never
+    // resurrect a contact Martien deleted, or overwrite a window he adjusted in the UI. After
+    // the first boot the database is authoritative and this block does nothing.
+    if (!db.OutboundContacts.Any())
+    {
+        var seed = app.Configuration.GetSection("OutboundRouting:Seed")
+            .Get<List<WhatsAppBridge.API.Models.OutboundContact>>() ?? new();
+        foreach (var contact in seed)
+        {
+            contact.Id = 0;
+            contact.CreatedAtUtc = contact.UpdatedAtUtc = DateTime.UtcNow;
+            db.OutboundContacts.Add(contact);
+        }
+        if (seed.Count > 0)
+        {
+            db.SaveChanges();
+            app.Logger.LogInformation("Seeded {Count} outbound routing contacts from configuration.", seed.Count);
+        }
+    }
+
     // CoachOS service-route reply-window tracking (task 1067): every genuine inbound message's
     // sender + timestamp, so OutboundGuardrailService can prove a reply is answering a real prior
     // inbound message before allowing it through the allow-list exception. Same self-heal reason
@@ -370,3 +422,25 @@ using (var scope = app.Services.CreateScope())
 }
 
 app.Run();
+
+/// <summary>
+/// SQLite's ALTER TABLE has no IF NOT EXISTS, and re-running a plain ADD COLUMN on an existing
+/// column throws — which at startup means the app refuses to boot. So read the current schema
+/// via pragma and only add what is genuinely absent. Idempotent by construction, in keeping
+/// with the CREATE TABLE IF NOT EXISTS blocks above.
+/// </summary>
+static void AddColumnIfMissing(WhatsAppBridge.API.Data.AppDbContext db, string table, string column, string definition)
+{
+    var connection = db.Database.GetDbConnection();
+    if (connection.State != System.Data.ConnectionState.Open) connection.Open();
+
+    using (var probe = connection.CreateCommand())
+    {
+        probe.CommandText = $"SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = '{column}';";
+        if (Convert.ToInt32(probe.ExecuteScalar()) > 0) return;
+    }
+
+    using var alter = connection.CreateCommand();
+    alter.CommandText = $"ALTER TABLE {table} ADD COLUMN {column} {definition};";
+    alter.ExecuteNonQuery();
+}

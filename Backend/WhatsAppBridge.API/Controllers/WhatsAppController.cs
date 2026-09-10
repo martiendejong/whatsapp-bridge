@@ -17,11 +17,15 @@ public class WhatsAppController : ControllerBase
     private readonly WhatsAppBridgeService _whatsappService;
     private readonly EncryptionService _encryptionService;
 
-    public WhatsAppController(AppDbContext context, WhatsAppBridgeService whatsappService, EncryptionService encryptionService)
+    private readonly OutboundGuardrailService _outboundGuardrail;
+
+    public WhatsAppController(AppDbContext context, WhatsAppBridgeService whatsappService,
+        EncryptionService encryptionService, OutboundGuardrailService outboundGuardrail)
     {
         _context = context;
         _whatsappService = whatsappService;
         _encryptionService = encryptionService;
+        _outboundGuardrail = outboundGuardrail;
     }
 
     private int GetUserId()
@@ -139,10 +143,17 @@ public class WhatsAppController : ControllerBase
         if (session.Status != "connected")
             return BadRequest(new { error = $"Session is not connected (status: {session.Status})" });
 
+        // This route sent messages without ever consulting the guardrail — a logged-in user could
+        // reach any number at any hour while the API-key routes next door were fully policed.
+        // Same check, same policy, no second implementation.
+        var guard = await _outboundGuardrail.CheckAsync("sessionSend", request.To, request.Message, userId, request.Category);
+        if (!guard.Allowed)
+            return StatusCode(403, new { error = guard.Reason, blocked = true });
+
         try
         {
-            await _whatsappService.SendMessageAsync(sessionId, request.To, request.Message);
-            return Ok(new { success = true, message = "Message sent" });
+            await _whatsappService.SendMessageAsync(sessionId, guard.Recipient, request.Message);
+            return Ok(new { success = true, message = "Message sent", routedTo = guard.Recipient, routing = guard.RoutingNote });
         }
         catch (Exception ex)
         {
@@ -150,7 +161,7 @@ public class WhatsAppController : ControllerBase
         }
     }
 
-    public record SendRequest(string To, string Message);
+    public record SendRequest(string To, string Message, string? Category = null);
 
     [HttpGet("sessions/{sessionId}/contacts")]
     public async Task<IActionResult> GetContacts(string sessionId)
@@ -764,6 +775,10 @@ public class WhatsAppController : ControllerBase
         if (session.Status != "connected")
             return BadRequest(new { error = $"Session is not connected (status: {session.Status})" });
 
+        var guard = await _outboundGuardrail.CheckAsync("sessionSendMedia", request.To, request.Caption ?? "", userId, request.Category);
+        if (!guard.Allowed)
+            return StatusCode(403, new { error = guard.Reason, blocked = true });
+
         try
         {
             using var ms = new MemoryStream();
@@ -771,7 +786,7 @@ public class WhatsAppController : ControllerBase
             var fileBytes = ms.ToArray();
             var mediaType = request.MediaType ?? DetectMediaType(request.File.ContentType);
             var result = await _whatsappService.SendMediaAsync(
-                sessionId, request.To, mediaType,
+                sessionId, guard.Recipient, mediaType,
                 request.File.ContentType, fileBytes,
                 request.Caption ?? "", request.FileName ?? request.File.FileName);
             return Ok(result);
@@ -811,7 +826,7 @@ public class WhatsAppController : ControllerBase
         _ => "document",
     };
 
-    public record SendMediaRequest(IFormFile File, string To, string? MediaType, string? Caption, string? FileName);
+    public record SendMediaRequest(IFormFile File, string To, string? MediaType, string? Caption, string? FileName, string? Category = null);
     public record TestMediaRequest(string To, string FileBase64, string MimeType, string? MediaType, string? Caption, string? FileName);
 
     /// <summary>Debug: show internal cache state (anonymous, dev only).</summary>
