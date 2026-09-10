@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
@@ -143,7 +143,7 @@ public class WhatsAppController : ControllerBase
         if (session.Status != "connected")
             return BadRequest(new { error = $"Session is not connected (status: {session.Status})" });
 
-        // This route sent messages without ever consulting the guardrail â€” a logged-in user could
+        // This route sent messages without ever consulting the guardrail — a logged-in user could
         // reach any number at any hour while the API-key routes next door were fully policed.
         // Same check, same policy, no second implementation.
         var guard = await _outboundGuardrail.CheckAsync("sessionSend", request.To, request.Message, userId, request.Category);
@@ -190,11 +190,11 @@ public class WhatsAppController : ControllerBase
         return Ok(chats ?? new List<object>());
     }
 
-    // â”€â”€â”€ Durable message store browser (task 869echefp) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ─── Durable message store browser (task 869echefp) ────────────────────────
 
     /// <summary>
     /// Chat list from the durable Messages store (869ecbkv7): one entry per conversation with
-    /// a last-message preview. Spans ALL of the user's sessions â€” a QR re-pair creates a new
+    /// a last-message preview. Spans ALL of the user's sessions — a QR re-pair creates a new
     /// SessionId and history must not disappear from the browser. Display names from the live
     /// session are merged in best-effort (a disconnected session still shows its history).
     /// </summary>
@@ -348,9 +348,9 @@ public class WhatsAppController : ControllerBase
             mediaUrl = m.MediaUrl,
             // Media decryption needs MediaKey alongside MediaUrl (task 869ecw8du); rows
             // persisted before that column existed have a URL the bridge can never open.
-            // The raw key itself is never sent to the frontend â€” only this readiness flag.
+            // The raw key itself is never sent to the frontend — only this readiness flag.
             mediaAvailable = !string.IsNullOrEmpty(m.MediaUrl) && !string.IsNullOrEmpty(m.MediaKey),
-            // True once the plaintext file has been cached on disk (task 869ejuycr) â€” the
+            // True once the plaintext file has been cached on disk (task 869ejuycr) — the
             // UI/agent can fetch it via store/messages/media below without a CDN round-trip.
             mediaReady = !string.IsNullOrEmpty(m.LocalMediaPath),
             // Whisper transcript for audio messages (task 869ejuycr). Null until transcription
@@ -399,9 +399,9 @@ public class WhatsAppController : ControllerBase
     }
 
     /// <summary>
-    /// Downloads and decrypts a stored message's media via the bridge (task 869ecw8du) â€”
+    /// Downloads and decrypts a stored message's media via the bridge (task 869ecw8du) —
     /// WhatsApp CDN links are encrypted and cannot be opened directly by the browser. Serves the
-    /// already-decrypted local cache when available (task 869ejuycr â€” media is decrypted
+    /// already-decrypted local cache when available (task 869ejuycr — media is decrypted
     /// automatically at ingest, so this is normally a disk read, not a CDN round-trip); falls
     /// back to on-demand decrypt for rows from before that cache existed or where it failed, so
     /// existing playback/download behavior is unaffected.
@@ -521,7 +521,7 @@ public class WhatsAppController : ControllerBase
 
     /// <summary>
     /// Re-pair endpoint: wipes old session data, creates fresh auth state, returns QR code.
-    /// Dev/test only â€” remove for production.
+    /// Dev/test only — remove for production.
     /// </summary>
     [AllowAnonymous]
     [Filters.DevelopmentOnly]
@@ -539,7 +539,7 @@ public class WhatsAppController : ControllerBase
                 System.IO.File.Delete(file);
         }
 
-        // 3. Initialize fresh session â€” this will produce a QR code
+        // 3. Initialize fresh session — this will produce a QR code
         var qrCode = await _whatsappService.InitializeSessionAsync(sessionId);
 
         if (qrCode != null)
@@ -775,7 +775,7 @@ public class WhatsAppController : ControllerBase
         }
     }
 
-    /// <summary>Send a media message (image, audio, document) â€” accepts multipart form with file + metadata.</summary>
+    /// <summary>Send a media message (image, audio, document) — accepts multipart form with file + metadata.</summary>
     [HttpPost("sessions/{sessionId}/send-media")]
     public async Task<IActionResult> SendMedia(string sessionId, [FromForm] SendMediaRequest request)
     {
@@ -811,7 +811,7 @@ public class WhatsAppController : ControllerBase
         }
     }
 
-    /// <summary>Test media send (anonymous, dev only) â€” base64 body.</summary>
+    /// <summary>Test media send (anonymous, dev only) — base64 body.</summary>
     [AllowAnonymous]
     [Filters.DevelopmentOnly]
     [HttpPost("test-send-media/{sessionId}")]
@@ -877,11 +877,14 @@ public class WhatsAppController : ControllerBase
     /// <summary>
     /// Sends a PeerDataOperationRequestMessage (ON_DEMAND) to the primary phone,
     /// asking it to push older messages for the given chat as a HistorySync blob.
-    /// The phone replies asynchronously â€” new messages will appear in getMessages after a few seconds.
+    /// The phone replies asynchronously — new messages will appear in getMessages after a few seconds.
     /// Example: POST /api/WhatsApp/sessions/{sessionId}/request-history
     /// Body: { "chatJid": "31621427931@s.whatsapp.net", "count": 100 }
     /// </summary>
-    [AllowAnonymous]
+    // Was [AllowAnonymous]. The only caller is our own frontend, which authenticates; nothing
+    // external uses this route (verified against every ops script and the Dawa sidecar, whose
+    // retry logic is an in-process method, not an HTTP call). Anonymous, it let anyone who could
+    // reach the host pull a chat's history onto the device store unauthenticated.
     [HttpPost("sessions/{sessionId}/request-history")]
     public async Task<IActionResult> RequestHistory(string sessionId, [FromBody] RequestHistoryBody body)
     {
@@ -907,7 +910,9 @@ public class WhatsAppController : ControllerBase
     /// Example: POST /api/WhatsApp/sessions/{sessionId}/send-retry-receipt
     /// Body: { "senderJid": "31633984381@s.whatsapp.net", "msgId": "AC0285F5B1EDFE10C33D1758DBFEC1BF", "timestamp": 1773656045 }
     /// </summary>
-    [AllowAnonymous]
+    // Was [AllowAnonymous] with no callers at all — it exists for manual incident recovery.
+    // Deliberately NOT DevelopmentOnly: the incidents it exists for happen in production. A
+    // login is the right bar for an escape hatch; absence of one was not.
     [HttpPost("sessions/{sessionId}/send-retry-receipt")]
     public async Task<IActionResult> SendRetryReceipt(string sessionId, [FromBody] RetryReceiptBody body)
     {
@@ -921,7 +926,7 @@ public class WhatsAppController : ControllerBase
         }
         catch (NotSupportedException ex)
         {
-            // Baileys engine handles retry receipts internally â€” this manual escape hatch is Dawa-only.
+            // Baileys engine handles retry receipts internally — this manual escape hatch is Dawa-only.
             return BadRequest(new { error = ex.Message, engine = client.EngineName });
         }
         return Ok(new { success = true, message = $"Retry receipt sent for {body.MsgId} to {body.SenderJid}" });
@@ -943,10 +948,10 @@ public class WhatsAppController : ControllerBase
         await _whatsappService.DisconnectSessionAsync(sessionId);
         await Task.Delay(2000); // brief pause so socket fully closes
         await _whatsappService.RestoreSessionAsync(sessionId);
-        return Ok(new { message = "Reconnecting session â€” phone will resend history sync blobs", sessionId });
+        return Ok(new { message = "Reconnecting session — phone will resend history sync blobs", sessionId });
     }
 
-    // â”€â”€â”€ Message operations â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ─── Message operations ───────────────────────────────────────────────────
 
     public record RevokeRequest(string Jid, string MessageId, bool FromMe, long Timestamp);
 
@@ -983,7 +988,7 @@ public class WhatsAppController : ControllerBase
 
         // Forwarding puts arbitrary text in front of an arbitrary number, which is a send by any
         // other name. This route reached WhatsApp without the allow-list, the volume caps or the
-        // routing policy â€” the neighbouring /send route on this same controller is fully policed,
+        // routing policy — the neighbouring /send route on this same controller is fully policed,
         // so the difference was an oversight rather than a decision.
         var guard = await _outboundGuardrail.CheckAsync("sessionForward", request.ToJid, request.Text, userId, request.Category);
         if (guard.Suppressed)
@@ -1039,7 +1044,7 @@ public class WhatsAppController : ControllerBase
         catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
     }
 
-    // â”€â”€â”€ Group operations â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ─── Group operations ─────────────────────────────────────────────────────
 
     public record CreateGroupRequest(string Subject, List<string> Participants);
 
@@ -1081,7 +1086,7 @@ public class WhatsAppController : ControllerBase
 
     public record ParticipantsRequest(List<string> Participants);
 
-    /// <summary>Add participants to a group. Returns a map of JID â†’ result code.</summary>
+    /// <summary>Add participants to a group. Returns a map of JID → result code.</summary>
     [HttpPost("sessions/{sessionId}/groups/{groupJid}/participants")]
     public async Task<IActionResult> AddGroupParticipants(string sessionId, string groupJid, [FromBody] ParticipantsRequest request)
     {
@@ -1099,7 +1104,7 @@ public class WhatsAppController : ControllerBase
         catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
     }
 
-    /// <summary>Remove participants from a group. Returns a map of JID â†’ result code.</summary>
+    /// <summary>Remove participants from a group. Returns a map of JID → result code.</summary>
     [HttpDelete("sessions/{sessionId}/groups/{groupJid}/participants")]
     public async Task<IActionResult> RemoveGroupParticipants(string sessionId, string groupJid, [FromBody] ParticipantsRequest request)
     {
@@ -1155,7 +1160,7 @@ public class WhatsAppController : ControllerBase
         catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
     }
 
-    // â”€â”€â”€ LID resolution â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ─── LID resolution ───────────────────────────────────────────────────────
 
     /// <summary>Resolve a LID JID to its phone-number JID.</summary>
     [HttpGet("sessions/{sessionId}/resolve-lid/{lid}")]
@@ -1174,7 +1179,7 @@ public class WhatsAppController : ControllerBase
         catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
     }
 
-    // â”€â”€â”€ Session management â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ─── Session management ───────────────────────────────────────────────────
 
     [HttpDelete("sessions/{sessionId}")]
     public async Task<IActionResult> DeleteSession(string sessionId)

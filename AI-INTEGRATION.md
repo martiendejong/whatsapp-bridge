@@ -470,6 +470,7 @@ Follow-up on the routing and audit work below, after review.
 - **Phone normalisation is one function.** It existed four times and the copies had drifted: one turned `+31633984381` into the empty string. Numbers written with spaces or dashes now normalise correctly, and a device-suffixed JID is cut rather than absorbed.
 - **`Categories` no longer defaults to `*` on save.** An omitted value silently granted a contact everything; it is now a validation error.
 - **The `test-*` endpoints are Development-only.** Fourteen `[AllowAnonymous]` actions that send messages, read stored chats and wipe pairing state now return 404 outside Development. They previously needed no credential at all.
+- **`sessions/{id}/request-history` and `send-retry-receipt` require authentication.** Both were anonymous. The history route's only caller is the bridge's own (logged-in) frontend; the retry-receipt route has no callers and exists for manual incident recovery, so it stays available in production — behind a login.
 
 ### 2026-09-10
 
