@@ -31,6 +31,7 @@ public sealed class OutboundRoutingService
 {
     private readonly AppDbContext _context;
     private readonly ILogger<OutboundRoutingService> _logger;
+    private readonly OutboundRoutingOptions _options;
 
     /// <summary>
     /// How long a redirect looks back for an identical message already delivered to the
@@ -43,10 +44,13 @@ public sealed class OutboundRoutingService
 
     public const string DefaultCategory = "other";
 
-    public OutboundRoutingService(AppDbContext context, ILogger<OutboundRoutingService> logger)
+    public OutboundRoutingService(AppDbContext context, ILogger<OutboundRoutingService> logger,
+        IConfiguration configuration)
     {
         _context = context;
         _logger = logger;
+        _options = new OutboundRoutingOptions();
+        configuration.GetSection("OutboundRouting").Bind(_options);
     }
 
     public enum RoutingOutcome { Allowed, Redirected, Blocked, Suppressed }
@@ -60,11 +64,23 @@ public sealed class OutboundRoutingService
     }
 
     /// <summary>
-    /// False while no contact has been configured. A fresh or un-migrated deployment then keeps
-    /// its previous behaviour instead of silently blocking every send: an empty policy table is
-    /// far more likely to mean "not set up yet" than "nobody may be messaged".
+    /// Whether routing actually governs sends right now. Two independent conditions, both
+    /// required.
+    ///
+    /// The flag is the important one and it defaults to FALSE. An earlier version of this had
+    /// only the table check, plus a seed in appsettings that populated the table on first boot —
+    /// which meant merging the feature silently switched it on in production, and every caller
+    /// that did not yet pass a category started getting its sends blocked as "other". A feature
+    /// that arms itself on deploy is not a feature with a safety valve. Now the deploy is inert:
+    /// the contacts get seeded and are visible in the admin UI, but nothing is enforced until
+    /// someone sets OutboundRouting:Enabled to true, having looked at the table first.
+    ///
+    /// The table check stays as the second condition: enabling the flag against an empty table
+    /// would block every send, and "I turned it on before adding anyone" should not take
+    /// WhatsApp down.
     /// </summary>
-    public Task<bool> IsConfiguredAsync() => _context.OutboundContacts.AnyAsync();
+    public async Task<bool> IsActiveAsync() =>
+        _options.Enabled && await _context.OutboundContacts.AnyAsync();
 
     /// <summary>
     /// Resolves an alias or number to the number a message should actually go to.
@@ -112,6 +128,40 @@ public sealed class OutboundRoutingService
 
         var fallback = Normalize(contact.FallbackPhone);
 
+        // The fallback must itself be a routing contact. Otherwise this free-text field is an
+        // escape hatch rather than a safety net: a redirect tells the guardrail that the contact
+        // table has already vouched for the recipient, and the guardrail then skips its static
+        // allow-list. An arbitrary number reachable without passing either list is precisely the
+        // hole both lists exist to close.
+        var target = await _context.OutboundContacts.FirstOrDefaultAsync(c => c.Phone == fallback);
+        if (target == null)
+            return new RoutingDecision(RoutingOutcome.Blocked, null,
+                $"{why} Its fallback '{contact.FallbackPhone}' is not itself a routing contact, " +
+                "so there is nowhere to redirect to. Add that number under Routing first.");
+
+        if (target.Id == contact.Id)
+            return new RoutingDecision(RoutingOutcome.Blocked, null,
+                $"{why} Its fallback points back at itself, which is not a route.");
+
+        // The fallback's own policy is not a formality to skip on the redirect path. Handing a
+        // 03:00 deploy notice to someone who is themselves asleep, muted, or who does not accept
+        // this category would defeat the exact rule the redirect exists to honour. One hop only:
+        // if the fallback cannot take it either the message stops here, rather than walking a
+        // chain of fallbacks until it finds someone.
+        if (!target.Enabled)
+            return new RoutingDecision(RoutingOutcome.Blocked, null,
+                $"{why} Its fallback {target.Name} is muted too, so the message is dropped.");
+
+        if (!AcceptsCategory(target, category))
+            return new RoutingDecision(RoutingOutcome.Blocked, null,
+                $"{why} Its fallback {target.Name} does not receive '{category}' messages " +
+                $"(accepts: {target.Categories}), so the message is dropped.");
+
+        if (!IsInsideWindow(target, utc, out var targetLocal))
+            return new RoutingDecision(RoutingOutcome.Blocked, null,
+                $"{why} Its fallback {target.Name} is outside their own window as well " +
+                $"({targetLocal:HH:mm} local), so the message is dropped.");
+
         // Already delivered to the fallback by a caller that addressed them directly? Then this
         // redirect is a duplicate, not a rescue.
         var hash = HashBody(body);
@@ -143,14 +193,25 @@ public sealed class OutboundRoutingService
         log.BodyHash = HashBody(body);
     }
 
+    /// <summary>
+    /// Number first, then alias. The alias branch used to be reachable only when the input
+    /// contained no digits at all, which quietly made any alias with a digit in it — "sjoerd2",
+    /// "vps1" — unresolvable: normalisation pulled out the "2", found no contact with phone "2",
+    /// and returned "unknown number" rather than ever trying the alias. Falling through instead
+    /// of branching costs one extra query on a miss and removes the trap.
+    /// </summary>
     private async Task<OutboundContact?> ResolveContactAsync(string to)
     {
         var normalized = Normalize(to);
         if (!string.IsNullOrEmpty(normalized))
-            return await _context.OutboundContacts.FirstOrDefaultAsync(c => c.Phone == normalized);
+        {
+            var byNumber = await _context.OutboundContacts.FirstOrDefaultAsync(c => c.Phone == normalized);
+            if (byNumber != null) return byNumber;
+        }
 
-        // No digits at all — the caller used an alias like "martien".
-        var alias = to.Trim().ToLowerInvariant();
+        var alias = (to ?? string.Empty).Trim().ToLowerInvariant();
+        if (alias.Length == 0) return null;
+
         return await _context.OutboundContacts
             .FirstOrDefaultAsync(c => c.Alias != null && c.Alias.ToLower() == alias);
     }
@@ -215,7 +276,28 @@ public sealed class OutboundRoutingService
     private static string HashBody(string body) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(body ?? string.Empty)))[..16];
 
-    /// <summary>Leading digit run, matching OutboundGuardrailService.Normalize.</summary>
-    private static string Normalize(string s) =>
-        new(s.SkipWhile(c => !char.IsDigit(c)).TakeWhile(char.IsDigit).ToArray());
+    /// <summary>See <see cref="PhoneNumber.Normalize"/> — one definition, shared by every caller.</summary>
+    private static string Normalize(string s) => PhoneNumber.Normalize(s);
+}
+
+/// <summary>
+/// Bound from configuration section "OutboundRouting".
+/// </summary>
+public sealed class OutboundRoutingOptions
+{
+    /// <summary>
+    /// Default FALSE, deliberately. Routing decides who does and does not receive a message, and
+    /// a wrong policy is silent: the caller gets a block reason it usually does not read, and the
+    /// person who should have been alerted simply hears nothing. Switching that on as a side
+    /// effect of a deploy is not acceptable, so it takes a config change made on purpose, after
+    /// looking at the contact table it will start enforcing.
+    /// </summary>
+    public bool Enabled { get; set; } = false;
+
+    /// <summary>
+    /// Contacts written to an empty table on first boot. Seeding is independent of
+    /// <see cref="Enabled"/>: the rows appear in the admin UI so the policy can be reviewed and
+    /// corrected before it governs anything.
+    /// </summary>
+    public List<Models.OutboundContact> Seed { get; set; } = new();
 }

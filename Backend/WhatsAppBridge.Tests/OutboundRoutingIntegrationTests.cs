@@ -38,9 +38,12 @@ public class OutboundRoutingIntegrationTests
             ["OutboundGuardrail:MaxGlobalPerHour"] = "100",
             ["OutboundGuardrail:ReplyRouteEnabled"] = "true",
             ["OutboundGuardrail:ReplyWindowHours"] = "24",
+            // This suite is about what routing does once armed, so arm it. In production this
+            // key is false and the whole contact table is inert.
+            ["OutboundRouting:Enabled"] = "true",
         }).Build();
 
-        var routing = new OutboundRoutingService(db, NullLogger<OutboundRoutingService>.Instance);
+        var routing = new OutboundRoutingService(db, NullLogger<OutboundRoutingService>.Instance, config);
         return new OutboundGuardrailService(config, db, routing, NullLogger<OutboundGuardrailService>.Instance);
     }
 

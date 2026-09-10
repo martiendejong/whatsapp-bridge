@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using WhatsAppBridge.API.Data;
 using WhatsAppBridge.API.Models;
@@ -30,8 +31,21 @@ public class OutboundRoutingServiceTests
             .UseInMemoryDatabase(Guid.NewGuid().ToString())
             .Options);
 
-    private static OutboundRoutingService NewService(AppDbContext db) =>
-        new(db, NullLogger<OutboundRoutingService>.Instance);
+    /// <summary>
+    /// Routing only governs sends when OutboundRouting:Enabled is true, which it deliberately is
+    /// not by default. Every test below is about what happens once it is on, so it is on here.
+    /// The off case has its own tests at the bottom.
+    /// </summary>
+    private static IConfiguration Config(bool enabled = true) =>
+        new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["OutboundRouting:Enabled"] = enabled ? "true" : "false",
+            })
+            .Build();
+
+    private static OutboundRoutingService NewService(AppDbContext db, bool enabled = true) =>
+        new(db, NullLogger<OutboundRoutingService>.Instance, Config(enabled));
 
     /// <summary>Seeds the real policy, so these tests fail if the shipped defaults drift.</summary>
     private static async Task<AppDbContext> SeededAsync()
@@ -221,6 +235,119 @@ public class OutboundRoutingServiceTests
         Assert.Equal(Martien, decision.Recipient);
     }
 
+    // ─── The fallback is a contact, not an escape hatch ──────────────────────────────────────
+
+    /// <summary>
+    /// The redirect used to hand the message to whatever number sat in FallbackPhone without
+    /// checking it against anything. That made the field a hole straight through the policy:
+    /// anyone able to edit a contact could route production alerts to a number that appears in no
+    /// routing table, and the feature's one promise — numbers not in this list are never
+    /// auto-messaged — would have been false.
+    /// </summary>
+    [Fact]
+    public async Task A_fallback_that_is_not_itself_a_contact_blocks_rather_than_delivering()
+    {
+        using var db = await SeededAsync();
+        var sjoerd = await db.OutboundContacts.FirstAsync(c => c.Phone == Sjoerd);
+        sjoerd.FallbackPhone = Frank;                 // Frank has no contact row
+        await db.SaveChangesAsync();
+
+        var decision = await NewService(db).RouteAsync(Sjoerd, "deploy:valsuani", "x", DeadOfNight);
+
+        Assert.Equal(OutboundRoutingService.RoutingOutcome.Blocked, decision.Outcome);
+        Assert.DoesNotContain(Frank, decision.Recipient ?? string.Empty);
+    }
+
+    /// <summary>
+    /// A redirect must satisfy the fallback's own policy, not merely exist. Sending Sjoerd's
+    /// night-time deploy notice to someone who does not accept deploys would deliver it to a
+    /// person who explicitly opted out.
+    /// </summary>
+    [Fact]
+    public async Task A_fallback_that_refuses_this_category_does_not_receive_it_anyway()
+    {
+        using var db = await SeededAsync();
+        var martien = await db.OutboundContacts.FirstAsync(c => c.Phone == Martien);
+        martien.Categories = "approval";              // no longer accepts deploys
+        await db.SaveChangesAsync();
+
+        var decision = await NewService(db).RouteAsync(Sjoerd, "deploy:valsuani", "x", DeadOfNight);
+
+        Assert.Equal(OutboundRoutingService.RoutingOutcome.Blocked, decision.Outcome);
+    }
+
+    /// <summary>The fallback's window is the fallback's own, not an inherited exemption.</summary>
+    [Fact]
+    public async Task A_fallback_who_is_also_asleep_is_not_woken_by_the_redirect()
+    {
+        using var db = await SeededAsync();
+        var martien = await db.OutboundContacts.FirstAsync(c => c.Phone == Martien);
+        martien.WindowStartHour = 9;
+        martien.WindowEndHour = 17;
+        await db.SaveChangesAsync();
+
+        var decision = await NewService(db).RouteAsync(Sjoerd, "deploy:valsuani", "x", DeadOfNight);
+
+        Assert.Equal(OutboundRoutingService.RoutingOutcome.Blocked, decision.Outcome);
+    }
+
+    /// <summary>A muted fallback is muted. It must not be revived by being someone's backstop.</summary>
+    [Fact]
+    public async Task A_muted_fallback_does_not_receive_the_redirect()
+    {
+        using var db = await SeededAsync();
+        var martien = await db.OutboundContacts.FirstAsync(c => c.Phone == Martien);
+        martien.Enabled = false;
+        await db.SaveChangesAsync();
+
+        var decision = await NewService(db).RouteAsync(Sjoerd, "deploy:valsuani", "x", DeadOfNight);
+
+        Assert.Equal(OutboundRoutingService.RoutingOutcome.Blocked, decision.Outcome);
+    }
+
+    /// <summary>
+    /// Two contacts naming each other, or one naming itself, would otherwise recurse until the
+    /// stack gave out. The redirect is one hop and then a decision.
+    /// </summary>
+    [Fact]
+    public async Task A_fallback_pointing_back_at_itself_terminates()
+    {
+        using var db = await SeededAsync();
+        var sjoerd = await db.OutboundContacts.FirstAsync(c => c.Phone == Sjoerd);
+        sjoerd.FallbackPhone = Sjoerd;
+        await db.SaveChangesAsync();
+
+        var decision = await NewService(db).RouteAsync(Sjoerd, "deploy:valsuani", "x", DeadOfNight);
+
+        Assert.Equal(OutboundRoutingService.RoutingOutcome.Blocked, decision.Outcome);
+    }
+
+    // ─── Alias resolution ────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Lookup used to branch: if the input contained a digit it was treated as a number and the
+    /// alias table was never consulted. Any alias with a digit in it — "sjoerd2", "vps1" — was
+    /// therefore unreachable, and resolved to "no routing contact" instead. Number first, then
+    /// alias, always both.
+    /// </summary>
+    [Fact]
+    public async Task An_alias_containing_a_digit_still_resolves()
+    {
+        using var db = await SeededAsync();
+        db.OutboundContacts.Add(new OutboundContact
+        {
+            Phone = Frank, Name = "Frank", Alias = "frank2",
+            TimeZoneId = "Europe/Amsterdam", WindowStartHour = 0, WindowEndHour = 24,
+            Categories = "*",
+        });
+        await db.SaveChangesAsync();
+
+        var decision = await NewService(db).RouteAsync("frank2", "approval", "x", Midday);
+
+        Assert.Equal(OutboundRoutingService.RoutingOutcome.Allowed, decision.Outcome);
+        Assert.Equal(Frank, decision.Recipient);
+    }
+
     [Fact]
     public async Task Without_a_fallback_an_out_of_window_message_is_dropped_not_rerouted()
     {
@@ -293,24 +420,38 @@ public class OutboundRoutingServiceTests
     // ─── Rollout safety ──────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// An empty table means "not configured yet", not "nobody may be messaged" — otherwise
-    /// deploying this change to a bridge whose contacts have not been entered would silence
-    /// every approval notification at once.
+    /// The safety valve, and the reason this feature can be merged at all. Seeding the contacts
+    /// is not the same as arming the policy: without the flag, a deploy that populates the table
+    /// would start blocking every caller that has not yet learned to pass a category. Off is the
+    /// default and off must mean off, however full the table is.
     /// </summary>
     [Fact]
-    public async Task An_empty_contact_table_reads_as_not_configured()
-    {
-        using var db = NewContext();
-
-        Assert.False(await NewService(db).IsConfiguredAsync());
-    }
-
-    [Fact]
-    public async Task A_populated_contact_table_reads_as_configured()
+    public async Task A_seeded_table_enforces_nothing_while_the_flag_is_off()
     {
         using var db = await SeededAsync();
 
-        Assert.True(await NewService(db).IsConfiguredAsync());
+        Assert.False(await NewService(db, enabled: false).IsActiveAsync());
+    }
+
+    /// <summary>
+    /// The other half: turning the flag on before entering anyone would block every send, so an
+    /// empty table also reads as inactive. "I armed it before adding contacts" must not take
+    /// WhatsApp down.
+    /// </summary>
+    [Fact]
+    public async Task An_empty_contact_table_is_inactive_even_with_the_flag_on()
+    {
+        using var db = NewContext();
+
+        Assert.False(await NewService(db).IsActiveAsync());
+    }
+
+    [Fact]
+    public async Task Routing_is_active_only_with_both_the_flag_and_contacts()
+    {
+        using var db = await SeededAsync();
+
+        Assert.True(await NewService(db).IsActiveAsync());
     }
 
     // ─── Timezones ───────────────────────────────────────────────────────────────────────────

@@ -267,8 +267,8 @@ using (var scope = app.Services.CreateScope())
         "ON OutboundSendLogs (Recipient, BodyHash, SentAtUtc);");
 
     // Outbound routing policy: who may be messaged, about what, and at what hour in THEIR
-    // timezone. Empty on a fresh deployment, which OutboundRoutingService reads as
-    // "not configured yet" so nothing changes until contacts are actually added.
+    // timezone. Creating the table and filling it changes nothing on its own — the policy is
+    // only enforced once OutboundRouting:Enabled is set, which is false by default.
     db.Database.ExecuteSqlRaw("""
         CREATE TABLE IF NOT EXISTS OutboundContacts (
             Id INTEGER NOT NULL CONSTRAINT PK_OutboundContacts PRIMARY KEY AUTOINCREMENT,
@@ -291,21 +291,68 @@ using (var scope = app.Services.CreateScope())
     // Seed the policy once, from config. Only on a genuinely empty table — this must never
     // resurrect a contact Martien deleted, or overwrite a window he adjusted in the UI. After
     // the first boot the database is authoritative and this block does nothing.
-    if (!db.OutboundContacts.Any())
+    //
+    // Wrapped, because everything in here is driven by hand-edited configuration and the failure
+    // mode without the wrapper is the worst one available: two entries with the same number
+    // violate the unique index, SaveChanges throws inside startup, and the bridge does not come
+    // up at all. A policy that cannot be seeded is a problem; a WhatsApp bridge that will not
+    // start because of a typo in a contact list is an outage.
+    try
     {
-        var seed = app.Configuration.GetSection("OutboundRouting:Seed")
-            .Get<List<WhatsAppBridge.API.Models.OutboundContact>>() ?? new();
-        foreach (var contact in seed)
+        if (!db.OutboundContacts.Any())
         {
-            contact.Id = 0;
-            contact.CreatedAtUtc = contact.UpdatedAtUtc = DateTime.UtcNow;
-            db.OutboundContacts.Add(contact);
+            var seedSection = app.Configuration.GetSection("OutboundRouting:Seed");
+            var seed = seedSection.Get<List<WhatsAppBridge.API.Models.OutboundContact>>() ?? new();
+
+            // Distinguish "no seed configured" from "a seed is configured but did not bind" —
+            // one malformed hour turns the whole list into zero entries, and without this the
+            // only symptom is an empty table that looks exactly like the intended default.
+            if (seed.Count == 0 && seedSection.GetChildren().Any())
+            {
+                app.Logger.LogError(
+                    "OutboundRouting:Seed has {Count} configured entries but none of them bound to a contact. " +
+                    "Check the field names and that the hours are numbers, not strings. No contacts were seeded.",
+                    seedSection.GetChildren().Count());
+            }
+
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            var accepted = 0;
+            foreach (var contact in seed)
+            {
+                var phone = WhatsAppBridge.API.Services.PhoneNumber.Normalize(contact.Phone);
+                if (!WhatsAppBridge.API.Services.PhoneNumber.IsUsable(phone))
+                {
+                    app.Logger.LogError("Skipped routing seed entry '{Name}': '{Phone}' is not a usable number.",
+                        contact.Name, contact.Phone);
+                    continue;
+                }
+                if (!seen.Add(phone))
+                {
+                    app.Logger.LogError("Skipped duplicate routing seed entry for {Phone} ('{Name}').", phone, contact.Name);
+                    continue;
+                }
+
+                contact.Id = 0;
+                contact.Phone = phone;
+                contact.CreatedAtUtc = contact.UpdatedAtUtc = DateTime.UtcNow;
+                db.OutboundContacts.Add(contact);
+                accepted++;
+            }
+
+            if (accepted > 0)
+            {
+                db.SaveChanges();
+                app.Logger.LogInformation(
+                    "Seeded {Count} outbound routing contacts from configuration. Routing enforcement is {State}.",
+                    accepted,
+                    app.Configuration.GetValue("OutboundRouting:Enabled", false) ? "ON" : "OFF (OutboundRouting:Enabled is false)");
+            }
         }
-        if (seed.Count > 0)
-        {
-            db.SaveChanges();
-            app.Logger.LogInformation("Seeded {Count} outbound routing contacts from configuration.", seed.Count);
-        }
+    }
+    catch (Exception ex)
+    {
+        app.Logger.LogError(ex, "Seeding outbound routing contacts failed. The bridge continues without a seeded " +
+                                "policy; add contacts under Routing in the admin UI.");
     }
 
     // CoachOS service-route reply-window tracking (task 1067): every genuine inbound message's

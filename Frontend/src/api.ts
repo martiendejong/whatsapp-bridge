@@ -37,6 +37,20 @@ api.interceptors.response.use(
   }
 );
 
+/**
+ * The server's own explanation of a failure, or null if it did not give one.
+ *
+ * The guardrail answers a refusal with { error, blocked: true }, and that string is the whole
+ * value of the feature: "outside Sjoerd's window, 23:12 Europe/Amsterdam" tells the operator to
+ * wait until morning, where a generic "mislukt" tells them nothing and invites a retry loop.
+ * One implementation, used by every page that sends, rather than a copy per catch block.
+ */
+export function reasonFrom(e: unknown): string | null {
+  const data = (e as any)?.response?.data;
+  if (typeof data === 'string' && data.trim()) return data;
+  return data?.error ?? data?.title ?? null;
+}
+
 export const auth = {
   register: (email: string, password: string) =>
     api.post('/api/auth/register', { Email: email, Password: password }),
@@ -66,8 +80,12 @@ export const whatsapp = {
   getQr: (sessionId: string) => api.get(`/api/whatsapp/sessions/${sessionId}/qr`),
   deleteSession: (sessionId: string) => api.delete(`/api/whatsapp/sessions/${sessionId}`),
   testSession: (sessionId: string) => api.post(`/api/whatsapp/sessions/${sessionId}/test`),
-  sendMessage: (sessionId: string, to: string, message: string) =>
-    api.post(`/api/whatsapp/sessions/${sessionId}/send`, { To: to, Message: message }),
+  // Category decides which routing contact may receive this and at what hour. Omitting it made
+  // the backend fall back to "other", which every contact except Martien refuses — a send from
+  // this screen then failed with a reason nobody could see. Messages typed here are 'manual':
+  // a person at the keyboard, not an automated alert.
+  sendMessage: (sessionId: string, to: string, message: string, category = 'manual') =>
+    api.post(`/api/whatsapp/sessions/${sessionId}/send`, { To: to, Message: message, Category: category }),
   getContacts: (sessionId: string) =>
     api.get(`/api/whatsapp/sessions/${sessionId}/contacts`),
   getStoredChats: (sessionId: string) =>

@@ -20,6 +20,19 @@ namespace WhatsAppBridge.API.Controllers;
 [Authorize(AuthenticationSchemes = "ApiKey,Bearer")]
 public class RoutingController : ControllerBase
 {
+    /// <summary>
+    /// Reading and changing the policy are not the same privilege.
+    ///
+    /// Anyone holding a valid API token may ask the preview endpoint "would a message to this
+    /// number land right now" — that is the question a sender needs answered, and refusing it
+    /// only encourages callers to find out by sending. Changing who may be messaged, muting
+    /// someone, or pointing a fallback somewhere new is an admin action, and it is deliberately
+    /// restricted to the Bearer scheme: API keys carry no role claim at all, so an unqualified
+    /// [Authorize(Roles = "Admin")] would be satisfiable by no API key and misleadingly written
+    /// as though it might be. The rule is "a logged-in admin in the browser, not a token".
+    /// </summary>
+    private const string AdminOnly = "Bearer";
+
     private readonly AppDbContext _context;
     private readonly OutboundRoutingService _routing;
 
@@ -30,6 +43,7 @@ public class RoutingController : ControllerBase
     }
 
     [HttpGet]
+    [Authorize(Roles = "Admin", AuthenticationSchemes = AdminOnly)]
     public async Task<IActionResult> List()
     {
         var contacts = await _context.OutboundContacts
@@ -47,11 +61,12 @@ public class RoutingController : ControllerBase
     }
 
     [HttpPost]
+    [Authorize(Roles = "Admin", AuthenticationSchemes = AdminOnly)]
     public async Task<IActionResult> Upsert([FromBody] ContactRequest request)
     {
-        var phone = new string(request.Phone.SkipWhile(c => !char.IsDigit(c)).TakeWhile(char.IsDigit).ToArray());
-        if (string.IsNullOrEmpty(phone))
-            return BadRequest(new { error = "Phone must contain digits." });
+        var phone = PhoneNumber.Normalize(request.Phone);
+        if (!PhoneNumber.IsUsable(phone))
+            return BadRequest(new { error = "Phone must be a number with at least 6 digits." });
 
         if (request.WindowStartHour is < 0 or > 23)
             return BadRequest(new { error = "WindowStartHour must be 0-23." });
@@ -64,21 +79,44 @@ public class RoutingController : ControllerBase
         if (!IsKnownTimeZone(request.TimeZoneId))
             return BadRequest(new { error = $"Unknown timezone '{request.TimeZoneId}'. Use an IANA id such as 'Europe/Amsterdam'." });
 
+        // An empty category list used to be silently rewritten to "*" — receives everything. That
+        // turned the most likely mistake in this form (leaving a field blank) into the most
+        // permissive possible setting, and it disagreed with the engine, which treats an empty
+        // value in the database as "receives nothing". Fail closed, and say what is missing.
+        if (string.IsNullOrWhiteSpace(request.Categories))
+            return BadRequest(new { error = "Categories is required. Use '*' for everything, or a comma-separated list such as 'deploy:valsuani,reply'." });
+
+        if (string.IsNullOrWhiteSpace(request.Name))
+            return BadRequest(new { error = "Name is required." });
+
+        // A fallback must be an existing contact. The redirect path tells the guardrail that the
+        // contact table has already vouched for the recipient, so a free-text number here would
+        // reach WhatsApp without passing either the contact table or the static allow-list.
+        string? fallback = null;
+        if (!string.IsNullOrWhiteSpace(request.FallbackPhone))
+        {
+            fallback = PhoneNumber.Normalize(request.FallbackPhone);
+            if (fallback == phone)
+                return BadRequest(new { error = "FallbackPhone cannot be the contact's own number." });
+            if (!await _context.OutboundContacts.AnyAsync(c => c.Phone == fallback))
+                return BadRequest(new { error = $"FallbackPhone '{request.FallbackPhone}' is not a routing contact yet. Add that number first, then set it as a fallback." });
+        }
+
         var contact = await _context.OutboundContacts.FirstOrDefaultAsync(c => c.Phone == phone);
         if (contact == null)
         {
-            contact = new OutboundContact { Phone = phone };
+            contact = new OutboundContact { Phone = phone, CreatedAtUtc = DateTime.UtcNow };
             _context.OutboundContacts.Add(contact);
         }
 
-        contact.Name = request.Name;
+        contact.Name = request.Name.Trim();
         contact.Alias = string.IsNullOrWhiteSpace(request.Alias) ? null : request.Alias.Trim().ToLowerInvariant();
         contact.Enabled = request.Enabled;
         contact.TimeZoneId = request.TimeZoneId;
         contact.WindowStartHour = request.WindowStartHour;
         contact.WindowEndHour = request.WindowEndHour;
-        contact.Categories = string.IsNullOrWhiteSpace(request.Categories) ? "*" : request.Categories.Trim();
-        contact.FallbackPhone = string.IsNullOrWhiteSpace(request.FallbackPhone) ? null : request.FallbackPhone.Trim();
+        contact.Categories = request.Categories.Trim();
+        contact.FallbackPhone = fallback;
         contact.UpdatedAtUtc = DateTime.UtcNow;
 
         await _context.SaveChangesAsync();
@@ -86,6 +124,7 @@ public class RoutingController : ControllerBase
     }
 
     [HttpDelete("{id:int}")]
+    [Authorize(Roles = "Admin", AuthenticationSchemes = AdminOnly)]
     public async Task<IActionResult> Delete(int id)
     {
         var contact = await _context.OutboundContacts.FindAsync(id);
@@ -105,7 +144,15 @@ public class RoutingController : ControllerBase
     [HttpGet("preview")]
     public async Task<IActionResult> Preview([FromQuery] string to, [FromQuery] string? category, [FromQuery] string? atUtc)
     {
-        var when = DateTime.TryParse(atUtc, out var parsed)
+        // AssumeUniversal covers the common "2026-09-11T03:00" with no zone on it; AdjustToUniversal
+        // converts the ones that do carry an offset instead of keeping the local wall-clock reading.
+        // The previous plain TryParse + SpecifyKind(Utc) did the opposite of both: it took the
+        // parser's local-time interpretation and then relabelled it UTC, so a preview for 03:00
+        // was silently evaluated as 01:00 in summer — which is the difference between inside and
+        // outside a window, on the one endpoint whose whole job is answering that question.
+        var when = DateTime.TryParse(atUtc, System.Globalization.CultureInfo.InvariantCulture,
+                       System.Globalization.DateTimeStyles.AdjustToUniversal |
+                       System.Globalization.DateTimeStyles.AssumeUniversal, out var parsed)
             ? DateTime.SpecifyKind(parsed, DateTimeKind.Utc)
             : DateTime.UtcNow;
 

@@ -71,25 +71,31 @@ public sealed class ApiAuditMiddleware
         }
 
         // Capture the response so a block reason lands next to the attempt that caused it.
+        //
+        // Pass-through rather than buffer-then-copy. The previous version replaced the response
+        // stream with a MemoryStream, held the entire response, and copied it out afterwards —
+        // which meant every media download through /api was held twice in memory, and, worse,
+        // that an exception skipped the copy entirely: the client got an empty body for any
+        // request that threw. This wrapper forwards each write to the real stream immediately and
+        // keeps only the first kilobyte for the log.
         var originalBody = context.Response.Body;
-        using var buffer = new MemoryStream();
-        context.Response.Body = buffer;
+        await using var capture = new PreviewCaptureStream(originalBody, MaxResponseChars,
+            () => IsTextResponse(context.Response.ContentType));
+        context.Response.Body = capture;
 
-        string? responsePreview = null;
+        var threw = false;
         try
         {
             await _next(context);
-
-            buffer.Position = 0;
-            if (buffer.Length > 0)
-            {
-                using var reader = new StreamReader(buffer, Encoding.UTF8, leaveOpen: true);
-                var text = await reader.ReadToEndAsync();
-                responsePreview = Truncate(text, MaxResponseChars);
-            }
-
-            buffer.Position = 0;
-            await buffer.CopyToAsync(originalBody);
+        }
+        catch
+        {
+            // Recorded, then rethrown untouched: the exception handler upstream still decides
+            // what the client sees. Without this the audit row said 200/"ok" for a request that
+            // failed, because the status code is only set to 500 further up the pipeline —
+            // after this middleware's finally block has already run.
+            threw = true;
+            throw;
         }
         finally
         {
@@ -98,7 +104,8 @@ public sealed class ApiAuditMiddleware
 
             try
             {
-                await WriteAuditAsync(context, path, rawBody, responsePreview, (int)sw.ElapsedMilliseconds);
+                await WriteAuditAsync(context, path, rawBody, capture.GetPreview(),
+                    (int)sw.ElapsedMilliseconds, threw);
             }
             catch (Exception ex)
             {
@@ -108,13 +115,119 @@ public sealed class ApiAuditMiddleware
         }
     }
 
+    /// <summary>
+    /// Whether the response is worth previewing. Media contributes nothing readable to an audit
+    /// row and would be stored as mangled bytes, so it is skipped by content type.
+    ///
+    /// Anything else is captured, including a response that declares no content type at all.
+    /// Requiring a positive text/json header looked tidier and was wrong: middleware that
+    /// short-circuits with a bare 403 writes its reason without setting one, so the very rows
+    /// where the preview earns its keep — "why was this send refused" — came back empty.
+    /// Guessing text for an untyped body costs at most a kilobyte of noise; guessing binary
+    /// costs the evidence.
+    /// </summary>
+    private static bool IsTextResponse(string? contentType)
+    {
+        if (string.IsNullOrEmpty(contentType)) return true;
+        return !(contentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase) ||
+                 contentType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase) ||
+                 contentType.StartsWith("video/", StringComparison.OrdinalIgnoreCase) ||
+                 contentType.StartsWith("font/", StringComparison.OrdinalIgnoreCase) ||
+                 contentType.Contains("octet-stream", StringComparison.OrdinalIgnoreCase) ||
+                 contentType.Contains("pdf", StringComparison.OrdinalIgnoreCase) ||
+                 contentType.Contains("zip", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// Writes straight through to the real response stream while keeping the first
+    /// <c>maxChars</c> bytes for the audit row. Nothing is withheld from the client and nothing
+    /// larger than the preview is retained.
+    /// </summary>
+    private sealed class PreviewCaptureStream : Stream
+    {
+        private readonly Stream _inner;
+        private readonly int _max;
+        private readonly Func<bool> _shouldCapture;
+        private readonly MemoryStream _preview = new();
+        private bool? _capturing;
+
+        public PreviewCaptureStream(Stream inner, int max, Func<bool> shouldCapture)
+        {
+            _inner = inner;
+            _max = max;
+            _shouldCapture = shouldCapture;
+        }
+
+        public string? GetPreview()
+        {
+            if (_preview.Length == 0) return null;
+            return Encoding.UTF8.GetString(_preview.ToArray());
+        }
+
+        private void Capture(ReadOnlySpan<byte> data)
+        {
+            // Decided once, on the first write: by then the handler has set the content type,
+            // and re-checking per write would let a late header change split a body in half.
+            _capturing ??= _shouldCapture();
+            if (_capturing != true || _preview.Length >= _max) return;
+
+            var room = _max - (int)_preview.Length;
+            _preview.Write(data[..Math.Min(room, data.Length)]);
+        }
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            Capture(buffer.AsSpan(offset, count));
+            _inner.Write(buffer, offset, count);
+        }
+
+        public override void Write(ReadOnlySpan<byte> buffer)
+        {
+            Capture(buffer);
+            _inner.Write(buffer);
+        }
+
+        public override async Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+        {
+            Capture(buffer.AsSpan(offset, count));
+            await _inner.WriteAsync(buffer.AsMemory(offset, count), cancellationToken);
+        }
+
+        public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            Capture(buffer.Span);
+            await _inner.WriteAsync(buffer, cancellationToken);
+        }
+
+        public override void Flush() => _inner.Flush();
+        public override Task FlushAsync(CancellationToken cancellationToken) => _inner.FlushAsync(cancellationToken);
+
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) _preview.Dispose();
+            base.Dispose(disposing);
+        }
+    }
+
     private async Task WriteAuditAsync(HttpContext context, string path, string? rawBody,
-        string? responsePreview, int durationMs)
+        string? responsePreview, int durationMs, bool threw)
     {
         var db = context.RequestServices.GetService<AppDbContext>();
         if (db == null) return;
 
-        var status = context.Response.StatusCode;
+        // A request that threw has not reached the exception handler yet, so the response still
+        // carries whatever status was set before the throw — usually 200. Recording that would
+        // make the log claim success for the exact requests worth investigating.
+        var status = threw && context.Response.StatusCode < 400 ? 500 : context.Response.StatusCode;
         var user = context.User;
         var isAuthenticated = user?.Identity?.IsAuthenticated == true;
 
@@ -131,8 +244,11 @@ public sealed class ApiAuditMiddleware
             Path = Truncate(path, 400)!,
             EventType = DeriveEventType(path),
             Phone = ExtractPhone(context.Request, rawBody),
-            Body = ExtractMessageText(rawBody),
-            ResponsePreview = responsePreview,
+            // Masked on the way in, not on the way out: rows are kept indefinitely by design, so
+            // an approve link or login code stored in the clear stays usable for as long as the
+            // database exists. See SecretMasker for what is and is not recognised.
+            Body = SecretMasker.Apply(ExtractMessageText(rawBody)),
+            ResponsePreview = SecretMasker.Apply(responsePreview),
             StatusCode = status,
             Outcome = status is >= 200 and < 300 ? "ok" : status == 403 ? "blocked" : "error",
             DurationMs = durationMs,
@@ -220,11 +336,10 @@ public sealed class ApiAuditMiddleware
     }
 
     /// <summary>
-    /// Leading digit run, matching OutboundGuardrailService.Normalize so that "31633984381",
+    /// Shared with the guardrail and the routing policy so that "31633984381",
     /// "31633984381@c.us" and "254715438010:78@s.whatsapp.net" all filter as one number.
     /// </summary>
-    private static string NormalizePhone(string s) =>
-        new(s.SkipWhile(c => !char.IsDigit(c)).TakeWhile(char.IsDigit).ToArray());
+    private static string NormalizePhone(string s) => Services.PhoneNumber.Normalize(s);
 
     private static int? ParseInt(string? s) => int.TryParse(s, out var v) ? v : null;
 

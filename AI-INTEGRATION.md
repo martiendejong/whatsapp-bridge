@@ -223,16 +223,30 @@ Categories in use today:
 
 A category may be hierarchical: a contact who accepts `deploy` receives `deploy:valsuani`, but one who accepts only `deploy:valsuani` does not receive `deploy:bugatti`.
 
-Four possible outcomes:
+### Off by default
+
+Routing enforces nothing until `OutboundRouting:Enabled` is set to `true`. It ships `false`.
+
+This matters if you are wiring up a sender. Deploying the feature seeds the contact table and shows it in the admin UI, but every send still behaves exactly as it did before — nothing is redirected and nothing is blocked. That is deliberate: a policy that arms itself on deploy would start refusing every caller that has not yet learned to declare a `category`, and the first symptom would be a missing alert rather than an error anyone sees.
+
+So the rollout order is: deploy, look at the table, add the categories to your senders, check `preview`, and only then flip the flag. Both conditions are required — the flag on *and* at least one contact — so turning it on against an empty table does not silence everything either.
+
+### Outcomes
 
 - **Allowed** · the recipient accepts this category and is inside their window. `routedTo` equals `to`.
 - **Redirected** · they are outside their window or muted, and have a fallback. `routedTo` is the fallback and `routing` says why. The message is not lost.
-- **Suppressed** · the fallback already received this exact message within ten minutes, so it is not delivered twice. Returns 403.
+- **Suppressed** · the recipient already received this exact message within ten minutes, so it is not delivered twice. Returns **200** with `{"success": true, "suppressed": true, "reason": "..."}`. Nothing was sent and nothing is wrong: treat it as success. It used to return 403, which made callers retry a duplicate they had deliberately been spared.
 - **Blocked** · no route. Returns 403 with `"blocked": true`. Nothing was sent, and the attempt is visible under `GET /api/wa/blockedOutbound` and in the audit log.
+
+A redirect is one hop and the fallback is evaluated under its own policy, not the original recipient's. A fallback that is not itself a routing contact, does not accept the category, is muted, or is outside its own window does not receive the message — the result is **Blocked**, not a delivery. `FallbackPhone` is therefore not a way around the table.
 
 Numbers with no contact row are never messaged on your initiative. Replying to someone who messaged us first is exempt: that path is governed by the reply window, not by this policy.
 
-Manage the policy at `GET/POST /api/wa/routing`, or in the bridge admin under Routing. `GET /api/wa/routing/preview?to=…&category=…` answers "who would get this right now" without sending anything — worth calling once when wiring up a new sender.
+Manage the policy at `GET/POST /api/wa/routing`, or in the bridge admin under Routing. Listing and editing contacts requires an **admin JWT** — an API key can call `preview` and `timezones` but cannot read or change who may be messaged. `GET /api/wa/routing/preview?to=…&category=…` answers "who would get this right now" without sending anything — worth calling once when wiring up a new sender.
+
+### Which endpoints are governed
+
+Every outbound path, including the two that used to skip the check entirely: `sendReply` and `forwardMessage`. If you relied on either to reach a number outside the policy, it will now be blocked once the flag is on.
 
 ## Rate Limiting
 
@@ -444,10 +458,24 @@ curl -X GET "https://whatsapp.wreckingball.ai/api/wa/getMessages?chatId=31612345
 
 ## Changelog
 
+### 2026-09-11
+
+Follow-up on the routing and audit work below, after review.
+
+- **Routing is off by default.** New `OutboundRouting:Enabled` flag, shipped `false`. The previous version seeded contacts from `appsettings.json` and enforced against them immediately, so merging it would have armed the policy in production without anyone deciding to. Nothing is enforced until the flag is set *and* the contact table is non-empty.
+- **Suppressed now answers 200, not 403.** A duplicate that was deliberately not re-sent is not a failure; returning 403 had callers retrying it.
+- **`sendReply` and `forwardMessage` are guardrailed.** Both bypassed the check completely, so any caller could reach any number through them regardless of policy. `sessions/{id}/forward` is covered too and accepts a `category`.
+- **A fallback is evaluated under its own policy.** Redirects previously delivered to `FallbackPhone` unchecked — a number in no routing table could receive production alerts. It must now be a contact, accept the category, be enabled and be inside its own window, and a self-referencing fallback terminates instead of recursing.
+- **Routing admin requires an admin JWT.** `GET`/`POST`/`DELETE /api/wa/routing` were reachable with any API key, which meant a key could rewrite the policy governing it. `preview` and `timezones` remain open.
+- **Phone normalisation is one function.** It existed four times and the copies had drifted: one turned `+31633984381` into the empty string. Numbers written with spaces or dashes now normalise correctly, and a device-suffixed JID is cut rather than absorbed.
+- **`Categories` no longer defaults to `*` on save.** An omitted value silently granted a contact everything; it is now a validation error.
+- **The `test-*` endpoints are Development-only.** Fourteen `[AllowAnonymous]` actions that send messages, read stored chats and wipe pairing state now return 404 outside Development. They previously needed no credential at all.
+
 ### 2026-09-10
 
 - Outbound routing: `sendMessage`, `sendMedia` and `forwardMessage` accept an optional `category`, and the response reports `routedTo`/`routing`. Recipients have their own timezone, window and accepted categories; outside a window a message goes to the recipient's fallback instead of being lost. Managed at `/api/wa/routing`, with a `preview` endpoint that dry-runs the decision.
 - The session-level send endpoints (`/api/whatsapp/sessions/{id}/send` and `/send-media`) now pass through the same guardrail as the API endpoints. They previously bypassed it.
+- API audit log: every request through `/api/wa` and `/api/whatsapp` is recorded with the API key that made it, the number involved, the outcome and the response preview. Filterable by phone and event type at `/api/wa/audit`. Message bodies are kept indefinitely, with approve/reject links and one-time codes masked on the way in.
 
 ### 2026-09-07
 

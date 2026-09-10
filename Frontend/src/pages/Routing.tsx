@@ -26,11 +26,22 @@ const KNOWN_CATEGORIES = ['*', 'approval', 'deploy:valsuani', 'deploy', 'serverd
 
 const HOURS = Array.from({ length: 25 }, (_, i) => i);
 
+// Same clamp the backend applies in IsInsideWindow. The form cannot produce an out-of-range hour,
+// but a row seeded from appsettings or written by an older build can, and 0/0 was the case that
+// mattered: this table printed 'gesloten' for it while the backend clamped the end up to 1, read
+// the window as 00:00-01:00 and delivered. A routing table that misreports who gets woken is
+// worse than no table at all.
+const clampWindow = (c: { windowStartHour: number; windowEndHour: number }) => ({
+  start: Math.min(Math.max(c.windowStartHour, 0), 23),
+  end: Math.min(Math.max(c.windowEndHour, 1), 24),
+});
+
 const describeWindow = (c: { windowStartHour: number; windowEndHour: number }) => {
-  if (c.windowStartHour === 0 && c.windowEndHour === 24) return 'altijd';
-  if (c.windowStartHour === c.windowEndHour) return 'gesloten';
+  const { start, end } = clampWindow(c);
+  if (start === 0 && end === 24) return 'altijd';
+  if (start === end) return 'gesloten';
   const pad = (h: number) => String(h).padStart(2, '0');
-  return `${pad(c.windowStartHour)}:00-${pad(c.windowEndHour)}:00`;
+  return `${pad(start)}:00-${pad(end)}:00`;
 };
 
 export default function Routing() {

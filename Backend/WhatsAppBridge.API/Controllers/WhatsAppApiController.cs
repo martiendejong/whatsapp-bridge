@@ -34,6 +34,22 @@ public class WhatsAppApiController : ControllerBase
         _outboundGuardrail = outboundGuardrail;
     }
 
+    /// <summary>
+    /// Resolves the bearer token to a user, and — this is the part that was missing — publishes
+    /// that identity on <see cref="HttpContext.User"/>.
+    ///
+    /// This controller authenticates by hand instead of through an [Authorize] attribute, so the
+    /// framework never populated HttpContext.User for any of these routes. Nothing downstream
+    /// noticed, because every action here already had the userId it needed as a local. The audit
+    /// middleware did notice: it reads the caller's identity from HttpContext.User, so every
+    /// single row for /api/wa/* was written with ApiConnectionId = null and AuthScheme =
+    /// "Anonymous" — and the audit page hides null-user rows from non-admins. The log that exists
+    /// specifically to show what was sent with which API key recorded neither.
+    ///
+    /// Adding [Authorize] to the controller would be the tidier fix, but it changes the failure
+    /// response for every existing caller from this method's JSON body to a bare 401, so the
+    /// identity is published here instead and the hand-rolled validation stays as it was.
+    /// </summary>
     private async Task<(bool success, int? userId, string? error)> ValidateApiToken()
     {
         var authHeader = Request.Headers.Authorization.ToString();
@@ -68,6 +84,7 @@ public class WhatsAppApiController : ControllerBase
             {
                 connection.LastUsedAt = DateTime.UtcNow;
                 await _context.SaveChangesAsync();
+                PublishApiKeyIdentity(connection);
                 return (true, connection.UserId, null);
             }
         }
@@ -75,10 +92,43 @@ public class WhatsAppApiController : ControllerBase
         {
             var user = await _authService.ValidateApiTokenAsync(token);
             if (user != null)
+            {
+                var connection = await _context.ApiConnections
+                    .FirstOrDefaultAsync(c => c.Token == token && c.IsActive);
+                PublishApiKeyIdentity(connection, user.Id, user.Email);
                 return (true, user.Id, null);
+            }
         }
 
         return (false, null, "Invalid API token");
+    }
+
+    /// <summary>
+    /// Same claim names the ApiKey authentication handler emits, so the audit middleware and
+    /// anything else reading the caller's identity cannot tell the two paths apart. Deliberately
+    /// does not overwrite an identity the framework already established.
+    /// </summary>
+    private void PublishApiKeyIdentity(ApiConnection? connection, int? userId = null, string? email = null)
+    {
+        if (HttpContext.User?.Identity?.IsAuthenticated == true) return;
+
+        var id = connection?.UserId ?? userId;
+        if (id == null) return;
+
+        var claims = new List<System.Security.Claims.Claim>
+        {
+            new(System.Security.Claims.ClaimTypes.NameIdentifier, id.Value.ToString()),
+        };
+        if (!string.IsNullOrEmpty(email))
+            claims.Add(new System.Security.Claims.Claim(System.Security.Claims.ClaimTypes.Email, email));
+        if (connection != null)
+        {
+            claims.Add(new System.Security.Claims.Claim("ApiConnectionId", connection.Id.ToString()));
+            claims.Add(new System.Security.Claims.Claim("ApiConnectionName", connection.Name ?? string.Empty));
+        }
+
+        HttpContext.User = new System.Security.Claims.ClaimsPrincipal(
+            new System.Security.Claims.ClaimsIdentity(claims, "ApiKey"));
     }
 
     private async Task<string?> GetUserSessionId(int userId, string? sessionIdOrPhone = null)
@@ -142,6 +192,11 @@ public class WhatsAppApiController : ControllerBase
                 return Unauthorized(new { error });
 
             var guard = await _outboundGuardrail.CheckAsync("sendMessage", request.To, request.Body, userId, request.Category);
+            // Suppressed means the recipient already has this exact message. Reporting that as a
+            // failure invites the caller to retry, which is how a duplicate-suppression rule ends
+            // up producing duplicates.
+            if (guard.Suppressed)
+                return Ok(new { success = true, suppressed = true, reason = guard.Reason });
             if (!guard.Allowed)
                 return StatusCode(403, new { error = guard.Reason, blocked = true });
 
@@ -188,6 +243,14 @@ public class WhatsAppApiController : ControllerBase
             if (!success)
                 return Unauthorized(new { error });
 
+            // Same allow-list and the same volume caps as every other send route. This one used
+            // to skip the guardrail entirely, which made it the way to reach any number at any
+            // hour, uncapped and unrecorded, using nothing but a valid API token.
+            var guard = await _outboundGuardrail.CheckAsync(
+                OutboundGuardrailService.DirectReplyEndpoint, request.To, request.Body, userId);
+            if (!guard.Allowed)
+                return StatusCode(403, new { error = guard.Reason, blocked = true });
+
             var sessionId = await GetUserSessionId(userId!.Value, request.SessionId);
             if (sessionId == null)
                 return BadRequest(new { error = request.SessionId != null
@@ -199,7 +262,7 @@ public class WhatsAppApiController : ControllerBase
                 ? _encryptionService.Encrypt(request.Body)
                 : request.Body;
 
-            var result = await _whatsappService.SendReplyAsync(sessionId, request.To, messageToSend, request.QuotedMessageId, request.QuotedFromJid);
+            var result = await _whatsappService.SendReplyAsync(sessionId, guard.Recipient, messageToSend, request.QuotedMessageId, request.QuotedFromJid);
 
             return Ok(result);
         }
@@ -273,6 +336,8 @@ public class WhatsAppApiController : ControllerBase
                 return Unauthorized(new { error });
 
             var guard = await _outboundGuardrail.CheckAsync("sendMedia", request.To, request.Caption ?? "", userId, request.Category);
+            if (guard.Suppressed)
+                return Ok(new { success = true, suppressed = true, reason = guard.Reason });
             if (!guard.Allowed)
                 return StatusCode(403, new { error = guard.Reason, blocked = true });
 
@@ -661,6 +726,8 @@ public class WhatsAppApiController : ControllerBase
             return Unauthorized(new { error });
 
         var guard = await _outboundGuardrail.CheckAsync("forwardMessage", request.ToJid, request.Text, userId, request.Category);
+        if (guard.Suppressed)
+            return Ok(new { success = true, suppressed = true, reason = guard.Reason });
         if (!guard.Allowed)
             return StatusCode(403, new { error = guard.Reason, blocked = true });
 

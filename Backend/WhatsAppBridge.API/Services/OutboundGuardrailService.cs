@@ -68,6 +68,19 @@ public sealed class OutboundGuardrailService
     /// </summary>
     public const string CoachOsReplyEndpoint = "coachOsReply";
 
+    /// <summary>
+    /// The direct /api/wa/sendReply route. Exempt from ROUTING for the same reason the CoachOS
+    /// reply is — routing answers "may we start a conversation with this person, about this,
+    /// now", and a reply starts nothing — with the added practical point that a redirect would
+    /// be incoherent here: a reply carries a quoted message from one chat, and delivering it to
+    /// somebody else's chat produces a message quoting a conversation the recipient cannot see.
+    ///
+    /// NOT exempt from the allow-list or the volume caps. The reply-window exception further
+    /// down deliberately stays CoachOS-only, so this route can still only reach numbers that are
+    /// allow-listed. It previously reached any number at all, with no cap and no record.
+    /// </summary>
+    public const string DirectReplyEndpoint = "sendReply";
+
     private readonly OutboundGuardrailOptions _options;
     private readonly AppDbContext _context;
     private readonly OutboundRoutingService _routing;
@@ -128,14 +141,25 @@ public sealed class OutboundGuardrailService
         // is strictly narrower: it demands a genuine inbound message within the last N hours.
         // Without this exemption, replying to anyone outside the contact table would break the
         // one thing Martien explicitly wants to keep working: "als ze zelf iets vragen".
-        var isReply = endpoint == CoachOsReplyEndpoint;
+        var isReply = endpoint is CoachOsReplyEndpoint or DirectReplyEndpoint;
 
         var routedTo = to;
         string? routingNote = null;
         var routingCleared = false;
-        if (!isReply && await _routing.IsConfiguredAsync())
+        if (!isReply && await _routing.IsActiveAsync())
         {
             var decision = await _routing.RouteAsync(to, category, body);
+
+            // A suppressed duplicate is not a block and must not be recorded as one: the message
+            // already arrived, and writing it to BlockedOutboundMessages would report a working
+            // policy as a failure.
+            if (decision.Outcome == OutboundRoutingService.RoutingOutcome.Suppressed)
+            {
+                _logger.LogInformation("Outbound SUPPRESSED via {Endpoint} to {To}: {Reason}",
+                    endpoint, to, decision.Reason);
+                return GuardrailResult.Suppress(decision.Reason);
+            }
+
             if (!decision.ShouldSend)
             {
                 await RecordBlockAsync(endpoint, to, body, userId, decision.Reason);
@@ -239,20 +263,8 @@ public sealed class OutboundGuardrailService
         await _context.SaveChangesAsync();
     }
 
-    /// <summary>
-    /// Extracts the leading phone-number digit run (task 897, 2026-08-30 — found live via the
-    /// Bugatti uptime watchdog fix): every recipient format used against this API puts the
-    /// digits first — a bare number ("31633984381"), a contact JID ("31633984381@c.us"), or a
-    /// device-suffixed JID ("254715438010:78@s.whatsapp.net") — but the previous
-    /// <c>Where(char.IsLetterOrDigit)</c> kept the LETTERS from "@c.us"/"@s.whatsapp.net" too
-    /// (producing "31633984381cus"), which never matched a plain-digits allow-list entry.
-    /// This silently blocked messages to Martien himself whenever sent as "...@c.us" — the
-    /// documented standard format in prod-access/vault-access's own config.example.json —
-    /// confirmed live via a real blocked vault-approval-request send in production. Taking
-    /// only the leading digit run fixes this for every format above.
-    /// </summary>
-    private static string Normalize(string s) =>
-        new string(s.TakeWhile(char.IsDigit).ToArray());
+    /// <summary>See <see cref="PhoneNumber.Normalize"/> — one definition, shared by every caller.</summary>
+    private static string Normalize(string s) => PhoneNumber.Normalize(s);
 }
 
 /// <summary>
@@ -261,13 +273,29 @@ public sealed class OutboundGuardrailService
 /// (message aimed at Sjoerd at 03:00 goes to Martien). Sending to the originally requested
 /// number after an Allowed result would defeat the routing policy, so callers must use this.
 /// </summary>
-public sealed record GuardrailResult(bool Allowed, string? Reason, string Recipient, string? RoutingNote)
+public sealed record GuardrailResult(bool Allowed, string? Reason, string Recipient, string? RoutingNote,
+    bool Suppressed = false)
 {
     public static GuardrailResult Allow(string recipient, string? routingNote) =>
         new(true, null, recipient, routingNote);
 
     public static GuardrailResult Block(string reason) =>
         new(false, reason, string.Empty, null);
+
+    /// <summary>
+    /// Nothing was sent, and that is the correct outcome rather than a refusal: the identical
+    /// message already reached this recipient moments ago, so a redirect would have delivered it
+    /// twice.
+    ///
+    /// Distinct from <see cref="Block"/> on purpose. A suppressed send used to come back as a
+    /// 403 with blocked=true, which was wrong in three directions at once: the caller read it as
+    /// a failure and retried, producing the very duplicate the suppression prevented; it was
+    /// written to BlockedOutboundMessages, so the "blocked sends" list filled up with sends that
+    /// were working exactly as designed; and the audit page counted it under blocked. Callers
+    /// should treat this as success with nothing to do.
+    /// </summary>
+    public static GuardrailResult Suppress(string reason) =>
+        new(false, reason, string.Empty, null, Suppressed: true);
 
     /// <summary>
     /// Shorthand for callers that only need the verdict — <c>var (allowed, reason) = ...</c>.
