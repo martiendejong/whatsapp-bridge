@@ -61,8 +61,10 @@ public sealed class InboundWebhookForwarder
     {
         if (!IsEnabled) return;
 
-        // Only forward content-bearing user messages; receipts/reactions/etc. have no body.
-        if (string.IsNullOrWhiteSpace(msg.Text)) return;
+        // Forward text, voice, and media messages. Skip receipts/reactions/revocations
+        // that carry neither text nor a downloadable media payload.
+        var hasContent = !string.IsNullOrWhiteSpace(msg.Text) || !string.IsNullOrWhiteSpace(msg.MediaUrl);
+        if (!hasContent) return;
 
         if (!string.IsNullOrEmpty(msg.Id))
         {
@@ -90,6 +92,11 @@ public sealed class InboundWebhookForwarder
                 Type = msg.Type.ToString().ToLowerInvariant(),
                 Timestamp = msg.Timestamp,
                 PushName = string.IsNullOrEmpty(msg.PushName) ? null : msg.PushName,
+                MediaUrl = string.IsNullOrEmpty(msg.MediaUrl) ? null : msg.MediaUrl,
+                MediaKey = string.IsNullOrEmpty(msg.MediaKey) ? null : msg.MediaKey,
+                MimeType = string.IsNullOrEmpty(msg.MimeType) ? null : msg.MimeType,
+                FileName = string.IsNullOrEmpty(msg.FileName) ? null : msg.FileName,
+                Duration = msg.Duration,
             };
 
             using var request = new HttpRequestMessage(HttpMethod.Post, _options.Endpoint);
@@ -145,5 +152,10 @@ public sealed class InboundWebhookForwarder
         [JsonPropertyName("type")] public string Type { get; set; } = "text";
         [JsonPropertyName("timestamp")] public long Timestamp { get; set; }
         [JsonPropertyName("pushName")] public string? PushName { get; set; }
+        [JsonPropertyName("mediaUrl")] public string? MediaUrl { get; set; }
+        [JsonPropertyName("mediaKey")] public string? MediaKey { get; set; }
+        [JsonPropertyName("mimeType")] public string? MimeType { get; set; }
+        [JsonPropertyName("fileName")] public string? FileName { get; set; }
+        [JsonPropertyName("duration")] public uint? Duration { get; set; }
     }
 }
