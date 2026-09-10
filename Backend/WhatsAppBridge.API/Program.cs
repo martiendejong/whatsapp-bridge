@@ -88,8 +88,16 @@ builder.Services.AddSingleton<EncryptionService>();
 builder.Services.AddSingleton<TaskIntakeForwarder>();
 // Singleton: pushes every live inbound message to jengo-agi for direct replies (default-OFF, additive)
 builder.Services.AddSingleton<InboundWebhookForwarder>();
+// Singleton: asks coachingplatform (CoachOS) for an AI reply for non-allow-listed senders
+// (task 1067, default-OFF, additive). Never sends anything itself — see class doc comment.
+builder.Services.AddSingleton<CoachOsIntakeForwarder>();
 builder.Services.AddScoped<OutboundGuardrailService>();
-// Singleton: holds long-lived Dawa WhatsAppClient instances (one per user session)
+// Singleton: transcribes inbound audio via OpenAI Whisper (task 869ejuycr). Resolves its API
+// key lazily from config or the Prospergenics vault — see WhisperTranscriptionService.
+builder.Services.AddSingleton<WhisperTranscriptionService>();
+// Singleton: admin-selected WhatsApp engine ("dawa"/"baileys"), persisted in AppSettings
+builder.Services.AddSingleton<EngineSettingsService>();
+// Singleton: holds long-lived WhatsApp engine instances (one per user session)
 builder.Services.AddSingleton<WhatsAppBridgeService>();
 
 // CORS
@@ -153,7 +161,10 @@ using (var scope = app.Services.CreateScope())
             MimeType TEXT NULL,
             Timestamp INTEGER NOT NULL,
             ReceivedAt TEXT NOT NULL,
-            IsHistory INTEGER NOT NULL
+            IsHistory INTEGER NOT NULL,
+            Transcript TEXT NULL,
+            LocalMediaPath TEXT NULL,
+            PushName TEXT NULL
         );
         CREATE UNIQUE INDEX IF NOT EXISTS IX_Messages_SessionId_MessageId ON Messages (SessionId, MessageId);
         CREATE INDEX IF NOT EXISTS IX_Messages_ChatJid_Timestamp ON Messages (ChatJid, Timestamp);
@@ -193,6 +204,11 @@ using (var scope = app.Services.CreateScope())
              {
                  "ALTER TABLE Messages ADD COLUMN MediaKey TEXT NULL",
                  "ALTER TABLE Messages ADD COLUMN MimeType TEXT NULL",
+                 // Task 869ejuycr: Whisper transcript + eagerly-decrypted local media cache path.
+                 "ALTER TABLE Messages ADD COLUMN Transcript TEXT NULL",
+                 "ALTER TABLE Messages ADD COLUMN LocalMediaPath TEXT NULL",
+                 // Sender display names on the messages page (push name captured per message).
+                 "ALTER TABLE Messages ADD COLUMN PushName TEXT NULL",
              })
     {
         try
@@ -221,6 +237,51 @@ using (var scope = app.Services.CreateScope())
         CREATE INDEX IF NOT EXISTS IX_BlockedOutboundMessages_UserId ON BlockedOutboundMessages (UserId);
         """);
 
+    // Outbound guardrail volume-cap accounting (task 897): every ALLOWED send, so the
+    // guardrail can count sends per recipient/24h and globally/hour. Same self-heal reason
+    // as BlockedOutboundMessages above.
+    db.Database.ExecuteSqlRaw("""
+        CREATE TABLE IF NOT EXISTS OutboundSendLogs (
+            Id INTEGER NOT NULL CONSTRAINT PK_OutboundSendLogs PRIMARY KEY AUTOINCREMENT,
+            Recipient TEXT NOT NULL,
+            SentAtUtc TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS IX_OutboundSendLogs_Recipient_SentAtUtc ON OutboundSendLogs (Recipient, SentAtUtc);
+        CREATE INDEX IF NOT EXISTS IX_OutboundSendLogs_SentAtUtc ON OutboundSendLogs (SentAtUtc);
+        """);
+
+    // CoachOS service-route reply-window tracking (task 1067): every genuine inbound message's
+    // sender + timestamp, so OutboundGuardrailService can prove a reply is answering a real prior
+    // inbound message before allowing it through the allow-list exception. Same self-heal reason
+    // as the tables above.
+    db.Database.ExecuteSqlRaw("""
+        CREATE TABLE IF NOT EXISTS InboundContacts (
+            Id INTEGER NOT NULL CONSTRAINT PK_InboundContacts PRIMARY KEY AUTOINCREMENT,
+            Sender TEXT NOT NULL,
+            LastInboundAtUtc TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS IX_InboundContacts_Sender ON InboundContacts (Sender);
+        """);
+
+    // Global key/value settings (engine switch feature): holds the admin-selected WhatsApp
+    // engine ("dawa"/"baileys"). Same self-heal reason as the tables above.
+    db.Database.ExecuteSqlRaw("""
+        CREATE TABLE IF NOT EXISTS AppSettings (
+            Key TEXT NOT NULL PRIMARY KEY,
+            Value TEXT NOT NULL
+        );
+        """);
+
+    // Engine column on sessions (informational: which engine the session last connected with).
+    try
+    {
+        db.Database.ExecuteSqlRaw("ALTER TABLE WhatsAppSessions ADD COLUMN Engine TEXT NULL;");
+    }
+    catch (Exception ex) when (ex.Message.Contains("duplicate column name", StringComparison.OrdinalIgnoreCase))
+    {
+        // Column already present from a prior startup.
+    }
+
     // Durable chat list (fix/message-persistence-survives-deploy): getChats upserts every live
     // result here and falls back to it when Dawa is offline, so known contacts survive
     // restarts and re-pairs. Same self-heal reason as above: EnsureCreated() no-ops on an
@@ -232,11 +293,23 @@ using (var scope = app.Services.CreateScope())
             Jid TEXT NOT NULL,
             Name TEXT NOT NULL,
             Phone TEXT NOT NULL,
-            LastSeenAt TEXT NOT NULL
+            LastSeenAt TEXT NOT NULL,
+            CustomName TEXT NULL
         );
         CREATE UNIQUE INDEX IF NOT EXISTS IX_Chats_UserId_Jid ON Chats (UserId, Jid);
         CREATE INDEX IF NOT EXISTS IX_Chats_UserId ON Chats (UserId);
         """);
+
+    // User-supplied display-name override per contact (sender-names feature). After the
+    // CREATE above so the table is guaranteed to exist on every upgrade path.
+    try
+    {
+        db.Database.ExecuteSqlRaw("ALTER TABLE Chats ADD COLUMN CustomName TEXT NULL;");
+    }
+    catch (Exception ex) when (ex.Message.Contains("duplicate column name", StringComparison.OrdinalIgnoreCase))
+    {
+        // Column already present from a prior startup or the CREATE TABLE above.
+    }
 }
 
 // Restore WhatsApp sessions on startup — includes "disconnected" sessions that have saved credentials
@@ -247,15 +320,16 @@ using (var scope = app.Services.CreateScope())
     var sessionsRoot = app.Configuration["WhatsApp:SessionsDirectory"]
         ?? Path.Combine(AppContext.BaseDirectory, "whatsapp-sessions");
 
-    // Restore any session that has a saved creds.json, regardless of last-known DB status.
-    // Do NOT filter by status — "failed" sessions have creds and can still reconnect.
+    // Restore any session that has saved creds for the selected engine, regardless of
+    // last-known DB status ("failed" sessions have creds and can still reconnect).
+    // RestoreSessionAsync itself checks the engine-specific creds location
+    // (creds.json for Dawa, baileys-auth/creds.json for Baileys) and skips otherwise.
     var allSessions = db.WhatsAppSessions
         .Select(s => s.SessionId)
         .ToList();
     foreach (var sessionId in allSessions)
     {
-        var credsPath = Path.Combine(sessionsRoot, sessionId, "creds.json");
-        if (File.Exists(credsPath))
+        if (Directory.Exists(Path.Combine(sessionsRoot, sessionId)))
             await whatsappService.RestoreSessionAsync(sessionId);
     }
 }

@@ -23,6 +23,10 @@ public class WhatsAppSession
 
     public DateTime? LastSeenAt { get; set; }
 
+    // Which engine ("dawa"/"baileys") this session last (re)connected with. Informational —
+    // the active engine choice is the global AppSettings value; column self-healed in Program.cs.
+    public string? Engine { get; set; }
+
     // Navigation properties
     public User User { get; set; } = null!;
 }

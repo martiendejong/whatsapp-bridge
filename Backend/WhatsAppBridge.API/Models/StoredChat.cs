@@ -23,4 +23,10 @@ public class StoredChat
 
     /// <summary>Last time this chat was seen in a live getChats response (UTC).</summary>
     public DateTime LastSeenAt { get; set; }
+
+    /// <summary>
+    /// User-supplied display name override (web UI or machine API). Wins over the
+    /// WhatsApp-provided Name and per-message push names everywhere names are shown.
+    /// </summary>
+    public string? CustomName { get; set; }
 }

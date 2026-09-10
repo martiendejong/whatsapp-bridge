@@ -6,6 +6,7 @@ interface StoredChat {
   chatJid: string;
   phone: string;
   name: string | null;
+  customName: string | null;
   messageCount: number;
   lastTimestamp: number;
   lastBody: string | null;
@@ -18,10 +19,13 @@ interface StoredMessage {
   chatJid: string;
   fromMe: boolean;
   sender: string;
+  senderName: string | null;
+  senderPhone: string | null;
   body: string;
   type: string;
   mediaUrl: string | null;
   mediaAvailable: boolean;
+  transcript?: string | null;
   timestamp: number;
   isHistory: boolean;
 }
@@ -59,6 +63,9 @@ export default function Messages() {
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [historyStatus, setHistoryStatus] = useState('');
   const [downloadingId, setDownloadingId] = useState('');
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState('');
+  const [savingName, setSavingName] = useState(false);
   const threadRef = useRef<HTMLDivElement>(null);
   const selectedChatRef = useRef(selectedChat);
   selectedChatRef.current = selectedChat;
@@ -107,6 +114,7 @@ export default function Messages() {
     if (!sessionId || !selectedChat) return;
     setMessages([]);
     setHistoryStatus('');
+    setEditingName(false);
     loadMessages(sessionId, selectedChat);
     const iv = setInterval(() => loadMessages(sessionId, selectedChat), 5000);
     return () => clearInterval(iv);
@@ -165,6 +173,21 @@ export default function Messages() {
       setError('Media kon niet worden gedownload');
     } finally {
       setDownloadingId('');
+    }
+  };
+
+  const saveContactName = async () => {
+    if (!selectedChat || savingName) return;
+    setSavingName(true);
+    try {
+      await whatsapp.setContactName(selectedChat, nameDraft.trim());
+      setEditingName(false);
+      await loadChats(sessionId);
+      await loadMessages(sessionId, selectedChat);
+    } catch {
+      setError('Naam opslaan mislukt');
+    } finally {
+      setSavingName(false);
     }
   };
 
@@ -230,11 +253,43 @@ export default function Messages() {
           ) : (
             <>
               <div style={{ padding: '10px 16px', background: '#f0f0f0', borderBottom: '1px solid #ddd', fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-                <div>
-                  {activeChat?.name || activeChat?.phone || selectedChat}
-                  <span style={{ fontWeight: 400, color: '#888', marginLeft: 8, fontSize: 13 }}>
-                    {activeChat ? `${activeChat.messageCount} berichten` : ''}
-                  </span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+                  {editingName ? (
+                    <>
+                      <input
+                        autoFocus
+                        value={nameDraft}
+                        onChange={(e) => setNameDraft(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === 'Enter') saveContactName(); if (e.key === 'Escape') setEditingName(false); }}
+                        placeholder="Naam (leeg = terug naar WhatsApp-naam)"
+                        style={{ padding: '4px 8px', borderRadius: 6, border: '1px solid #ccc', fontSize: 14, fontWeight: 400, width: 220 }}
+                      />
+                      <button className="btn" onClick={saveContactName} disabled={savingName}
+                        style={{ fontWeight: 400, fontSize: 12, padding: '4px 10px' }}>
+                        {savingName ? '...' : 'Opslaan'}
+                      </button>
+                      <button onClick={() => setEditingName(false)}
+                        style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#888', fontSize: 12 }}>
+                        Annuleren
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {activeChat?.name || activeChat?.phone || selectedChat}
+                      </span>
+                      <button
+                        onClick={() => { setNameDraft(activeChat?.customName || ''); setEditingName(true); }}
+                        title="Naam aanpassen (eigen naam wint van de WhatsApp-naam)"
+                        style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#888', fontSize: 14, padding: 0 }}
+                      >
+                        ✎
+                      </button>
+                      <span style={{ fontWeight: 400, color: '#888', fontSize: 13, flexShrink: 0 }}>
+                        {activeChat ? `${activeChat.messageCount} berichten` : ''}
+                      </span>
+                    </>
+                  )}
                 </div>
                 <button
                   className="btn"
@@ -260,6 +315,11 @@ export default function Messages() {
                       boxShadow: '0 1px 1px rgba(0,0,0,0.1)',
                       whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 14,
                     }}>
+                      {!m.fromMe && (
+                        <div style={{ fontSize: 12, fontWeight: 600, color: '#1f7aec', marginBottom: 2 }}>
+                          {m.senderName || m.senderPhone || m.sender.split('@')[0]}
+                        </div>
+                      )}
                       {m.body}
                       {m.mediaUrl && (
                         <div style={{ marginTop: m.body ? 6 : 0 }}>
@@ -281,6 +341,14 @@ export default function Messages() {
                               {mediaLabel(m.type)} · media niet beschikbaar
                             </span>
                           )}
+                        </div>
+                      )}
+                      {m.type === 'audio' && m.transcript && (
+                        <div style={{
+                          marginTop: 6, fontSize: 13, color: '#3a3a3a', fontStyle: 'italic',
+                          borderLeft: '3px solid #d0d0d0', paddingLeft: 8,
+                        }}>
+                          “{m.transcript}”
                         </div>
                       )}
                       <div style={{ fontSize: 11, color: '#8a8a8a', textAlign: 'right', marginTop: 2 }}>

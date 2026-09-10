@@ -18,6 +18,25 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
+// Expired/invalid token: the SPA only checks that a token EXISTS, so a stale JWT left the UI
+// "logged in" while every call 401'd (symptom: 'Kon sessies niet laden' on /messages).
+// On any 401 outside the auth endpoints: drop the token and force a fresh login.
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    const status = error?.response?.status;
+    const url: string = error?.config?.url ?? '';
+    if (status === 401 && !url.includes('/api/auth/')) {
+      localStorage.removeItem('token');
+      localStorage.removeItem('user');
+      if (!window.location.pathname.startsWith('/login')) {
+        window.location.href = '/login';
+      }
+    }
+    return Promise.reject(error);
+  }
+);
+
 export const auth = {
   register: (email: string, password: string) =>
     api.post('/api/auth/register', { Email: email, Password: password }),
@@ -59,11 +78,19 @@ export const whatsapp = {
     }),
   requestHistory: (sessionId: string, chatJid: string, count = 100) =>
     api.post(`/api/whatsapp/sessions/${sessionId}/request-history`, { ChatJid: chatJid, Count: count }),
+  setContactName: (jid: string, name: string) =>
+    api.put('/api/whatsapp/contacts/name', { Jid: jid, Name: name }),
   getStoredMessageMedia: (sessionId: string, chatJid: string, messageId: string) =>
     api.get(`/api/whatsapp/sessions/${sessionId}/store/messages/media`, {
       params: { chatJid, messageId },
       responseType: 'blob',
     }),
+};
+
+export const admin = {
+  getEngine: () => api.get('/api/admin/engine'),
+  setEngine: (engine: string, restartSessions: boolean) =>
+    api.put('/api/admin/engine', { engine, restartSessions }),
 };
 
 export default api;

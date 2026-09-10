@@ -187,6 +187,25 @@ public sealed class WhatsAppClient : IAsyncDisposable
     }
 
     /// <summary>
+    /// Sends a text message as a reply, attaching quoted-message ContextInfo so the
+    /// recipient's client renders it as a reply to the original message.
+    /// </summary>
+    /// <param name="to">Phone number ("31612345678") or full JID ("31612345678@s.whatsapp.net").</param>
+    /// <param name="text">Reply text.</param>
+    /// <param name="quotedMsgId">ID of the message being replied to.</param>
+    /// <param name="quotedFromJid">JID of the sender of the quoted message.</param>
+    public async Task<(string MessageId, string Jid)> SendReplyAsync(string to, string text, string quotedMsgId, string quotedFromJid, CancellationToken cancellationToken = default)
+    {
+        if (_noiseProcessor == null || _state != ConnectionState.Connected)
+            throw new InvalidOperationException("Client is not connected.");
+
+        var jid = NormalizeSendJid(to);
+        var quotedContext = new Dawa.Proto.ContextInfo { StanzaId = quotedMsgId, Participant = quotedFromJid };
+        var messageId = await _noiseProcessor.SendTextMessageAsync(jid, text, cancellationToken, quotedContext);
+        return (messageId, jid);
+    }
+
+    /// <summary>
     /// Canonicalize a send target to the bare user JID. A device-suffix JID
     /// ("254715438010:78@s.whatsapp.net", as returned by getChats for some chats) is accepted
     /// by the server but addresses a single linked device — the message never shows up on the

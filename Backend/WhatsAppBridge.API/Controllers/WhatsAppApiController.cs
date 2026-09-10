@@ -173,6 +173,47 @@ public class WhatsAppApiController : ControllerBase
     }
 
     /// <summary>
+    /// Send a reply to a specific message, attaching quoted-message context so the
+    /// recipient's client renders it as a reply.
+    /// POST /api/wa/sendReply
+    /// </summary>
+    [HttpPost("sendReply")]
+    public async Task<IActionResult> SendReply([FromBody] SendReplyRequest request)
+    {
+        try
+        {
+            var (success, userId, error) = await ValidateApiToken();
+            if (!success)
+                return Unauthorized(new { error });
+
+            var sessionId = await GetUserSessionId(userId!.Value, request.SessionId);
+            if (sessionId == null)
+                return BadRequest(new { error = request.SessionId != null
+                    ? $"WhatsApp session '{request.SessionId}' not found or not connected"
+                    : "No active WhatsApp session" });
+
+            // Encrypt message if encryption enabled
+            var messageToSend = _encryptionService.IsEncryptionEnabled
+                ? _encryptionService.Encrypt(request.Body)
+                : request.Body;
+
+            var result = await _whatsappService.SendReplyAsync(sessionId, request.To, messageToSend, request.QuotedMessageId, request.QuotedFromJid);
+
+            return Ok(result);
+        }
+        catch (WhatsAppServiceException ex)
+        {
+            // Return user-friendly error message
+            return StatusCode(400, new
+            {
+                error = ex.Error.UserMessage,
+                errorCode = ex.Error.ErrorCode,
+                details = ex.Error.AdditionalInfo
+            });
+        }
+    }
+
+    /// <summary>
     /// Request on-demand history sync: ask the phone to push older message history for a
     /// chat. This is WhatsApp Web's own history mechanism (a linked-device request to the
     /// phone) — NOT the Google Drive backup, which is not accessible to third parties.
@@ -325,7 +366,9 @@ public class WhatsAppApiController : ControllerBase
                 timestamp = m.Timestamp,
                 type = m.Type,
                 mediaUrl = m.MediaUrl,
-                mimeType = m.MimeType
+                mediaKey = m.MediaKey,
+                mimeType = m.MimeType,
+                transcript = m.Transcript
             }));
         }
 
@@ -388,6 +431,11 @@ public class WhatsAppApiController : ControllerBase
             body = m.Body,
             type = m.Type,
             mediaUrl = m.MediaUrl,
+            mediaAvailable = !string.IsNullOrEmpty(m.MediaUrl) && !string.IsNullOrEmpty(m.MediaKey),
+            mediaReady = !string.IsNullOrEmpty(m.LocalMediaPath),
+            // Whisper transcript for audio messages (task 869ejuycr) — filled in automatically
+            // shortly after ingest, no separate call needed.
+            transcript = m.Transcript,
             timestamp = m.Timestamp,
             receivedAt = m.ReceivedAt,
             isHistory = m.IsHistory
@@ -531,8 +579,41 @@ public class WhatsAppApiController : ControllerBase
 
         try
         {
-            var bytes = await _whatsappService.DownloadMediaAsync(sessionId!, request.MediaUrl, request.MediaKey, request.MimeType ?? "application/octet-stream");
-            return File(bytes ?? Array.Empty<byte>(), request.MimeType ?? "application/octet-stream");
+            var mediaUrl = request.MediaUrl;
+            var mediaKey = request.MediaKey;
+            var mimeType = request.MimeType;
+
+            // Task 869ejuycr: resolve by chatJid+messageId instead of a manually-extracted
+            // mediaUrl/mediaKey — serves the already-decrypted local cache directly when
+            // available (instant, no re-decrypt), falling back to the message's own stored
+            // MediaUrl/MediaKey otherwise. Lets a caller (e.g. an agent reading getMessages)
+            // fetch the actual file without ever having to handle the raw key itself.
+            if (!string.IsNullOrEmpty(request.ChatJid) && !string.IsNullOrEmpty(request.MessageId))
+            {
+                var stored = await _context.Messages.AsNoTracking().FirstOrDefaultAsync(m =>
+                    m.SessionId == sessionId && m.ChatJid == request.ChatJid && m.MessageId == request.MessageId);
+                if (stored == null)
+                    return NotFound(new { error = "Message not found" });
+
+                if (!string.IsNullOrEmpty(stored.LocalMediaPath) && System.IO.File.Exists(stored.LocalMediaPath))
+                {
+                    var cachedBytes = await System.IO.File.ReadAllBytesAsync(stored.LocalMediaPath);
+                    return File(cachedBytes, stored.MimeType ?? "application/octet-stream");
+                }
+
+                if (string.IsNullOrEmpty(stored.MediaUrl) || string.IsNullOrEmpty(stored.MediaKey))
+                    return NotFound(new { error = "Media niet beschikbaar voor dit bericht" });
+
+                mediaUrl = stored.MediaUrl;
+                mediaKey = stored.MediaKey;
+                mimeType = stored.MimeType ?? mimeType;
+            }
+
+            if (string.IsNullOrEmpty(mediaUrl) || string.IsNullOrEmpty(mediaKey))
+                return BadRequest(new { error = "mediaUrl/mediaKey or chatJid/messageId required" });
+
+            var bytes = await _whatsappService.DownloadMediaAsync(sessionId!, mediaUrl, mediaKey, mimeType ?? "application/octet-stream");
+            return File(bytes ?? Array.Empty<byte>(), mimeType ?? "application/octet-stream");
         }
         catch (Exception ex)
         {
@@ -855,6 +936,70 @@ public class WhatsAppApiController : ControllerBase
     }
 
     /// <summary>
+    /// Contact display names known to the bridge: the WhatsApp-provided name plus the caller's
+    /// own override (customName). The effective display name is customName > name.
+    /// GET /api/wa/contactNames
+    /// </summary>
+    [HttpGet("contactNames")]
+    public async Task<IActionResult> GetContactNames()
+    {
+        var (success, userId, error) = await ValidateApiToken();
+        if (!success)
+            return Unauthorized(new { error });
+
+        var rows = await _context.Chats.AsNoTracking()
+            .Where(c => c.UserId == userId!.Value)
+            .OrderBy(c => c.Phone)
+            .ToListAsync();
+
+        return Ok(rows.Select(c => new
+        {
+            jid = c.Jid,
+            phone = c.Phone,
+            name = string.IsNullOrEmpty(c.Name) ? null : c.Name,
+            customName = c.CustomName,
+        }));
+    }
+
+    /// <summary>
+    /// Sets (or clears, with an empty/absent name) the display-name override for a contact.
+    /// Accepts a bare phone number or a full JID. The override wins over WhatsApp-provided
+    /// names everywhere the bridge shows names (messages page, store/chats, contactNames).
+    /// POST /api/wa/setContactName  { "jid": "31612345678", "name": "Piet" }
+    /// </summary>
+    [HttpPost("setContactName")]
+    public async Task<IActionResult> SetContactName([FromBody] SetContactNameApiRequest request)
+    {
+        var (success, userId, error) = await ValidateApiToken();
+        if (!success)
+            return Unauthorized(new { error });
+
+        if (string.IsNullOrWhiteSpace(request.Jid))
+            return BadRequest(new { error = "jid is required (bare number or full JID)" });
+
+        var jid = request.Jid.Contains('@') ? request.Jid.Trim() : $"{request.Jid.Trim()}@s.whatsapp.net";
+        var customName = string.IsNullOrWhiteSpace(request.Name) ? null : request.Name.Trim();
+
+        var row = await _context.Chats.FirstOrDefaultAsync(c => c.UserId == userId!.Value && c.Jid == jid);
+        if (row == null)
+        {
+            row = new Models.StoredChat
+            {
+                UserId = userId!.Value,
+                Jid = jid,
+                Name = "",
+                Phone = jid.Split('@')[0].Split(':')[0],
+                LastSeenAt = DateTime.UtcNow,
+            };
+            _context.Chats.Add(row);
+        }
+        row.CustomName = customName;
+        await _context.SaveChangesAsync();
+
+        return Ok(new { success = true, jid, customName });
+    }
+
+    /// <summary>
     /// Get message delivery/read status (path-based resource route)
     /// GET /api/{sessionId}/messages/{msgId}/status
     /// </summary>
@@ -875,9 +1020,19 @@ public class WhatsAppApiController : ControllerBase
 }
 
 public record SendMessageRequest(string To, string Body, string? SessionId = null);
+public record SetContactNameApiRequest(string Jid, string? Name = null);
+public record SendReplyRequest(string To, string Body, string QuotedMessageId, string QuotedFromJid, string? SessionId = null);
 public record RequestHistoryRequest(string ChatId, int Count = 50, bool NoAnchor = false, string? SessionId = null);
 public record SendMediaRequest(string To, string MediaUrl, string? Caption = null, string? SessionId = null);
-public record DownloadMediaRequest(string MediaUrl, string MediaKey, string? MimeType = null, string? SessionId = null);
+public record DownloadMediaRequest(
+    string? MediaUrl = null,
+    string? MediaKey = null,
+    string? MimeType = null,
+    string? SessionId = null,
+    // Task 869ejuycr: alternative to MediaUrl/MediaKey — fetch by chatJid+messageId to use the
+    // already-decrypted local cache without the caller ever handling the raw encryption key.
+    string? ChatJid = null,
+    string? MessageId = null);
 public record RevokeMessageRequest(string ChatJid, string MessageId, bool FromMe = true, string? SessionId = null);
 public record ForwardMessageRequest(string ToJid, string Text, string? SessionId = null);
 public record SendTypingRequest(string ChatJid, bool IsTyping = true, string? SessionId = null);
@@ -909,5 +1064,8 @@ public record WhatsAppMessage(
     string? QuotedFrom = null,
     string? QuotedText = null,
     string? QuotedType = null,
-    string? Status = null);
+    string? Status = null,
+    // Whisper transcript for audio messages, filled in shortly after ingest (task 869ejuycr).
+    // Null until transcription completes (or for non-audio messages).
+    string? Transcript = null);
 public record WhatsAppContact(string Id, string Name, string Number);

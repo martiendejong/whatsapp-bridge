@@ -184,6 +184,8 @@ Beyond the core send/read endpoints above, the full API surface (all under `/api
 | `POST /getGroupInviteLink` | Body: `{ "groupJid" }`. Returns the invite link. |
 | `POST /updateGroupSubject` | Rename a group. Body: `{ "groupJid", "subject" }`. |
 | `GET /messageStatus?messageId=xxx` | Delivery/read status for a previously sent message. |
+| `GET /contactNames` | All contact display names known to the bridge: `[{ jid, phone, name, customName }]`. Effective display name = `customName` > `name`. |
+| `POST /setContactName` | Set (or clear, with empty/absent `name`) your display-name override for a contact. Body: `{ "jid": "31612345678", "name": "Piet" }` (bare number or full JID). The override wins over WhatsApp-provided names everywhere the bridge shows names, including the web messages page. |
 
 ## Error Handling
 
@@ -408,6 +410,10 @@ curl -X GET "https://whatsapp.wreckingball.ai/api/wa/getMessages?chatId=31612345
 - **GitHub Issues**: https://github.com/martiendejong/whatsappbridge/issues
 
 ## Changelog
+
+### 2026-09-07
+
+- Sender display names: inbound messages now record the sender's WhatsApp push name; `store/messages` returns `senderName`/`senderPhone`. New `GET /contactNames` and `POST /setContactName` endpoints let API clients read and override contact display names.
 
 ### 2026-07-23
 - Synced this guide with the current API surface: added the 13 endpoints shipped since the original release (history sync, media download, revoke/forward, typing/presence, full group management, delivery status)

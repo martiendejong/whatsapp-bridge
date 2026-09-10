@@ -4,13 +4,15 @@ using System.Collections.Concurrent;
 using WhatsAppBridge.API.Controllers;
 using WhatsAppBridge.API.Data;
 using WhatsAppBridge.API.Models;
+using WhatsAppBridge.API.Services.Engines;
 
 namespace WhatsAppBridge.API.Services;
 
 /// <summary>
-/// Manages per-user WhatsApp sessions using Dawa (C# native client).
-/// Replaces the former Node.js/Baileys HTTP bridge.
-/// Registered as Singleton — holds long-lived WhatsAppClient instances.
+/// Manages per-user WhatsApp sessions through a pluggable engine: Dawa (C# native client,
+/// the default) or Baileys (Node.js sidecar). The admin-selected engine (EngineSettingsService)
+/// is applied whenever a session (re)connects.
+/// Registered as Singleton — holds long-lived engine instances.
 /// </summary>
 public class WhatsAppBridgeService : IAsyncDisposable
 {
@@ -19,10 +21,13 @@ public class WhatsAppBridgeService : IAsyncDisposable
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<WhatsAppBridgeService> _logger;
     private readonly TaskIntakeForwarder _taskIntake;
+    private readonly WhisperTranscriptionService _whisper;
     private readonly InboundWebhookForwarder _inboundWebhook;
+    private readonly CoachOsIntakeForwarder _coachOsIntake;
+    private readonly EngineSettingsService _engineSettings;
 
-    // One Dawa client per sessionId
-    private readonly ConcurrentDictionary<string, WhatsAppClient> _clients = new();
+    // One engine per sessionId
+    private readonly ConcurrentDictionary<string, IWhatsAppEngine> _clients = new();
 
     // In-memory message store: key = "{sessionId}:{remoteJid}", value = ordered messages (newest last)
     private readonly ConcurrentDictionary<string, List<WhatsAppMessage>> _messageStore = new();
@@ -34,20 +39,77 @@ public class WhatsAppBridgeService : IAsyncDisposable
         ILoggerFactory loggerFactory,
         ILogger<WhatsAppBridgeService> logger,
         TaskIntakeForwarder taskIntake,
-        InboundWebhookForwarder inboundWebhook)
+        WhisperTranscriptionService whisper,
+        InboundWebhookForwarder inboundWebhook,
+        CoachOsIntakeForwarder coachOsIntake,
+        EngineSettingsService engineSettings)
     {
         _scopeFactory = scopeFactory;
         _configuration = configuration;
         _loggerFactory = loggerFactory;
         _logger = logger;
         _taskIntake = taskIntake;
+        _whisper = whisper;
         _inboundWebhook = inboundWebhook;
+        _coachOsIntake = coachOsIntake;
+        _engineSettings = engineSettings;
+    }
+
+    // ─── Engine selection ─────────────────────────────────────────────────────
+
+    private string GetSessionsRoot() => _configuration["WhatsApp:SessionsDirectory"]
+        ?? Path.Combine(AppContext.BaseDirectory, "whatsapp-sessions");
+
+    private async Task<IWhatsAppEngine> CreateEngineAsync(string sessionDir)
+    {
+        var engine = await _engineSettings.GetEngineAsync();
+        return engine == EngineSettingsService.BaileysEngine
+            ? new BaileysEngine(sessionDir, _configuration, _loggerFactory)
+            : new DawaEngine(sessionDir, _loggerFactory);
+    }
+
+    /// <summary>
+    /// Whether the given engine has saved credentials for this session directory.
+    /// Dawa and Baileys store creds in different (incompatible) formats, so a session
+    /// switching engines needs a fresh QR pairing on the new engine.
+    /// </summary>
+    public static bool EngineHasSavedSession(string engine, string sessionDir) =>
+        engine == EngineSettingsService.BaileysEngine
+            ? File.Exists(Path.Combine(sessionDir, "baileys-auth", "creds.json"))
+            : File.Exists(Path.Combine(sessionDir, "creds.json"));
+
+    /// <summary>Live engine info per active session — used by the admin engine endpoint.</summary>
+    public List<object> GetActiveSessionEngines() =>
+        _clients.Select(kv => (object)new
+        {
+            sessionId = kv.Key,
+            engine = kv.Value.EngineName,
+            isConnected = kv.Value.IsConnected,
+        }).ToList();
+
+    /// <summary>
+    /// Disconnects every active session and restores each with the currently-selected engine.
+    /// Sessions without saved creds for the new engine end up "disconnected" and need a QR
+    /// re-pair from the sessions page.
+    /// </summary>
+    public async Task<int> RestartAllSessionsAsync()
+    {
+        var sessionIds = _clients.Keys.ToList();
+        foreach (var sessionId in sessionIds)
+            await DisconnectSessionAsync(sessionId);
+        var restored = 0;
+        foreach (var sessionId in sessionIds)
+        {
+            if (await RestoreSessionAsync(sessionId)) restored++;
+        }
+        return restored;
     }
 
     // ─── Session lifecycle ─────────────────────────────────────────────────────
 
     /// <summary>
-    /// Creates a Dawa client for the session and waits up to 30s for a QR code.
+    /// Creates an engine (per the admin-selected engine setting) for the session and waits up
+    /// to 30s for a QR code.
     /// Returns the QR string on success, null if it times out (QR will arrive later via event).
     /// </summary>
     public async Task<string?> InitializeSessionAsync(string sessionId)
@@ -56,12 +118,11 @@ public class WhatsAppBridgeService : IAsyncDisposable
         if (_clients.TryRemove(sessionId, out var existing))
             await existing.DisposeAsync();
 
-        var sessionsRoot = _configuration["WhatsApp:SessionsDirectory"]
-            ?? Path.Combine(AppContext.BaseDirectory, "whatsapp-sessions");
-        var sessionDir = Path.Combine(sessionsRoot, sessionId);
+        var sessionDir = Path.Combine(GetSessionsRoot(), sessionId);
 
-        var client = WhatsAppClient.Create(sessionDir, _loggerFactory);
+        var client = await CreateEngineAsync(sessionDir);
         _clients[sessionId] = client;
+        _ = UpdateSessionAsync(sessionId, s => s.Engine = client.EngineName);
 
         // Load persisted messages from previous sessions
         LoadPersistedMessages(sessionId);
@@ -132,22 +193,32 @@ public class WhatsAppBridgeService : IAsyncDisposable
 
     /// <summary>
     /// Silently restores a saved session on startup without waiting for QR.
-    /// Only works if creds.json exists in the session directory.
+    /// Only works if the currently-selected engine has saved creds in the session directory
+    /// (creds.json for Dawa, baileys-auth/creds.json for Baileys).
+    /// Returns true when a restore was actually started.
     /// </summary>
-    public Task RestoreSessionAsync(string sessionId)
+    public async Task<bool> RestoreSessionAsync(string sessionId)
     {
-        var sessionsRoot = _configuration["WhatsApp:SessionsDirectory"]
-            ?? Path.Combine(AppContext.BaseDirectory, "whatsapp-sessions");
-        var sessionDir = Path.Combine(sessionsRoot, sessionId);
+        var sessionDir = Path.Combine(GetSessionsRoot(), sessionId);
 
         if (!Directory.Exists(sessionDir))
-            return Task.CompletedTask;
+            return false;
 
         if (_clients.ContainsKey(sessionId))
-            return Task.CompletedTask;
+            return false;
 
-        var client = WhatsAppClient.Create(sessionDir, _loggerFactory);
+        var engineName = await _engineSettings.GetEngineAsync();
+        if (!EngineHasSavedSession(engineName, sessionDir))
+        {
+            _logger.LogInformation(
+                "Session {SessionId} has no saved creds for engine '{Engine}' — skipping restore (QR re-pair needed)",
+                sessionId, engineName);
+            return false;
+        }
+
+        var client = await CreateEngineAsync(sessionDir);
         _clients[sessionId] = client;
+        _ = UpdateSessionAsync(sessionId, s => s.Engine = client.EngineName);
 
         // Load persisted messages from previous sessions
         LoadPersistedMessages(sessionId);
@@ -183,7 +254,7 @@ public class WhatsAppBridgeService : IAsyncDisposable
 
         // Fire and forget — reconnects in background
         _ = client.ConnectAsync(CancellationToken.None);
-        return Task.CompletedTask;
+        return true;
     }
 
     public async Task<bool> DisconnectSessionAsync(string sessionId)
@@ -246,6 +317,44 @@ public class WhatsAppBridgeService : IAsyncDisposable
             var idx = msgs.FindIndex(m => m.Id == messageId);
             if (idx >= 0) msgs[idx] = msgs[idx] with { Status = status.ToString() };
         }
+    }
+
+    public async Task<object?> SendReplyAsync(string sessionId, string to, string body, string quotedMsgId, string quotedFromJid)
+    {
+        var client = GetConnectedClient(sessionId);
+        (string messageId, string jid) sent;
+        try
+        {
+            sent = await client.SendReplyAsync(to, body, quotedMsgId, quotedFromJid, CancellationToken.None);
+        }
+        catch (Exception ex) when (ex is not WhatsAppServiceException)
+        {
+            _logger.LogError(ex, "SendReplyAsync failed for session {SessionId} to {To}", sessionId, to);
+            throw new WhatsAppServiceException(WhatsAppError.MessageFailed(ex.Message), ex);
+        }
+
+        var key = $"{sessionId}:{sent.jid}";
+        var storedMessage = new WhatsAppMessage(
+            Id: sent.messageId,
+            From: "me",
+            To: sent.jid,
+            Body: body,
+            Timestamp: DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            Status: Dawa.Messages.MessageStatus.Sent.ToString());
+        var list = _messageStore.GetOrAdd(key, _ => new List<WhatsAppMessage>());
+        lock (list)
+        {
+            list.Add(storedMessage);
+            if (list.Count > MaxMessagesPerChat) list.RemoveAt(0);
+        }
+
+        // Mirror SendMessageAsync (task 869ecbkv7): the send path bypasses the StoreMessage
+        // funnel, so persist the outgoing reply into the durable Messages table too.
+        PersistMessageToDatabase(sessionId, sent.jid, sent.messageId, fromMe: true,
+            sender: "me", body: body, type: "text", mediaUrl: null, mediaKey: null, mimeType: null,
+            timestamp: storedMessage.Timestamp, isHistory: false);
+
+        return new { success = true, messageId = sent.messageId };
     }
 
     public async Task<byte[]?> DownloadMediaAsync(string sessionId, string mediaUrl, string mediaKeyBase64, string mimeType)
@@ -753,6 +862,13 @@ public class WhatsAppBridgeService : IAsyncDisposable
             if (!isHistory && !msg.FromMe)
                 _inboundWebhook.Forward(sessionId, msg);
 
+            // CoachOS service-route intake (task 1067): only for senders NOT on the outbound
+            // guardrail allow-list (allow-listed team members keep the existing route and get
+            // no CoachOS chat — checked inside DispatchCoachOsIntake). Same gating/safety
+            // contract as the two hooks above — live inbound only, fire-and-forget, never throws.
+            if (!isHistory && !msg.FromMe && _coachOsIntake.IsEnabled)
+                DispatchCoachOsIntake(sessionId, msg);
+
             if (isHistory)
             {
                 // Insert in chronological order (history messages may arrive out of order)
@@ -783,7 +899,8 @@ public class WhatsAppBridgeService : IAsyncDisposable
         // must never block or crash the inbound pipeline.
         PersistMessageToDatabase(sessionId, msg.RemoteJid, msg.Id, msg.FromMe,
             msg.FromMe ? "me" : msg.From, msg.Text ?? "", msg.Type.ToString().ToLowerInvariant(),
-            msg.MediaUrl, msg.MediaKey, msg.MimeType, msg.Timestamp, isHistory);
+            msg.MediaUrl, msg.MediaKey, msg.MimeType, msg.Timestamp, isHistory,
+            msg.FromMe ? null : msg.PushName);
     }
 
     /// <summary>
@@ -794,7 +911,7 @@ public class WhatsAppBridgeService : IAsyncDisposable
     /// </summary>
     private void PersistMessageToDatabase(string sessionId, string chatJid, string messageId,
         bool fromMe, string sender, string body, string type, string? mediaUrl, string? mediaKey,
-        string? mimeType, long timestamp, bool isHistory)
+        string? mimeType, long timestamp, bool isHistory, string? pushName = null)
     {
         _ = Task.Run(async () =>
         {
@@ -813,17 +930,125 @@ public class WhatsAppBridgeService : IAsyncDisposable
                 var receivedAt = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss.fffffff");
                 await db.Database.ExecuteSqlInterpolatedAsync($@"
                     INSERT OR IGNORE INTO Messages
-                        (SessionId, UserId, ChatJid, MessageId, FromMe, Sender, Body, Type, MediaUrl, MediaKey, MimeType, Timestamp, ReceivedAt, IsHistory)
+                        (SessionId, UserId, ChatJid, MessageId, FromMe, Sender, Body, Type, MediaUrl, MediaKey, MimeType, Timestamp, ReceivedAt, IsHistory, PushName)
                     VALUES
                         ({sessionId}, {userId}, {chatJid}, {messageId}, {(fromMe ? 1 : 0)}, {sender}, {body}, {type},
-                         {mediaUrl}, {mediaKey}, {mimeType}, {timestamp}, {receivedAt}, {(isHistory ? 1 : 0)})");
+                         {mediaUrl}, {mediaKey}, {mimeType}, {timestamp}, {receivedAt}, {(isHistory ? 1 : 0)}, {pushName})");
             }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "Durable message persist failed for [{MessageId}] in {Chat} (message is still in the in-memory store)", messageId, chatJid);
             }
+
+            // Media enrichment (task 869ejuycr): eagerly decrypt + (for audio) transcribe via
+            // Whisper. Runs after the INSERT above so the row exists to UPDATE. Sequenced inside
+            // this same fire-and-forget task (not a separate Task.Run) to avoid a race where the
+            // UPDATE below could otherwise land before the INSERT commits. Fully self-contained
+            // try/catch — a failure here must never surface back into the inbound pipeline.
+            if (!string.IsNullOrEmpty(mediaUrl) && !string.IsNullOrEmpty(mediaKey))
+            {
+                await EnrichMediaAsync(sessionId, chatJid, messageId, type, mediaUrl, mediaKey, mimeType);
+            }
         });
     }
+
+    /// <summary>
+    /// Decrypts a message's media eagerly and caches the plaintext on local disk so it — not
+    /// just the encrypted CDN link + key — is immediately available to any reader (task
+    /// 869ejuycr). For audio messages, additionally transcribes via Whisper and writes the
+    /// transcript both to SQLite and into the in-memory store (getMessages, the primary API
+    /// surface jengo-agi's poller reads, serves from memory — not SQLite). Never throws.
+    /// </summary>
+    private async Task EnrichMediaAsync(string sessionId, string chatJid, string messageId,
+        string type, string mediaUrl, string mediaKey, string? mimeType)
+    {
+        try
+        {
+            var bytes = await WhatsAppClient.DownloadMediaAsync(mediaUrl, mediaKey, mimeType ?? "application/octet-stream");
+            if (bytes == null || bytes.Length == 0)
+            {
+                _logger.LogInformation("Media enrichment: decrypt returned no bytes for [{MessageId}] (CDN link may have expired)", messageId);
+                return;
+            }
+
+            string? localPath = null;
+            try
+            {
+                var mediaRoot = _configuration["WhatsApp:MediaStorageDirectory"];
+                if (string.IsNullOrWhiteSpace(mediaRoot))
+                    mediaRoot = Path.Combine(AppContext.BaseDirectory, "media-store");
+                var dir = Path.Combine(mediaRoot, sessionId);
+                Directory.CreateDirectory(dir);
+                var safeId = new string(messageId.Where(c => char.IsLetterOrDigit(c) || c is '-' or '_').ToArray());
+                if (string.IsNullOrEmpty(safeId)) safeId = Guid.NewGuid().ToString("N");
+                localPath = Path.Combine(dir, safeId + ExtensionForMime(mimeType));
+                await File.WriteAllBytesAsync(localPath, bytes);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Media enrichment: failed to cache decrypted media for [{MessageId}] — on-demand decrypt endpoints remain available as a fallback", messageId);
+                localPath = null;
+            }
+
+            string? transcript = null;
+            if (string.Equals(type, "audio", StringComparison.OrdinalIgnoreCase))
+            {
+                if (await _whisper.IsEnabledAsync())
+                    transcript = await _whisper.TranscribeAsync(bytes, mimeType);
+                else
+                    _logger.LogDebug("Whisper not configured — skipping transcription for [{MessageId}]", messageId);
+            }
+
+            if (localPath == null && transcript == null) return;
+
+            using var scope = _scopeFactory.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            await db.Database.ExecuteSqlInterpolatedAsync($@"
+                UPDATE Messages SET
+                    LocalMediaPath = COALESCE({localPath}, LocalMediaPath),
+                    Transcript = COALESCE({transcript}, Transcript)
+                WHERE SessionId = {sessionId} AND MessageId = {messageId}");
+
+            if (transcript != null)
+                UpdateInMemoryTranscript(sessionId, chatJid, messageId, transcript);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Media enrichment failed for [{MessageId}]", messageId);
+        }
+    }
+
+    /// <summary>
+    /// Reflects a just-completed transcript into the capped in-memory message store — the store
+    /// getMessages() serves from (jengo-agi's poller reads this API, not the SQLite durable log).
+    /// </summary>
+    private void UpdateInMemoryTranscript(string sessionId, string chatJid, string messageId, string transcript)
+    {
+        var key = $"{sessionId}:{chatJid}";
+        if (!_messageStore.TryGetValue(key, out var list)) return;
+        lock (list)
+        {
+            var idx = list.FindIndex(m => m.Id == messageId);
+            if (idx >= 0) list[idx] = list[idx] with { Transcript = transcript };
+        }
+    }
+
+    private static string ExtensionForMime(string? mimeType) => (mimeType ?? "").Split(';')[0].Trim() switch
+    {
+        "audio/ogg" => ".ogg",
+        "audio/opus" => ".opus",
+        "audio/mp4" => ".m4a",
+        "audio/mpeg" => ".mp3",
+        "audio/wav" or "audio/x-wav" => ".wav",
+        "audio/webm" => ".webm",
+        "image/jpeg" => ".jpg",
+        "image/png" => ".png",
+        "image/webp" => ".webp",
+        "image/gif" => ".gif",
+        "video/mp4" => ".mp4",
+        "application/pdf" => ".pdf",
+        _ => "",
+    };
 
     /// <summary>
     /// Fire-and-forget dispatch of an inbound message to the task-intake forwarder.
@@ -854,6 +1079,59 @@ public class WhatsAppBridgeService : IAsyncDisposable
         });
     }
 
+    /// <summary>
+    /// Fire-and-forget dispatch of an inbound message to the CoachOS service-route intake (task
+    /// 1067). Skips allow-listed senders entirely (they keep the existing route and never get a
+    /// CoachOS chat), records the inbound contact for the guardrail's reply-window check, asks
+    /// coachingplatform for an AI reply, and — only if the guardrail's own
+    /// OutboundGuardrailService.CheckAsync (endpoint CoachOsReplyEndpoint) allows it — sends the
+    /// reply back via the existing SendMessageAsync path. Any error is swallowed here — this
+    /// must never affect the inbound pipeline.
+    /// </summary>
+    private void DispatchCoachOsIntake(string sessionId, Dawa.Messages.IncomingMessage msg)
+    {
+        var replyTo = msg.RemoteJid;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                using var scope = _scopeFactory.CreateScope();
+                var guardrail = scope.ServiceProvider.GetRequiredService<OutboundGuardrailService>();
+
+                // Allow-listed team members follow the existing route — no CoachOS chat for them.
+                if (guardrail.IsAllowListed(msg.From))
+                    return;
+
+                if (string.IsNullOrWhiteSpace(msg.Text))
+                    return; // nothing to intake (media-only messages are not handled by this route yet)
+
+                // Record this genuine inbound contact BEFORE calling out to coachingplatform —
+                // the guardrail's reply-window check reads this row, and recording it first means
+                // even a slow/failed AI call still leaves an accurate "we saw this person" trail.
+                await guardrail.RecordInboundContactAsync(msg.From);
+
+                var replyText = await _coachOsIntake.GetAiReplyAsync(msg.From, msg.PushName, msg.Text);
+                if (string.IsNullOrWhiteSpace(replyText))
+                    return;
+
+                var (allowed, reason) = await guardrail.CheckAsync(
+                    OutboundGuardrailService.CoachOsReplyEndpoint, msg.From, replyText, userId: null);
+                if (!allowed)
+                {
+                    _logger.LogWarning("CoachOsIntake: reply to {From} blocked by guardrail: {Reason}", msg.From, reason);
+                    return;
+                }
+
+                await SendMessageAsync(sessionId, replyTo, replyText);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "CoachOsIntake dispatch error for session {Sid}", sessionId);
+            }
+        });
+    }
+
     public bool IsSessionConnected(string sessionId)
         => _clients.TryGetValue(sessionId, out var client) && client.IsConnected;
 
@@ -863,16 +1141,17 @@ public class WhatsAppBridgeService : IAsyncDisposable
             return new { error = "session not in _clients" };
         return new
         {
+            engine = client.EngineName,
             isConnected = client.IsConnected,
             myJid = client.MyJid,
-            cacheDebugInfo = client.GetCacheDebugInfo(),
+            cacheDebugInfo = client.GetDebugInfo(),
         };
     }
 
-    public bool TryGetClient(string sessionId, out WhatsAppClient? client)
+    public bool TryGetClient(string sessionId, out IWhatsAppEngine? client)
         => _clients.TryGetValue(sessionId, out client);
 
-    private WhatsAppClient GetConnectedClient(string sessionId)
+    private IWhatsAppEngine GetConnectedClient(string sessionId)
     {
         if (!_clients.TryGetValue(sessionId, out var client))
             throw new WhatsAppServiceException(WhatsAppError.SessionNotFound(sessionId));
