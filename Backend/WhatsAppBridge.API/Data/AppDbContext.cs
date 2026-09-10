@@ -18,6 +18,7 @@ public class AppDbContext : DbContext
     public DbSet<BlockedOutboundMessage> BlockedOutboundMessages { get; set; }
     public DbSet<OutboundSendLog> OutboundSendLogs { get; set; }
     public DbSet<InboundContact> InboundContacts { get; set; }
+    public DbSet<ApiAuditLog> ApiAuditLogs { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -85,6 +86,25 @@ public class AppDbContext : DbContext
         {
             entity.HasIndex(e => e.Sender).IsUnique();
             entity.Property(e => e.Sender).HasMaxLength(200);
+        });
+
+        modelBuilder.Entity<ApiAuditLog>(entity =>
+        {
+            // The three filter dimensions Martien asked for, each indexed with AtUtc because
+            // every query is "this number / this event type, newest first".
+            entity.HasIndex(e => e.AtUtc);
+            entity.HasIndex(e => new { e.Phone, e.AtUtc });
+            entity.HasIndex(e => new { e.EventType, e.AtUtc });
+            entity.HasIndex(e => new { e.ApiConnectionId, e.AtUtc });
+            entity.HasIndex(e => e.UserId);
+            entity.Property(e => e.Method).HasMaxLength(10);
+            entity.Property(e => e.Path).HasMaxLength(400);
+            entity.Property(e => e.EventType).HasMaxLength(80);
+            entity.Property(e => e.Phone).HasMaxLength(40);
+            entity.Property(e => e.AuthScheme).HasMaxLength(20);
+            entity.Property(e => e.Outcome).HasMaxLength(20);
+            entity.Property(e => e.ApiConnectionName).HasMaxLength(200);
+            entity.Property(e => e.ClientIp).HasMaxLength(64);
         });
     }
 }

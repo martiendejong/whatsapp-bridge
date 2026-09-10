@@ -87,6 +87,22 @@ export const whatsapp = {
     }),
 };
 
+export interface AuditFilters {
+  phone?: string;
+  eventType?: string;
+  outcome?: string;
+  apiConnectionId?: number;
+  page?: number;
+  pageSize?: number;
+}
+
+export const audit = {
+  list: (filters: AuditFilters = {}) => api.get('/api/wa/audit', { params: filters }),
+  phones: () => api.get('/api/wa/audit/phones'),
+  eventTypes: () => api.get('/api/wa/audit/event-types'),
+  detail: (id: number) => api.get(`/api/wa/audit/${id}`),
+};
+
 export const admin = {
   getEngine: () => api.get('/api/admin/engine'),
   setEngine: (engine: string, restartSessions: boolean) =>
