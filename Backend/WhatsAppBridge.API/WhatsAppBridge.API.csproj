@@ -9,6 +9,14 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- Pure decision helpers (category matching, window arithmetic) are internal rather than
+         public: they are implementation detail of the routing policy, but they are also the
+         parts most worth testing directly, since a boundary bug there is invisible until it
+         wakes someone at 3am. -->
+    <InternalsVisibleTo Include="WhatsAppBridge.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="BCrypt.Net-Next" Version="4.1.0" />
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="8.0.0" />
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="8.0.0" />

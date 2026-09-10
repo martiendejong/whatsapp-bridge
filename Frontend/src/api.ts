@@ -103,6 +103,31 @@ export const audit = {
   detail: (id: number) => api.get(`/api/wa/audit/${id}`),
 };
 
+export interface RoutingContact {
+  id: number;
+  phone: string;
+  name: string;
+  alias: string | null;
+  enabled: boolean;
+  timeZoneId: string;
+  windowStartHour: number;
+  windowEndHour: number;
+  categories: string;
+  fallbackPhone: string | null;
+  updatedAtUtc: string;
+  openNow: boolean;
+}
+
+export const routing = {
+  list: () => api.get<RoutingContact[]>('/api/wa/routing'),
+  save: (contact: Omit<RoutingContact, 'id' | 'updatedAtUtc' | 'openNow'>) =>
+    api.post('/api/wa/routing', contact),
+  remove: (id: number) => api.delete(`/api/wa/routing/${id}`),
+  preview: (to: string, category?: string) =>
+    api.get('/api/wa/routing/preview', { params: { to, category: category || undefined } }),
+  timezones: () => api.get<string[]>('/api/wa/routing/timezones'),
+};
+
 export const admin = {
   getEngine: () => api.get('/api/admin/engine'),
   setEngine: (engine: string, restartSessions: boolean) =>

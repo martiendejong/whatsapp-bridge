@@ -50,19 +50,23 @@ Authorization: Bearer YOUR_API_TOKEN
 {
   "to": "31612345678",
   "body": "Hello from AI! This is an automated message.",
-  "sessionId": null
+  "sessionId": null,
+  "category": "approval"
 }
 ```
 
 **Parameters:**
-- `to` (string, required): bare phone number, international format, no `+`
+- `to` (string, required): bare phone number, international format, no `+`. May also be a routing alias (`martien`) if one is configured.
 - `body` (string, required): message text content
 - `sessionId` (string, optional): target a specific connected WhatsApp session/number; omitted = your most recently connected session
+- `category` (string, optional, default `other`): what kind of message this is — see [Outbound routing](#outbound-routing). Getting this right is what decides whether a night-time deploy notice reaches the person on call or wakes someone who does not want it.
 
 **Response:**
 ```json
-{ "success": true }
+{ "success": true, "routedTo": "31612345678", "routing": null }
 ```
+
+`routedTo` is who actually received it, which is not always `to`: outside a recipient's window the message is redirected to their fallback, and `routing` then explains why. A 403 with `"blocked": true` means no route existed and nothing was sent.
 
 ### 2. Send Media Message
 
@@ -203,7 +207,36 @@ All endpoints return standard HTTP status codes:
 
 Other endpoints on failure return `{ "error": "..." }` without `errorCode`/`details`.
 
+## Outbound routing
+
+Before anything is sent, the bridge decides who should actually receive it. Three things go into that: who you addressed, what `category` you declared, and what time it is **in the recipient's own timezone**. The policy lives in the bridge rather than in each caller, because there are nine different senders and five of them are scripts that only know how to POST.
+
+Categories in use today:
+
+| category | meaning |
+|---|---|
+| `approval` | something is waiting on a human decision |
+| `deploy:valsuani` | a deployment to the Claude Valsuani server |
+| `serverdown` | a production domain is unreachable |
+| `reply` | an answer to someone who just messaged us |
+| `other` | the default when you declare nothing |
+
+A category may be hierarchical: a contact who accepts `deploy` receives `deploy:valsuani`, but one who accepts only `deploy:valsuani` does not receive `deploy:bugatti`.
+
+Four possible outcomes:
+
+- **Allowed** · the recipient accepts this category and is inside their window. `routedTo` equals `to`.
+- **Redirected** · they are outside their window or muted, and have a fallback. `routedTo` is the fallback and `routing` says why. The message is not lost.
+- **Suppressed** · the fallback already received this exact message within ten minutes, so it is not delivered twice. Returns 403.
+- **Blocked** · no route. Returns 403 with `"blocked": true`. Nothing was sent, and the attempt is visible under `GET /api/wa/blockedOutbound` and in the audit log.
+
+Numbers with no contact row are never messaged on your initiative. Replying to someone who messaged us first is exempt: that path is governed by the reply window, not by this policy.
+
+Manage the policy at `GET/POST /api/wa/routing`, or in the bridge admin under Routing. `GET /api/wa/routing/preview?to=…&category=…` answers "who would get this right now" without sending anything — worth calling once when wiring up a new sender.
+
 ## Rate Limiting
+
+Routing decides *who*; the caps below decide *how often*. A redirect buys no exemption from them.
 
 The bridge itself does not currently enforce a request rate limit. WhatsApp's own servers apply anti-spam heuristics to accounts that send too fast or too much (especially to numbers that haven't messaged you first) — space out bulk sends (e.g. one message per second) and expect occasional throttling from WhatsApp's side, not from this API.
 
@@ -410,6 +443,11 @@ curl -X GET "https://whatsapp.wreckingball.ai/api/wa/getMessages?chatId=31612345
 - **GitHub Issues**: https://github.com/martiendejong/whatsappbridge/issues
 
 ## Changelog
+
+### 2026-09-10
+
+- Outbound routing: `sendMessage`, `sendMedia` and `forwardMessage` accept an optional `category`, and the response reports `routedTo`/`routing`. Recipients have their own timezone, window and accepted categories; outside a window a message goes to the recipient's fallback instead of being lost. Managed at `/api/wa/routing`, with a `preview` endpoint that dry-runs the decision.
+- The session-level send endpoints (`/api/whatsapp/sessions/{id}/send` and `/send-media`) now pass through the same guardrail as the API endpoints. They previously bypassed it.
 
 ### 2026-09-07
 

@@ -16,4 +16,17 @@ public class OutboundSendLog
     public string Recipient { get; set; } = string.Empty;
 
     public DateTime SentAtUtc { get; set; }
+
+    /// <summary>
+    /// Message category the caller declared ("approval", "deploy:valsuani", ...), or null for
+    /// callers predating categories. Null is treated as "other" by the routing policy.
+    /// </summary>
+    public string? Category { get; set; }
+
+    /// <summary>
+    /// Stable hash of the message text. Exists so a redirect can tell "Martien already got
+    /// exactly this notice a minute ago because the caller fanned out to both of us" apart
+    /// from "this is a genuine second alert", without storing the text twice.
+    /// </summary>
+    public string? BodyHash { get; set; }
 }

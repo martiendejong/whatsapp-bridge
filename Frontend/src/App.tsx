@@ -9,6 +9,7 @@ import WhatsAppSessions from './pages/WhatsAppSessions';
 import AccountSettings from './pages/AccountSettings';
 import Messages from './pages/Messages';
 import AuditLog from './pages/AuditLog';
+import Routing from './pages/Routing';
 import Navbar from './components/Navbar';
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
@@ -82,6 +83,14 @@ function AppRoutes() {
           element={
             <PrivateRoute>
               <AuditLog />
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/routing"
+          element={
+            <PrivateRoute>
+              <Routing />
             </PrivateRoute>
           }
         />

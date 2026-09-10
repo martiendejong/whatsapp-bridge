@@ -19,6 +19,7 @@ public class AppDbContext : DbContext
     public DbSet<OutboundSendLog> OutboundSendLogs { get; set; }
     public DbSet<InboundContact> InboundContacts { get; set; }
     public DbSet<ApiAuditLog> ApiAuditLogs { get; set; }
+    public DbSet<OutboundContact> OutboundContacts { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -79,7 +80,24 @@ public class AppDbContext : DbContext
         {
             entity.HasIndex(e => new { e.Recipient, e.SentAtUtc });
             entity.HasIndex(e => e.SentAtUtc);
+            // The redirect dedupe asks "did the fallback already get this exact message" — a
+            // three-column lookup, so it gets its own index rather than riding on Recipient.
+            entity.HasIndex(e => new { e.Recipient, e.BodyHash, e.SentAtUtc });
             entity.Property(e => e.Recipient).HasMaxLength(200);
+            entity.Property(e => e.Category).HasMaxLength(60);
+            entity.Property(e => e.BodyHash).HasMaxLength(32);
+        });
+
+        modelBuilder.Entity<OutboundContact>(entity =>
+        {
+            entity.HasIndex(e => e.Phone).IsUnique();
+            entity.HasIndex(e => e.Alias);
+            entity.Property(e => e.Phone).HasMaxLength(40);
+            entity.Property(e => e.Alias).HasMaxLength(60);
+            entity.Property(e => e.Name).HasMaxLength(200);
+            entity.Property(e => e.TimeZoneId).HasMaxLength(80);
+            entity.Property(e => e.Categories).HasMaxLength(400);
+            entity.Property(e => e.FallbackPhone).HasMaxLength(40);
         });
 
         modelBuilder.Entity<InboundContact>(entity =>
