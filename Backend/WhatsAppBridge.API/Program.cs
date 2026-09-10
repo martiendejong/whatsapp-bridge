@@ -124,14 +124,22 @@ if (app.Environment.IsDevelopment())
 
 app.UseCors("AllowFrontend");
 
+// BEFORE authentication and authorization, and the position is the point. The audit row is
+// written in this middleware's `finally`, which runs after everything downstream — including
+// the auth middlewares — has finished, so the row still sees the authenticated identity and the
+// final status code. What sitting upstream buys is the refusals: when this middleware sat after
+// UseAuthorization, a request rejected with 401/403 never reached it at all, so the log recorded
+// every successful call and none of the credential-guessing — the one traffic class an audit
+// log exists to catch. (After UseCors on purpose: a short-circuited CORS preflight is browser
+// plumbing, not API traffic worth a row.)
+//
+// Deliberately middleware rather than per-controller: only 3 of the 20+ endpoints invoke the
+// outbound guardrail, and an audit trail wired in the same per-controller way would inherit
+// that same gap on every endpoint added later.
+app.UseMiddleware<WhatsAppBridge.API.Middleware.ApiAuditMiddleware>();
+
 app.UseAuthentication();
 app.UseAuthorization();
-
-// After authentication so the audit row knows WHICH API key called, and wrapping everything
-// below so it sees the final status code. Deliberately middleware rather than per-controller:
-// only 3 of the 20+ endpoints invoke the outbound guardrail, and an audit trail wired in the
-// same per-controller way would inherit that same gap on every endpoint added later.
-app.UseMiddleware<WhatsAppBridge.API.Middleware.ApiAuditMiddleware>();
 
 app.MapControllers();
 
@@ -262,9 +270,24 @@ using (var scope = app.Services.CreateScope())
     // redirect cannot tell a duplicate fan-out from a genuine repeat alert.
     AddColumnIfMissing(db, "OutboundSendLogs", "Category", "TEXT NULL");
     AddColumnIfMissing(db, "OutboundSendLogs", "BodyHash", "TEXT NULL");
+    // DEFAULT 1, deliberately backwards: rows from before this column existed were
+    // overwhelmingly real deliveries, and reading them as unconfirmed attempts would switch the
+    // duplicate suppression off for its whole lookback window on deploy day. New rows are
+    // written 0 by the guardrail and flipped to 1 only after the send actually succeeds.
+    AddColumnIfMissing(db, "OutboundSendLogs", "Delivered", "INTEGER NOT NULL DEFAULT 1");
     db.Database.ExecuteSqlRaw(
         "CREATE INDEX IF NOT EXISTS IX_OutboundSendLogs_Recipient_BodyHash_SentAtUtc " +
         "ON OutboundSendLogs (Recipient, BodyHash, SentAtUtc);");
+
+    // Single-row bookkeeping the tables above cannot express: "has X ever happened on this
+    // database". First (and so far only) use is the routing seed marker below.
+    db.Database.ExecuteSqlRaw("""
+        CREATE TABLE IF NOT EXISTS AppFlags (
+            Name TEXT NOT NULL CONSTRAINT PK_AppFlags PRIMARY KEY,
+            Value TEXT NOT NULL,
+            SetAtUtc TEXT NOT NULL
+        );
+        """);
 
     // Outbound routing policy: who may be messaged, about what, and at what hour in THEIR
     // timezone. Creating the table and filling it changes nothing on its own — the policy is
@@ -288,9 +311,13 @@ using (var scope = app.Services.CreateScope())
         CREATE INDEX IF NOT EXISTS IX_OutboundContacts_Alias ON OutboundContacts (Alias);
         """);
 
-    // Seed the policy once, from config. Only on a genuinely empty table — this must never
-    // resurrect a contact Martien deleted, or overwrite a window he adjusted in the UI. After
-    // the first boot the database is authoritative and this block does nothing.
+    // Seed the policy once, from config — and "once" means once per DATABASE, not "whenever the
+    // table is empty". The emptiness check alone had a trap: deleting every contact in the UI is
+    // the natural way to disarm routing without a deploy, and the next process restart (the
+    // watchdog restarts services routinely) would quietly re-seed the lot and re-arm the policy
+    // Martien had just switched off. So the seed leaves a marker in AppFlags, and an empty table
+    // WITH the marker is respected as a decision. To genuinely re-seed: delete the
+    // 'OutboundRoutingSeeded' row from AppFlags and restart.
     //
     // Wrapped, because everything in here is driven by hand-edited configuration and the failure
     // mode without the wrapper is the worst one available: two entries with the same number
@@ -299,7 +326,7 @@ using (var scope = app.Services.CreateScope())
     // start because of a typo in a contact list is an outage.
     try
     {
-        if (!db.OutboundContacts.Any())
+        if (!db.OutboundContacts.Any() && !AppFlagExists(db, "OutboundRoutingSeeded"))
         {
             var seedSection = app.Configuration.GetSection("OutboundRouting:Seed");
             var seed = seedSection.Get<List<WhatsAppBridge.API.Models.OutboundContact>>() ?? new();
@@ -332,6 +359,35 @@ using (var scope = app.Services.CreateScope())
                     continue;
                 }
 
+                // The same bar RoutingController.Upsert sets. The seed used to skip these checks,
+                // which produced the exact failure Upsert's validation exists to prevent — a
+                // typo'd timezone seeded cleanly and then fell back to UTC at send time, shifting
+                // the contact's whole window by hours with nothing anywhere saying why.
+                try
+                {
+                    TimeZoneInfo.FindSystemTimeZoneById(contact.TimeZoneId);
+                }
+                catch (Exception ex) when (ex is TimeZoneNotFoundException or InvalidTimeZoneException)
+                {
+                    app.Logger.LogError("Skipped routing seed entry '{Name}': unknown TimeZoneId '{Tz}'.",
+                        contact.Name, contact.TimeZoneId);
+                    continue;
+                }
+                if (contact.WindowStartHour is < 0 or > 23 || contact.WindowEndHour is < 1 or > 24)
+                {
+                    app.Logger.LogError(
+                        "Skipped routing seed entry '{Name}': window {Start}-{End} is out of range (start 0-23, end 1-24).",
+                        contact.Name, contact.WindowStartHour, contact.WindowEndHour);
+                    continue;
+                }
+                if (string.IsNullOrWhiteSpace(contact.Categories))
+                {
+                    app.Logger.LogError(
+                        "Skipped routing seed entry '{Name}': Categories is empty. Use '*' or a comma-separated list.",
+                        contact.Name);
+                    continue;
+                }
+
                 contact.Id = 0;
                 contact.Phone = phone;
                 contact.CreatedAtUtc = contact.UpdatedAtUtc = DateTime.UtcNow;
@@ -342,6 +398,10 @@ using (var scope = app.Services.CreateScope())
             if (accepted > 0)
             {
                 db.SaveChanges();
+                // Marker only on a successful seed: a malformed config that bound nothing must
+                // stay retryable, or fixing the typo would do nothing until someone also finds
+                // and deletes the flag.
+                SetAppFlag(db, "OutboundRoutingSeeded", $"{accepted} contacts");
                 app.Logger.LogInformation(
                     "Seeded {Count} outbound routing contacts from configuration. Routing enforcement is {State}.",
                     accepted,
@@ -490,4 +550,38 @@ static void AddColumnIfMissing(WhatsAppBridge.API.Data.AppDbContext db, string t
     using var alter = connection.CreateCommand();
     alter.CommandText = $"ALTER TABLE {table} ADD COLUMN {column} {definition};";
     alter.ExecuteNonQuery();
+}
+
+/// <summary>
+/// Reads a one-time marker from AppFlags. ADO rather than an EF entity: these two helpers are
+/// the only consumers, and a DbSet would put startup bookkeeping in the application model.
+/// </summary>
+static bool AppFlagExists(WhatsAppBridge.API.Data.AppDbContext db, string name)
+{
+    var connection = db.Database.GetDbConnection();
+    if (connection.State != System.Data.ConnectionState.Open) connection.Open();
+
+    using var cmd = connection.CreateCommand();
+    cmd.CommandText = "SELECT COUNT(*) FROM AppFlags WHERE Name = @name;";
+    var p = cmd.CreateParameter();
+    p.ParameterName = "@name";
+    p.Value = name;
+    cmd.Parameters.Add(p);
+    return Convert.ToInt32(cmd.ExecuteScalar()) > 0;
+}
+
+static void SetAppFlag(WhatsAppBridge.API.Data.AppDbContext db, string name, string value)
+{
+    var connection = db.Database.GetDbConnection();
+    if (connection.State != System.Data.ConnectionState.Open) connection.Open();
+
+    using var cmd = connection.CreateCommand();
+    cmd.CommandText = """
+        INSERT INTO AppFlags (Name, Value, SetAtUtc) VALUES (@name, @value, @at)
+        ON CONFLICT(Name) DO UPDATE SET Value = @value, SetAtUtc = @at;
+        """;
+    var pn = cmd.CreateParameter(); pn.ParameterName = "@name"; pn.Value = name; cmd.Parameters.Add(pn);
+    var pv = cmd.CreateParameter(); pv.ParameterName = "@value"; pv.Value = value; cmd.Parameters.Add(pv);
+    var pa = cmd.CreateParameter(); pa.ParameterName = "@at"; pa.Value = DateTime.UtcNow.ToString("O"); cmd.Parameters.Add(pa);
+    cmd.ExecuteNonQuery();
 }

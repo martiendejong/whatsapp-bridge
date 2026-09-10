@@ -214,6 +214,7 @@ public class WhatsAppApiController : ControllerBase
             // guard.Recipient, not request.To — routing may have redirected this away from
             // someone who is asleep. Sending to request.To here would silently undo the policy.
             var result = await _whatsappService.SendMessageAsync(sessionId, guard.Recipient, messageToSend);
+            await _outboundGuardrail.ConfirmDeliveredAsync(guard);
 
             return Ok(new { result, routedTo = guard.Recipient, routing = guard.RoutingNote });
         }
@@ -263,6 +264,7 @@ public class WhatsAppApiController : ControllerBase
                 : request.Body;
 
             var result = await _whatsappService.SendReplyAsync(sessionId, guard.Recipient, messageToSend, request.QuotedMessageId, request.QuotedFromJid);
+            await _outboundGuardrail.ConfirmDeliveredAsync(guard);
 
             return Ok(result);
         }
@@ -335,7 +337,12 @@ public class WhatsAppApiController : ControllerBase
             if (!success)
                 return Unauthorized(new { error });
 
-            var guard = await _outboundGuardrail.CheckAsync("sendMedia", request.To, request.Caption ?? "", userId, request.Category);
+            // The dedupe body is caption PLUS source URL, because the caption alone is not an
+            // identity: most media has none, and two different captionless charts would hash
+            // identically — the second would be "already delivered" and silently dropped. The
+            // URL is what actually distinguishes one file from another here.
+            var guard = await _outboundGuardrail.CheckAsync("sendMedia", request.To,
+                $"{request.Caption}\n{request.MediaUrl}", userId, request.Category);
             if (guard.Suppressed)
                 return Ok(new { success = true, suppressed = true, reason = guard.Reason });
             if (!guard.Allowed)
@@ -362,6 +369,7 @@ public class WhatsAppApiController : ControllerBase
             var result = await _whatsappService.SendMediaAsync(
                 sessionId, guard.Recipient, mediaType, mimeType, fileBytes,
                 request.Caption ?? "", fn);
+            await _outboundGuardrail.ConfirmDeliveredAsync(guard);
 
             return Ok(result);
         }
@@ -738,6 +746,7 @@ public class WhatsAppApiController : ControllerBase
         try
         {
             var result = await _whatsappService.ForwardMessageAsync(sessionId!, guard.Recipient, request.Text);
+            await _outboundGuardrail.ConfirmDeliveredAsync(guard);
             return Ok(result);
         }
         catch (Exception ex)

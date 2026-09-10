@@ -235,16 +235,38 @@ public sealed class OutboundGuardrailService
             return GuardrailResult.Block(reason);
         }
 
+        // Written BEFORE the caller sends, as an attempt (Delivered=false). The caps above count
+        // attempts, so this ordering is what makes them unskippable: a caller cannot burn through
+        // sends and only be counted for the ones that worked. Delivery is a separate fact the
+        // caller confirms afterwards via ConfirmDeliveredAsync — the dedupe reads only confirmed
+        // rows, so a send that failed downstream can never suppress the retry or redirect that
+        // would actually deliver it.
         var log = new OutboundSendLog
         {
             Recipient = normalizedTo,
             SentAtUtc = nowUtc,
+            Delivered = false,
         };
         OutboundRoutingService.Stamp(log, category, body);
         _context.OutboundSendLogs.Add(log);
         await _context.SaveChangesAsync();
 
-        return GuardrailResult.Allow(to, routingNote);
+        return GuardrailResult.Allow(to, routingNote) with { SendLog = log };
+    }
+
+    /// <summary>
+    /// Marks the send this check accounted for as actually delivered. Call after the WhatsApp
+    /// send returns without error — and only then. Skipping the call is safe in the direction
+    /// that matters: an unconfirmed row still counts against the volume caps but never feeds the
+    /// duplicate suppression, so the failure mode of a forgotten call-site is a possible
+    /// duplicate, not a silently discarded message. No-op when the check produced no row
+    /// (guardrail disabled).
+    /// </summary>
+    public async Task ConfirmDeliveredAsync(GuardrailResult result)
+    {
+        if (result.SendLog == null) return;
+        result.SendLog.Delivered = true;
+        await _context.SaveChangesAsync();
     }
 
     private async Task RecordBlockAsync(string endpoint, string to, string body, int? userId, string reason)
@@ -276,6 +298,13 @@ public sealed class OutboundGuardrailService
 public sealed record GuardrailResult(bool Allowed, string? Reason, string Recipient, string? RoutingNote,
     bool Suppressed = false)
 {
+    /// <summary>
+    /// The volume-cap row this check wrote, carried so the caller can confirm delivery through
+    /// <see cref="OutboundGuardrailService.ConfirmDeliveredAsync"/> once the send succeeds. Null
+    /// when nothing was recorded (blocked, suppressed, or guardrail disabled).
+    /// </summary>
+    public Models.OutboundSendLog? SendLog { get; init; }
+
     public static GuardrailResult Allow(string recipient, string? routingNote) =>
         new(true, null, recipient, routingNote);
 

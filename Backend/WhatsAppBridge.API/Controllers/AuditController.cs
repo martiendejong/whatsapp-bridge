@@ -19,10 +19,12 @@ namespace WhatsAppBridge.API.Controllers;
 public class AuditController : ControllerBase
 {
     private readonly AppDbContext _context;
+    private readonly Services.EncryptionService _encryption;
 
-    public AuditController(AppDbContext context)
+    public AuditController(AppDbContext context, Services.EncryptionService encryption)
     {
         _context = context;
+        _encryption = encryption;
     }
 
     /// <summary>
@@ -73,7 +75,15 @@ public class AuditController : ControllerBase
             .ThenByDescending(a => a.Id)
             .Skip((page - 1) * pageSize)
             .Take(pageSize)
-            .Select(a => new
+            .ToListAsync();
+
+        // Reveal() runs client-side after materialisation — it cannot translate to SQL.
+        return Ok(new
+        {
+            total,
+            page,
+            pageSize,
+            items = items.Select(a => new
             {
                 a.Id,
                 a.AtUtc,
@@ -81,8 +91,8 @@ public class AuditController : ControllerBase
                 a.Path,
                 a.EventType,
                 a.Phone,
-                a.Body,
-                a.ResponsePreview,
+                Body = Reveal(a.Body),
+                ResponsePreview = Reveal(a.ResponsePreview),
                 a.StatusCode,
                 a.Outcome,
                 a.DurationMs,
@@ -90,10 +100,8 @@ public class AuditController : ControllerBase
                 a.ApiConnectionName,
                 a.AuthScheme,
                 a.ClientIp,
-            })
-            .ToListAsync();
-
-        return Ok(new { total, page, pageSize, items });
+            }),
+        });
     }
 
     /// <summary>
@@ -140,7 +148,32 @@ public class AuditController : ControllerBase
     public async Task<IActionResult> Detail(int id)
     {
         var entry = await Scoped().FirstOrDefaultAsync(a => a.Id == id);
-        return entry == null ? NotFound() : Ok(entry);
+        if (entry == null) return NotFound();
+
+        entry.Body = Reveal(entry.Body);
+        entry.ResponsePreview = Reveal(entry.ResponsePreview);
+        return Ok(entry);
+    }
+
+    /// <summary>
+    /// Undoes the at-rest encryption the audit middleware applies to stored bodies. Rows written
+    /// before encryption was enabled (or while it was off) are stored as plaintext, and
+    /// decrypting those throws — such a row is returned as stored, because refusing to show the
+    /// whole log over a handful of legacy rows would be the tail wagging the dog. (A plaintext
+    /// row that happens to parse as base64 would surface as gibberish rather than fail; visible,
+    /// rare, and harmless next to the alternative of a 500 on the whole page.)
+    /// </summary>
+    private string? Reveal(string? stored)
+    {
+        if (string.IsNullOrEmpty(stored)) return stored;
+        try
+        {
+            return _encryption.Decrypt(stored);
+        }
+        catch (Exception ex) when (ex is FormatException or System.Security.Cryptography.CryptographicException)
+        {
+            return stored;
+        }
     }
 
     /// <summary>
@@ -169,6 +202,8 @@ public class AuditController : ControllerBase
             ? id
             : null;
 
-    private static string NormalizePhone(string s) =>
-        new(s.SkipWhile(c => !char.IsDigit(c)).TakeWhile(char.IsDigit).ToArray());
+    // The shared normalizer, not a local copy. This controller had grown a fifth private
+    // implementation — with the exact leading-"+" bug the consolidation removed elsewhere, so
+    // filtering the audit page on "+31633984381" silently matched nothing.
+    private static string NormalizePhone(string s) => Services.PhoneNumber.Normalize(s);
 }

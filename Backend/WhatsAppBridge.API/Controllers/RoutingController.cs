@@ -102,6 +102,14 @@ public class RoutingController : ControllerBase
                 return BadRequest(new { error = $"FallbackPhone '{request.FallbackPhone}' is not a routing contact yet. Add that number first, then set it as a fallback." });
         }
 
+        // One alias, one contact. Aliases resolve via FirstOrDefault, so a duplicate would make
+        // "sjoerd" deliver to whichever row the provider happens to return first — a policy
+        // decided by storage order is not a policy.
+        var alias = string.IsNullOrWhiteSpace(request.Alias) ? null : request.Alias.Trim().ToLowerInvariant();
+        if (alias != null && await _context.OutboundContacts
+                .AnyAsync(c => c.Phone != phone && c.Alias != null && c.Alias.ToLower() == alias))
+            return BadRequest(new { error = $"Alias '{alias}' is already used by another contact." });
+
         var contact = await _context.OutboundContacts.FirstOrDefaultAsync(c => c.Phone == phone);
         if (contact == null)
         {
@@ -110,7 +118,7 @@ public class RoutingController : ControllerBase
         }
 
         contact.Name = request.Name.Trim();
-        contact.Alias = string.IsNullOrWhiteSpace(request.Alias) ? null : request.Alias.Trim().ToLowerInvariant();
+        contact.Alias = alias;
         contact.Enabled = request.Enabled;
         contact.TimeZoneId = request.TimeZoneId;
         contact.WindowStartHour = request.WindowStartHour;
@@ -129,6 +137,22 @@ public class RoutingController : ControllerBase
     {
         var contact = await _context.OutboundContacts.FindAsync(id);
         if (contact == null) return NotFound();
+
+        // Upsert refuses a fallback that is not a contact; deleting the contact out from under
+        // the fallbacks that point at it would break the same invariant through the back door.
+        // The engine fails closed on a dangling fallback, but "closed" here means overnight
+        // redirects silently stop being delivered — the safety net the admin explicitly set up
+        // would be gone, and the only symptom rows in a blocked-list nobody reads at 03:00.
+        var dependents = await _context.OutboundContacts
+            .Where(c => c.FallbackPhone == contact.Phone)
+            .Select(c => c.Name)
+            .ToListAsync();
+        if (dependents.Count > 0)
+            return BadRequest(new
+            {
+                error = $"'{contact.Name}' is the fallback for: {string.Join(", ", dependents)}. " +
+                        "Change or clear those fallbacks first, then delete this contact.",
+            });
 
         _context.OutboundContacts.Remove(contact);
         await _context.SaveChangesAsync();
@@ -156,13 +180,21 @@ public class RoutingController : ControllerBase
             ? DateTime.SpecifyKind(parsed, DateTimeKind.Utc)
             : DateTime.UtcNow;
 
-        var decision = await _routing.RouteAsync(to, category, string.Empty, when);
+        var decision = await _routing.RouteAsync(to, category, string.Empty, when, dryRun: true);
+
+        // Whether any of this is actually enforced right now. Without it the preview happily
+        // shows redirects and blocks for a policy that nothing applies, and an admin reading it
+        // concludes the table is live when the flag is still off.
+        var enforced = await _routing.IsActiveAsync();
         return Ok(new
         {
             outcome = decision.Outcome.ToString(),
             recipient = decision.Recipient,
             reason = decision.Reason,
             evaluatedAtUtc = when,
+            enforced,
+            note = enforced ? null
+                : "OutboundRouting:Enabled is off (or the contact table is empty) — this shows what WOULD happen, nothing is currently enforced.",
         });
     }
 

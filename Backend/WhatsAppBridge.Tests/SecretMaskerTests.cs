@@ -61,6 +61,38 @@ public class SecretMaskerTests
         Assert.DoesNotContain("abc123def456", masked);
     }
 
+    /// <summary>
+    /// OAuth names every credential it mints "something_token", and an exact-match list knew
+    /// none of them: refresh_token, id_token and client_secret all passed through unmasked —
+    /// into a table that is kept forever.
+    /// </summary>
+    [Theory]
+    [InlineData("https://x.nl/cb?refresh_token=abc123def456")]
+    [InlineData("https://x.nl/cb?id_token=abc123def456")]
+    [InlineData("https://x.nl/cb?client_secret=abc123def456")]
+    [InlineData("https://x.nl/cb?api-key=abc123def456")]
+    [InlineData("https://x.nl/cb?auth_token=abc123def456")]
+    [InlineData("https://x.nl/login?pwd=abc123def456")]
+    public void A_suffixed_or_prefixed_secret_parameter_is_blanked(string input)
+    {
+        Assert.DoesNotContain("abc123def456", SecretMasker.Apply(input));
+    }
+
+    /// <summary>
+    /// The wildcard must not swallow words that merely END in a trigger: "monkey" is not a key
+    /// and "postcode" is not a code. Masking those would corrupt exactly the kind of ordinary
+    /// content the log exists to preserve.
+    /// </summary>
+    [Theory]
+    [InlineData("https://x.nl/zoo?monkey=aap123456789")]
+    [InlineData("https://x.nl/adres?postcode=8355AB&plaats=Giethoorn")]
+    [InlineData("https://x.nl/nl?countrycode=NL31633984381")]
+    [InlineData("https://x.nl/artikel?author=jdoe12345678")]
+    public void A_word_that_merely_ends_in_a_trigger_is_left_alone(string input)
+    {
+        Assert.Equal(input, SecretMasker.Apply(input));
+    }
+
     [Theory]
     [InlineData("Je verificatiecode is 483920")]
     [InlineData("code: 483920")]
@@ -70,6 +102,36 @@ public class SecretMaskerTests
     public void A_one_time_code_introduced_by_a_keyword_is_blanked(string input)
     {
         Assert.DoesNotContain("483920", SecretMasker.Apply(input));
+    }
+
+    /// <summary>
+    /// Grouped digits are how SMS and WhatsApp actually present codes — "483 920" is the
+    /// common case, not the corner case. A contiguity requirement let the most common
+    /// presentation of the most common secret through unmasked, and "4839-2011" came back as
+    /// "***-2011": visibly masked while leaving half the code standing.
+    /// </summary>
+    [Theory]
+    [InlineData("je code is 483 920", "483")]
+    [InlineData("jouw code: 4839-2011", "2011")]
+    [InlineData("code 48 39 20 11", "48")]
+    public void A_grouped_one_time_code_is_blanked_whole(string input, string fragment)
+    {
+        var masked = SecretMasker.Apply(input);
+
+        Assert.DoesNotContain(fragment, masked);
+        Assert.Contains("***", masked);
+    }
+
+    /// <summary>
+    /// The suffix rule must not absorb a phone number: eleven digits after "code" match
+    /// nothing, grouped or not, because every candidate ends adjacent to another digit.
+    /// </summary>
+    [Theory]
+    [InlineData("Bel code-team op 31633984381")]
+    [InlineData("code 31633984381")]
+    public void A_phone_number_after_the_keyword_is_not_a_code(string input)
+    {
+        Assert.Equal(input, SecretMasker.Apply(input));
     }
 
     [Fact]

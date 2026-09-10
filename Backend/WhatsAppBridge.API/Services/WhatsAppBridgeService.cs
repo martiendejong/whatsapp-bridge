@@ -1125,6 +1125,7 @@ public class WhatsAppBridgeService : IAsyncDisposable
                 }
 
                 await SendMessageAsync(sessionId, replyTo, replyText);
+                await guardrail.ConfirmDeliveredAsync(guard);
             }
             catch (Exception ex)
             {

@@ -143,10 +143,17 @@ public class WhatsAppController : ControllerBase
         if (session.Status != "connected")
             return BadRequest(new { error = $"Session is not connected (status: {session.Status})" });
 
-        // This route sent messages without ever consulting the guardrail — a logged-in user could
-        // reach any number at any hour while the API-key routes next door were fully policed.
-        // Same check, same policy, no second implementation.
-        var guard = await _outboundGuardrail.CheckAsync("sessionSend", request.To, request.Message, userId, request.Category);
+        // A human typing in the dashboard is exempt from the guardrail; an API key on this same
+        // route is not. The routing policy exists to stop AUTOMATED senders waking people — a
+        // person at the keyboard deciding to message someone is the "als ze zelf iets vragen"
+        // case the policy explicitly preserves, and running them through it made the Messages
+        // screen unusable the moment routing was armed: group chats match no contact, customers
+        // match no contact, and team members accept no 'manual'-style category. The volume caps
+        // are skipped too, deliberately — an active human conversation legitimately exceeds
+        // 20 messages a day, and capping it would break the chat mid-sentence.
+        var guard = IsHumanSession()
+            ? GuardrailResult.Allow(request.To, null)
+            : await _outboundGuardrail.CheckAsync("sessionSend", request.To, request.Message, userId, request.Category);
         if (guard.Suppressed)
             return Ok(new { success = true, suppressed = true, reason = guard.Reason });
         if (!guard.Allowed)
@@ -155,6 +162,7 @@ public class WhatsAppController : ControllerBase
         try
         {
             await _whatsappService.SendMessageAsync(sessionId, guard.Recipient, request.Message);
+            await _outboundGuardrail.ConfirmDeliveredAsync(guard);
             return Ok(new { success = true, message = "Message sent", routedTo = guard.Recipient, routing = guard.RoutingNote });
         }
         catch (Exception ex)
@@ -162,6 +170,14 @@ public class WhatsAppController : ControllerBase
             return StatusCode(500, new { error = ex.Message });
         }
     }
+
+    /// <summary>
+    /// True when the caller is a logged-in person (JWT from the dashboard) rather than an API
+    /// key. The distinction is exactly the audit middleware's: the ApiKey scheme stamps an
+    /// ApiConnectionId claim, a JWT never does. Scripts hold API keys; browsers hold JWTs.
+    /// </summary>
+    private bool IsHumanSession() =>
+        User?.Identity?.IsAuthenticated == true && User.FindFirst("ApiConnectionId") == null;
 
     public record SendRequest(string To, string Message, string? Category = null);
 
@@ -787,7 +803,13 @@ public class WhatsAppController : ControllerBase
         if (session.Status != "connected")
             return BadRequest(new { error = $"Session is not connected (status: {session.Status})" });
 
-        var guard = await _outboundGuardrail.CheckAsync("sessionSendMedia", request.To, request.Caption ?? "", userId, request.Category);
+        // Human dashboard sends skip the guardrail — see SendMessage above for the full why.
+        // For API keys the dedupe body is caption plus file identity, not the caption alone: a
+        // blank caption is shared by most media and would make distinct files hash identically.
+        var guard = IsHumanSession()
+            ? GuardrailResult.Allow(request.To, null)
+            : await _outboundGuardrail.CheckAsync("sessionSendMedia", request.To,
+                $"{request.Caption}\n{request.File.FileName}:{request.File.Length}", userId, request.Category);
         if (guard.Suppressed)
             return Ok(new { success = true, suppressed = true, reason = guard.Reason });
         if (!guard.Allowed)
@@ -803,6 +825,7 @@ public class WhatsAppController : ControllerBase
                 sessionId, guard.Recipient, mediaType,
                 request.File.ContentType, fileBytes,
                 request.Caption ?? "", request.FileName ?? request.File.FileName);
+            await _outboundGuardrail.ConfirmDeliveredAsync(guard);
             return Ok(result);
         }
         catch (Exception ex)
@@ -888,6 +911,14 @@ public class WhatsAppController : ControllerBase
     [HttpPost("sessions/{sessionId}/request-history")]
     public async Task<IActionResult> RequestHistory(string sessionId, [FromBody] RequestHistoryBody body)
     {
+        // Ownership, not just authentication — the same filter every sibling session route
+        // applies. Without it, any self-registered account that learned another user's
+        // sessionId could pull that session's chat history around the login.
+        var userId = GetUserId();
+        var owned = await _context.WhatsAppSessions
+            .AnyAsync(s => s.SessionId == sessionId && s.UserId == userId);
+        if (!owned) return NotFound(new { error = "Session not found" });
+
         try
         {
             var jid = body.ChatJid.Contains('@') ? body.ChatJid : $"{body.ChatJid}@s.whatsapp.net";
@@ -916,6 +947,13 @@ public class WhatsAppController : ControllerBase
     [HttpPost("sessions/{sessionId}/send-retry-receipt")]
     public async Task<IActionResult> SendRetryReceipt(string sessionId, [FromBody] RetryReceiptBody body)
     {
+        // Ownership check like every sibling route: an authenticated stranger must not be able
+        // to fire protocol traffic into someone else's Signal session.
+        var userId = GetUserId();
+        var owned = await _context.WhatsAppSessions
+            .AnyAsync(s => s.SessionId == sessionId && s.UserId == userId);
+        if (!owned) return NotFound(new { error = "Session not found" });
+
         if (!_whatsappService.TryGetClient(sessionId, out var client) || client == null)
             return NotFound(new { error = "Session not found" });
         if (!client.IsConnected)
@@ -989,8 +1027,11 @@ public class WhatsAppController : ControllerBase
         // Forwarding puts arbitrary text in front of an arbitrary number, which is a send by any
         // other name. This route reached WhatsApp without the allow-list, the volume caps or the
         // routing policy — the neighbouring /send route on this same controller is fully policed,
-        // so the difference was an oversight rather than a decision.
-        var guard = await _outboundGuardrail.CheckAsync("sessionForward", request.ToJid, request.Text, userId, request.Category);
+        // so the difference was an oversight rather than a decision. Human dashboard forwards
+        // skip the guardrail like the other session routes — see SendMessage for the why.
+        var guard = IsHumanSession()
+            ? GuardrailResult.Allow(request.ToJid, null)
+            : await _outboundGuardrail.CheckAsync("sessionForward", request.ToJid, request.Text, userId, request.Category);
         if (guard.Suppressed)
             return Ok(new { success = true, suppressed = true, reason = guard.Reason });
         if (!guard.Allowed)
@@ -999,6 +1040,7 @@ public class WhatsAppController : ControllerBase
         try
         {
             await _whatsappService.ForwardMessageAsync(sessionId, guard.Recipient, request.Text);
+            await _outboundGuardrail.ConfirmDeliveredAsync(guard);
             return Ok(new { success = true, routedTo = guard.Recipient, routing = guard.RoutingNote });
         }
         catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }

@@ -373,7 +373,9 @@ public class OutboundRoutingServiceTests
         using var db = await SeededAsync();
         var body = "Valsuani deploy afgerond, versie 2.1.4";
 
-        var direct = new OutboundSendLog { Recipient = Martien, SentAtUtc = DeadOfNight.AddMinutes(-1) };
+        // Delivered = true: only a CONFIRMED delivery may suppress. The failed-send case has
+        // its own test below.
+        var direct = new OutboundSendLog { Recipient = Martien, SentAtUtc = DeadOfNight.AddMinutes(-1), Delivered = true };
         OutboundRoutingService.Stamp(direct, "deploy:valsuani", body);
         db.OutboundSendLogs.Add(direct);
         await db.SaveChangesAsync();
@@ -389,7 +391,7 @@ public class OutboundRoutingServiceTests
     {
         using var db = await SeededAsync();
 
-        var earlier = new OutboundSendLog { Recipient = Martien, SentAtUtc = DeadOfNight.AddMinutes(-1) };
+        var earlier = new OutboundSendLog { Recipient = Martien, SentAtUtc = DeadOfNight.AddMinutes(-1), Delivered = true };
         OutboundRoutingService.Stamp(earlier, "deploy:valsuani", "Valsuani deploy afgerond, versie 2.1.4");
         db.OutboundSendLogs.Add(earlier);
         await db.SaveChangesAsync();
@@ -400,6 +402,108 @@ public class OutboundRoutingServiceTests
         Assert.Equal(OutboundRoutingService.RoutingOutcome.Redirected, decision.Outcome);
     }
 
+    /// <summary>
+    /// The guardrail writes its accounting row BEFORE the caller sends, so a row that was never
+    /// confirmed represents a send that may well have failed. Suppressing the redirect on the
+    /// strength of that row converted a transient send failure into a message nobody received —
+    /// with every indicator green. An attempt row must not suppress anything.
+    /// </summary>
+    [Fact]
+    public async Task An_unconfirmed_attempt_does_not_suppress_the_redirect_that_would_rescue_the_message()
+    {
+        using var db = await SeededAsync();
+        var body = "Valsuani deploy afgerond, versie 2.1.4";
+
+        var failedAttempt = new OutboundSendLog
+        {
+            Recipient = Martien, SentAtUtc = DeadOfNight.AddMinutes(-1), Delivered = false,
+        };
+        OutboundRoutingService.Stamp(failedAttempt, "deploy:valsuani", body);
+        db.OutboundSendLogs.Add(failedAttempt);
+        await db.SaveChangesAsync();
+
+        var decision = await NewService(db).RouteAsync(Sjoerd, "deploy:valsuani", body, DeadOfNight);
+
+        Assert.Equal(OutboundRoutingService.RoutingOutcome.Redirected, decision.Outcome);
+        Assert.Equal(Martien, decision.Recipient);
+    }
+
+    /// <summary>
+    /// The dedupe must be order-independent. It used to live only on the redirect path, so a
+    /// caller fanning out [sjoerd, martien] at night delivered to Martien twice — the redirect
+    /// leg logged him, and the subsequent direct leg never looked. Same message, same recipient,
+    /// same ten minutes: one delivery, whichever leg came first.
+    /// </summary>
+    [Fact]
+    public async Task A_direct_send_is_suppressed_when_a_redirect_already_delivered_it()
+    {
+        using var db = await SeededAsync();
+        var body = "Valsuani deploy afgerond, versie 2.1.4";
+
+        var viaRedirect = new OutboundSendLog
+        {
+            Recipient = Martien, SentAtUtc = DeadOfNight.AddMinutes(-1), Delivered = true,
+        };
+        OutboundRoutingService.Stamp(viaRedirect, "deploy:valsuani", body);
+        db.OutboundSendLogs.Add(viaRedirect);
+        await db.SaveChangesAsync();
+
+        var decision = await NewService(db).RouteAsync(Martien, "deploy:valsuani", body, DeadOfNight);
+
+        Assert.Equal(OutboundRoutingService.RoutingOutcome.Suppressed, decision.Outcome);
+    }
+
+    /// <summary>
+    /// A blank body has no identity — hash("") is one shared value, and media sends pass their
+    /// (usually absent) caption as the body. With blank bodies eligible for dedupe, the second
+    /// of two distinct captionless images inside ten minutes was "already delivered" and
+    /// silently discarded. Blank never dedupes, in either direction.
+    /// </summary>
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task A_blank_body_is_never_treated_as_a_duplicate(string body)
+    {
+        using var db = await SeededAsync();
+
+        var earlier = new OutboundSendLog
+        {
+            Recipient = Martien, SentAtUtc = DeadOfNight.AddMinutes(-1), Delivered = true,
+        };
+        OutboundRoutingService.Stamp(earlier, "deploy:valsuani", body);
+        db.OutboundSendLogs.Add(earlier);
+        await db.SaveChangesAsync();
+
+        var direct = await NewService(db).RouteAsync(Martien, "deploy:valsuani", body, DeadOfNight);
+        var redirect = await NewService(db).RouteAsync(Sjoerd, "deploy:valsuani", body, DeadOfNight);
+
+        Assert.Equal(OutboundRoutingService.RoutingOutcome.Allowed, direct.Outcome);
+        Assert.Equal(OutboundRoutingService.RoutingOutcome.Redirected, redirect.Outcome);
+    }
+
+    /// <summary>
+    /// Muting narrows delivery; it must never widen it. With the Enabled check running before
+    /// the category check, a muted contact skipped the category refusal and fell through to the
+    /// fallback — so muting Sjoerd converted every category he had never accepted into a
+    /// delivered message to Martien. A category the contact does not receive stops dead,
+    /// muted or not.
+    /// </summary>
+    [Fact]
+    public async Task Muting_a_contact_does_not_forward_categories_he_never_accepted()
+    {
+        using var db = await SeededAsync();
+        var sjoerd = await db.OutboundContacts.FirstAsync(c => c.Phone == Sjoerd);
+        sjoerd.Enabled = false;
+        await db.SaveChangesAsync();
+
+        // Sjoerd accepts only deploy:valsuani. Muted, an "other" aimed at him must stay
+        // Blocked — not travel on to his fallback.
+        var decision = await NewService(db).RouteAsync(Sjoerd, "other", "backlog is leeg", Midday);
+
+        Assert.Equal(OutboundRoutingService.RoutingOutcome.Blocked, decision.Outcome);
+        Assert.Null(decision.Recipient);
+    }
+
     /// <summary>A repeat of the same alert an hour later is news again, not a duplicate.</summary>
     [Fact]
     public async Task The_dedupe_window_expires()
@@ -407,7 +511,7 @@ public class OutboundRoutingServiceTests
         using var db = await SeededAsync();
         var body = "Valsuani deploy afgerond";
 
-        var old = new OutboundSendLog { Recipient = Martien, SentAtUtc = DeadOfNight.AddHours(-1) };
+        var old = new OutboundSendLog { Recipient = Martien, SentAtUtc = DeadOfNight.AddHours(-1), Delivered = true };
         OutboundRoutingService.Stamp(old, "deploy:valsuani", body);
         db.OutboundSendLogs.Add(old);
         await db.SaveChangesAsync();

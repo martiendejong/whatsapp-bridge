@@ -17,6 +17,14 @@ function PrivateRoute({ children }: { children: React.ReactNode }) {
   return isAuthenticated ? <>{children}</> : <Navigate to="/login" />;
 }
 
+// The server enforces the real gate (403); this only spares a non-admin a page where every
+// request fails with errors that never explain themselves.
+function AdminRoute({ children }: { children: React.ReactNode }) {
+  const { isAuthenticated, user } = useAuth();
+  if (!isAuthenticated) return <Navigate to="/login" />;
+  return user?.isAdmin ? <>{children}</> : <Navigate to="/dashboard" />;
+}
+
 function PublicRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuth();
   return !isAuthenticated ? <>{children}</> : <Navigate to="/dashboard" />;
@@ -89,9 +97,9 @@ function AppRoutes() {
         <Route
           path="/routing"
           element={
-            <PrivateRoute>
+            <AdminRoute>
               <Routing />
-            </PrivateRoute>
+            </AdminRoute>
           }
         />
         <Route

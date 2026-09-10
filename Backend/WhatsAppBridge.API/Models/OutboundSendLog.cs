@@ -29,4 +29,23 @@ public class OutboundSendLog
     /// from "this is a genuine second alert", without storing the text twice.
     /// </summary>
     public string? BodyHash { get; set; }
+
+    /// <summary>
+    /// Whether the WhatsApp send this row accounts for actually went out. The guardrail writes
+    /// the row BEFORE the caller performs the send (that ordering is what makes the volume caps
+    /// unskippable), so on its own the row only proves an attempt. The caller confirms after the
+    /// send succeeds.
+    ///
+    /// The split exists because the two consumers of this table need opposite readings. The
+    /// volume caps count attempts — a runaway retry loop must exhaust its budget whether or not
+    /// its sends work. The duplicate suppression counts deliveries: it once counted attempts,
+    /// which meant a send that failed (session down, exception) still registered as "the
+    /// recipient already has this", and the redirect that would have rescued the message was
+    /// suppressed. The alert vanished with all indicators green.
+    ///
+    /// Rows written before this column existed default to true: they were overwhelmingly real
+    /// deliveries, and reading them as attempts would disable dedupe for the first ten minutes
+    /// after deploy.
+    /// </summary>
+    public bool Delivered { get; set; }
 }

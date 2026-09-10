@@ -10,8 +10,9 @@ namespace WhatsAppBridge.API.Middleware;
 /// <summary>
 /// Writes one <see cref="ApiAuditLog"/> row for every request that reaches the API.
 ///
-/// Placed after UseAuthentication so the caller's identity (which API key) is already
-/// resolved, and around the rest of the pipeline so the status code and duration are known.
+/// Placed BEFORE the authentication/authorization middlewares — that is what puts framework
+/// 401/403 refusals in the log at all — while the row itself is written in the finally, after
+/// downstream has run, so the identity and final status code are still known by then.
 /// A failure to audit never fails the request — an unwritable log is a monitoring problem,
 /// not a reason to drop someone's message — but it is surfaced via ILogger.
 /// </summary>
@@ -221,8 +222,19 @@ public sealed class ApiAuditMiddleware
     private async Task WriteAuditAsync(HttpContext context, string path, string? rawBody,
         string? responsePreview, int durationMs, bool threw)
     {
-        var db = context.RequestServices.GetService<AppDbContext>();
+        // A scope of our own, never the request's. The request-scoped AppDbContext is the one
+        // the controller just used, and if the controller's SaveChanges threw — a unique-index
+        // race, a poisoned entity — its change tracker still holds the failed entity. Reusing it
+        // here re-attempts that same failed write, throws the same exception, and the audit row
+        // vanishes for precisely the request that most needs a row. It would also silently flush
+        // any tracked-but-unsaved leftovers a controller abandoned on an early error return.
+        var scopeFactory = context.RequestServices.GetService<IServiceScopeFactory>();
+        if (scopeFactory == null) return;
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetService<AppDbContext>();
         if (db == null) return;
+        var encryption = scope.ServiceProvider.GetService<Services.EncryptionService>()
+                         ?? new Services.EncryptionService(new ConfigurationBuilder().Build());
 
         // A request that threw has not reached the exception handler yet, so the response still
         // carries whatever status was set before the throw — usually 200. Recording that would
@@ -247,8 +259,13 @@ public sealed class ApiAuditMiddleware
             // Masked on the way in, not on the way out: rows are kept indefinitely by design, so
             // an approve link or login code stored in the clear stays usable for as long as the
             // database exists. See SecretMasker for what is and is not recognised.
-            Body = SecretMasker.Apply(ExtractMessageText(rawBody)),
-            ResponsePreview = SecretMasker.Apply(responsePreview),
+            //
+            // Then encrypted, under the same key and flag as the Messages table. Without this,
+            // an encryption-enabled deployment kept a complete plaintext copy of every outbound
+            // message here — the audit log would have quietly undone the at-rest encryption it
+            // sat next to. When encryption is off, Encrypt is a pass-through.
+            Body = encryption.Encrypt(SecretMasker.Apply(ExtractMessageText(rawBody))!),
+            ResponsePreview = encryption.Encrypt(SecretMasker.Apply(responsePreview)!),
             StatusCode = status,
             Outcome = status is >= 200 and < 300 ? "ok" : status == 403 ? "blocked" : "error",
             DurationMs = durationMs,
@@ -347,6 +364,16 @@ public sealed class ApiAuditMiddleware
         request.ContentLength is > 0 ||
         (request.Headers.TryGetValue("Transfer-Encoding", out var te) && te.Count > 0);
 
+    /// <summary>
+    /// How much of a request body this middleware will pull into a string of its own. Far above
+    /// any real message (the stored excerpt is 8000 chars) but a hard stop against the abuse
+    /// case: an unauthenticated caller POSTing a maximum-size JSON body had it buffered here in
+    /// full, per request, before any cap applied. A body over this limit no longer parses as
+    /// JSON, so its row loses the extracted text and phone — endpoint, caller and outcome
+    /// survive, which is what matters for a body that size.
+    /// </summary>
+    private const int MaxBodyReadChars = 256 * 1024;
+
     private static async Task<string?> ReadRequestBodyAsync(HttpRequest request)
     {
         // Only JSON is parsed for content; a multipart upload's bytes must not be buffered
@@ -356,9 +383,17 @@ public sealed class ApiAuditMiddleware
 
         request.EnableBuffering();
         using var reader = new StreamReader(request.Body, Encoding.UTF8, leaveOpen: true);
-        var body = await reader.ReadToEndAsync();
+
+        var buffer = new char[8192];
+        var sb = new StringBuilder();
+        int read;
+        while ((read = await reader.ReadAsync(buffer, 0, buffer.Length)) > 0)
+        {
+            sb.Append(buffer, 0, Math.Min(read, MaxBodyReadChars - sb.Length));
+            if (sb.Length >= MaxBodyReadChars) break;
+        }
         request.Body.Position = 0;
-        return body;
+        return sb.ToString();
     }
 
     private static string? Truncate(string? s, int max) =>

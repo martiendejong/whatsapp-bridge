@@ -24,9 +24,14 @@ export default function Navbar() {
           <Link to="/audit" style={{ color: 'white', textDecoration: 'none' }}>
             Audit log
           </Link>
-          <Link to="/routing" style={{ color: 'white', textDecoration: 'none' }}>
-            Routing
-          </Link>
+          {/* Admin-only server-side (403 for everyone else), so showing the link to a
+              non-admin only leads them to a page of failing requests. The audit link stays:
+              non-admins legitimately see their own rows there. */}
+          {user?.isAdmin && (
+            <Link to="/routing" style={{ color: 'white', textDecoration: 'none' }}>
+              Routing
+            </Link>
+          )}
           <Link to="/account" style={{ color: 'white', textDecoration: 'none' }}>
             Account
           </Link>

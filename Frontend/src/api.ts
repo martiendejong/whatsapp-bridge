@@ -80,12 +80,12 @@ export const whatsapp = {
   getQr: (sessionId: string) => api.get(`/api/whatsapp/sessions/${sessionId}/qr`),
   deleteSession: (sessionId: string) => api.delete(`/api/whatsapp/sessions/${sessionId}`),
   testSession: (sessionId: string) => api.post(`/api/whatsapp/sessions/${sessionId}/test`),
-  // Category decides which routing contact may receive this and at what hour. Omitting it made
-  // the backend fall back to "other", which every contact except Martien refuses — a send from
-  // this screen then failed with a reason nobody could see. Messages typed here are 'manual':
-  // a person at the keyboard, not an automated alert.
-  sendMessage: (sessionId: string, to: string, message: string, category = 'manual') =>
-    api.post(`/api/whatsapp/sessions/${sessionId}/send`, { To: to, Message: message, Category: category }),
+  // No Category on purpose. Dashboard sends are made by a person, and the backend exempts
+  // JWT-authenticated session sends from the routing policy entirely — routing exists to stop
+  // AUTOMATED senders waking people, and running human chats through it made this screen unable
+  // to reach group chats, customers, or any team member the moment routing was armed.
+  sendMessage: (sessionId: string, to: string, message: string) =>
+    api.post(`/api/whatsapp/sessions/${sessionId}/send`, { To: to, Message: message }),
   getContacts: (sessionId: string) =>
     api.get(`/api/whatsapp/sessions/${sessionId}/contacts`),
   getStoredChats: (sessionId: string) =>

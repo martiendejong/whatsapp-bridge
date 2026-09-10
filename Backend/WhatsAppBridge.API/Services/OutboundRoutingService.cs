@@ -86,7 +86,14 @@ public sealed class OutboundRoutingService
     /// Resolves an alias or number to the number a message should actually go to.
     /// <paramref name="category"/> may be null; it is then treated as <see cref="DefaultCategory"/>.
     /// </summary>
-    public async Task<RoutingDecision> RouteAsync(string to, string? category, string body, DateTime? nowUtc = null)
+    /// <param name="dryRun">
+    /// True when the caller is asking, not sending (the Preview endpoint). The decision is
+    /// computed identically; what differs is that nothing is logged as if traffic had moved —
+    /// a GET that emits "Outbound REDIRECTED" lines fabricates events in the log it shares
+    /// with real sends.
+    /// </param>
+    public async Task<RoutingDecision> RouteAsync(string to, string? category, string body, DateTime? nowUtc = null,
+        bool dryRun = false)
     {
         var utc = nowUtc ?? DateTime.UtcNow;
         var cat = string.IsNullOrWhiteSpace(category) ? DefaultCategory : category.Trim().ToLowerInvariant();
@@ -101,26 +108,71 @@ public sealed class OutboundRoutingService
                 "to make it reachable; numbers without a contact are never auto-messaged.");
         }
 
-        if (!contact.Enabled)
-            return await FallbackOrBlockAsync(contact, cat, body, utc,
-                $"{contact.Name} is muted.");
-
+        // Category before Enabled, and the order is load-bearing. A category the contact never
+        // accepted must stop dead here — never reach the fallback path. When Enabled was checked
+        // first, muting a contact WIDENED delivery: every category that would have been refused
+        // outright ("Sjoerd does not receive 'other'") instead fell through to FallbackOrBlock,
+        // whose target accepts "*", and Martien started receiving the exact backlog nags the
+        // policy existed to stop — triggered by the act of muting someone for their holiday.
         if (!AcceptsCategory(contact, cat))
             return new RoutingDecision(RoutingOutcome.Blocked, null,
                 $"{contact.Name} does not receive '{cat}' messages (accepts: {contact.Categories}). " +
                 "This is the default for team contacts: they are messaged when they ask something, not otherwise.");
 
+        if (!contact.Enabled)
+            return await FallbackOrBlockAsync(contact, cat, body, utc, dryRun,
+                $"{contact.Name} is muted.");
+
         if (!IsInsideWindow(contact, utc, out var localTime))
-            return await FallbackOrBlockAsync(contact, cat, body, utc,
+            return await FallbackOrBlockAsync(contact, cat, body, utc, dryRun,
                 $"{localTime:HH:mm} is outside {contact.Name}'s window " +
                 $"({contact.WindowStartHour:00}:00-{contact.WindowEndHour:00}:00 {contact.TimeZoneId}).");
+
+        // Dedupe on the direct path too, not only on redirects. With it only on the redirect
+        // side, the fan-out order decided whether Martien got a duplicate: Sjoerd-then-Martien
+        // was caught (the redirect found the direct row), Martien-after-redirect was not — the
+        // direct leg never looked. Same recipient, same body, same category, minutes apart is
+        // one message regardless of which leg delivered it first.
+        if (await AlreadyDeliveredAsync(contact.Phone, cat, body, utc))
+            return new RoutingDecision(RoutingOutcome.Suppressed, null,
+                $"{contact.Name} already received this exact message within " +
+                $"{RedirectDedupeWindow.TotalMinutes:0} minutes, so it is not sent twice.");
 
         return new RoutingDecision(RoutingOutcome.Allowed, contact.Phone,
             $"{contact.Name} accepts '{cat}' and it is {localTime:HH:mm} locally.");
     }
 
+    /// <summary>
+    /// True when an identical message (same recipient, body hash and category) was actually
+    /// DELIVERED within the dedupe window. Two deliberate narrowings:
+    ///
+    /// Delivered only — the guardrail logs the row before the caller sends, so an unconfirmed
+    /// row proves an attempt, not a delivery. Counting attempts here meant a failed send (session
+    /// down) marked the message as "already there", and the suppression then discarded the one
+    /// copy that would have arrived. Suppression must only ever trade a duplicate for silence,
+    /// never a delivery for silence.
+    ///
+    /// A blank body never dedupes — a hash of "" is a single shared value, not an identity.
+    /// Media sends pass their caption as the body, and most media has no caption, so with blank
+    /// bodies eligible, any two distinct captionless images to the same recipient within ten
+    /// minutes would collide and the second would silently never be delivered to anyone.
+    /// </summary>
+    private async Task<bool> AlreadyDeliveredAsync(string recipient, string category, string body, DateTime utc)
+    {
+        if (string.IsNullOrWhiteSpace(body)) return false;
+
+        var hash = HashBody(body);
+        var since = utc - RedirectDedupeWindow;
+        return await _context.OutboundSendLogs.AnyAsync(l =>
+            l.Recipient == recipient &&
+            l.Delivered &&
+            l.BodyHash == hash &&
+            l.Category == category &&
+            l.SentAtUtc >= since);
+    }
+
     private async Task<RoutingDecision> FallbackOrBlockAsync(
-        OutboundContact contact, string category, string body, DateTime utc, string why)
+        OutboundContact contact, string category, string body, DateTime utc, bool dryRun, string why)
     {
         if (string.IsNullOrWhiteSpace(contact.FallbackPhone))
             return new RoutingDecision(RoutingOutcome.Blocked, null,
@@ -164,28 +216,22 @@ public sealed class OutboundRoutingService
 
         // Already delivered to the fallback by a caller that addressed them directly? Then this
         // redirect is a duplicate, not a rescue.
-        var hash = HashBody(body);
-        var since = utc - RedirectDedupeWindow;
-        var alreadyDelivered = await _context.OutboundSendLogs.AnyAsync(l =>
-            l.Recipient == fallback &&
-            l.BodyHash == hash &&
-            l.Category == category &&
-            l.SentAtUtc >= since);
-
-        if (alreadyDelivered)
+        if (await AlreadyDeliveredAsync(fallback, category, body, utc))
             return new RoutingDecision(RoutingOutcome.Suppressed, null,
                 $"{why} The fallback already received this exact message within " +
                 $"{RedirectDedupeWindow.TotalMinutes:0} minutes, so it is not sent twice.");
 
-        _logger.LogInformation("Outbound REDIRECTED from {Original} to {Fallback}: {Why}",
-            contact.Phone, fallback, why);
+        if (!dryRun)
+            _logger.LogInformation("Outbound REDIRECTED from {Original} to {Fallback}: {Why}",
+                contact.Phone, fallback, why);
 
         return new RoutingDecision(RoutingOutcome.Redirected, fallback, $"{why} Redirected to the fallback.");
     }
 
     /// <summary>
-    /// Records a delivered send so the redirect dedupe above can see it. Called by the guardrail
-    /// on the same path that already writes the volume-cap row.
+    /// Stamps the identity fields the dedupe matches on. Called by the guardrail on the same
+    /// path that writes the volume-cap row; note that the row it stamps is an ATTEMPT until the
+    /// caller confirms delivery — see <see cref="Models.OutboundSendLog.Delivered"/>.
     /// </summary>
     public static void Stamp(OutboundSendLog log, string? category, string body)
     {

@@ -221,4 +221,73 @@ public class OutboundRoutingIntegrationTests
 
         Assert.Equal("other", (await db.OutboundSendLogs.SingleAsync()).Category);
     }
+
+    // ─── Delivery confirmation ───────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// The full happy-path contract: CheckAsync writes an attempt, the caller sends, then
+    /// confirms. Only after that confirmation does the fan-out dedupe treat the message as
+    /// having arrived — the Sjoerd leg of a night-time fan-out is suppressed instead of
+    /// delivering Martien a duplicate.
+    /// </summary>
+    [Fact]
+    public async Task A_confirmed_direct_send_suppresses_the_redirect_leg_of_the_fan_out()
+    {
+        using var db = NewContext();
+        // Muted rather than out-of-window: the guardrail evaluates at UtcNow, so a window-based
+        // redirect would make this test's outcome depend on the wall clock it runs at.
+        await SeedPolicyAsync(db, sjoerdWindowStart: 0, sjoerdWindowEnd: 24);
+        (await db.OutboundContacts.FirstAsync(c => c.Phone == Sjoerd)).Enabled = false;
+        await db.SaveChangesAsync();
+        var svc = NewService(db);
+
+        var direct = await svc.CheckAsync("sendMessage", Martien, "deploy klaar", 1, "deploy:valsuani");
+        Assert.True(direct.Allowed);
+        await svc.ConfirmDeliveredAsync(direct);            // the WhatsApp send succeeded
+
+        var redirected = await svc.CheckAsync("sendMessage", Sjoerd, "deploy klaar", 1, "deploy:valsuani");
+
+        Assert.True(redirected.Suppressed);
+    }
+
+    /// <summary>
+    /// And the reason confirmation exists at all: when the send FAILED (no confirm), the
+    /// redirect must still deliver. The previous behavior counted the attempt as a delivery
+    /// and suppressed the rescue — the alert vanished with every indicator green.
+    /// </summary>
+    [Fact]
+    public async Task An_unconfirmed_send_does_not_rob_the_redirect_of_its_delivery()
+    {
+        using var db = NewContext();
+        await SeedPolicyAsync(db, sjoerdWindowStart: 0, sjoerdWindowEnd: 24);
+        (await db.OutboundContacts.FirstAsync(c => c.Phone == Sjoerd)).Enabled = false;
+        await db.SaveChangesAsync();
+        var svc = NewService(db);
+
+        var direct = await svc.CheckAsync("sendMessage", Martien, "deploy klaar", 1, "deploy:valsuani");
+        Assert.True(direct.Allowed);
+        // No ConfirmDeliveredAsync: the session was down, SendMessageAsync threw.
+
+        var redirected = await svc.CheckAsync("sendMessage", Sjoerd, "deploy klaar", 1, "deploy:valsuani");
+
+        Assert.True(redirected.Allowed);
+        Assert.Equal(Martien, redirected.Recipient);
+    }
+
+    /// <summary>Attempts count against the caps whether or not they were confirmed — a retry
+    /// storm of failing sends must still exhaust its budget.</summary>
+    [Fact]
+    public async Task Unconfirmed_attempts_still_count_against_the_volume_caps()
+    {
+        using var db = NewContext();
+        await SeedPolicyAsync(db);
+        var svc = NewService(db, maxPerRecipientPer24h: 2);
+
+        Assert.True((await svc.CheckAsync("sendMessage", Martien, "a", 1, "approval")).Allowed);
+        Assert.True((await svc.CheckAsync("sendMessage", Martien, "b", 1, "approval")).Allowed);
+        var third = await svc.CheckAsync("sendMessage", Martien, "c", 1, "approval");
+
+        Assert.False(third.Allowed);
+        Assert.Contains("volume cap", third.Reason);
+    }
 }

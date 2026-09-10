@@ -246,7 +246,21 @@ Manage the policy at `GET/POST /api/wa/routing`, or in the bridge admin under Ro
 
 ### Which endpoints are governed
 
-Every outbound path, including the two that used to skip the check entirely: `sendReply` and `forwardMessage`. If you relied on either to reach a number outside the policy, it will now be blocked once the flag is on.
+Every outbound path driven by an **API key**, including the two that used to skip the check entirely: `sendReply` and `forwardMessage`. If you relied on either to reach a number outside the policy, it will now be blocked once the flag is on.
+
+The exception is a human: the dashboard's session routes (`sessions/{id}/send`, `/send-media`, `/forward`) skip the guardrail when called with a browser login (JWT). Routing exists to stop automated senders waking people; a person at the keyboard choosing to message someone is the case the policy explicitly preserves, and group chats and customers match no contact by design. The same three routes called with an API key are policed in full.
+
+### Delivery confirmation and duplicate suppression
+
+The guardrail records every allowed send *before* you perform it (that is what makes the volume caps unskippable), and marks it delivered only after the send succeeds. The duplicate suppression reads only delivered rows — a send that failed can never suppress the retry or redirect that would actually deliver it. Consequences for callers:
+
+- A `suppressed: true` response means the recipient genuinely already received that exact message (same text, same category) within the last 10 minutes. Treat it as success.
+- Suppression is order-independent: the direct leg of a fan-out is suppressed if a redirect already delivered the same message, and vice versa.
+- A message with an empty body is never suppressed. Media dedupes on caption **plus** file identity (URL or filename), so distinct captionless files do not collide.
+
+### Seeding
+
+The appsettings seed runs once per database, recorded by a marker in `AppFlags`. Emptying the contact table in the admin UI is respected as a decision — a restart does not re-seed. To genuinely re-seed: delete the `OutboundRoutingSeeded` row from `AppFlags` and restart. Seed entries are validated like API writes (usable phone, known timezone, sane hours, non-empty categories); invalid entries are skipped and logged, never half-applied.
 
 ## Rate Limiting
 
@@ -457,6 +471,20 @@ curl -X GET "https://whatsapp.wreckingball.ai/api/wa/getMessages?chatId=31612345
 - **GitHub Issues**: https://github.com/martiendejong/whatsappbridge/issues
 
 ## Changelog
+
+### 2026-09-11 (second round, after adversarial review)
+
+Three independent reviews of the round below produced eleven findings; all are fixed here.
+
+- **A failed send can no longer suppress its own rescue.** Send-log rows are written as attempts and confirmed as delivered only after the WhatsApp send succeeds; duplicate suppression reads confirmed rows only. Previously a send that failed still counted as "already delivered" and the redirect that would have rescued it was suppressed — the alert vanished with all indicators green.
+- **Duplicate suppression is order-independent** (the direct leg after a redirect used to slip through) and **blank bodies never dedupe** (two distinct captionless media files collided on the empty caption and the second was silently dropped). Media now dedupes on caption + file identity.
+- **Muting no longer widens delivery.** The category check runs before the mute check, so muting a contact cannot forward categories they never accepted to their fallback.
+- **Human dashboard sends are exempt from the guardrail** (JWT only; API keys on the same routes stay policed). Without this, arming the flag made the Messages screen unable to reach group chats, customers, or anyone but Martien.
+- **The seed runs once per database** (AppFlags marker) instead of "whenever the table is empty" — emptying the table in the UI no longer resurrects the shipped policy on the next restart. Seed entries are validated like API writes.
+- **The audit middleware sits before authentication**, so framework-rejected 401/403s — the credential-guessing an audit log exists to catch — are now logged. It writes rows in its own DI scope (a controller's failed SaveChanges could poison the shared context and eat the audit row for exactly the failing request), bounds how much request body it buffers, and encrypts stored bodies under the same key as the Messages table when encryption is on.
+- **SecretMasker recognises grouped one-time codes** ("483 920", "4839-2011") and suffixed credential parameters (`refresh_token=`, `id_token=`, `api-key=`) while leaving `postcode`/`countrycode`/`monkey` alone.
+- **`request-history` and `send-retry-receipt` check session ownership**, not just authentication — an authenticated stranger with someone else's sessionId got history pulls and protocol injection past the login.
+- **Deleting a contact that is someone's fallback is refused** with the list of dependants; **duplicate aliases are refused**; the DevelopmentOnly gate runs before model binding so a malformed POST no longer leaks a validation problem from a route that claims not to exist; `preview` reports whether the policy is actually enforced and fabricates no log lines; the Routing page is hidden from non-admin users; and the audit page's phone filter uses the shared normalizer (a fifth private copy had the leading-"+" bug, so filtering on "+31…" matched nothing).
 
 ### 2026-09-11
 

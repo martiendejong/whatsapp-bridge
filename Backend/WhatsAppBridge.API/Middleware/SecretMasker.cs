@@ -29,9 +29,16 @@ public static class SecretMasker
     /// <summary>
     /// Secret-bearing query parameters: "...?token=abc123" -> "...?token=***". Stops at the next
     /// "&amp;" or whitespace so the rest of the URL, which is the useful part, survives.
+    ///
+    /// Three shapes of parameter name, because a literal list missed the common real-world ones:
+    /// "refresh_token", "id_token" and "client_secret" all sailed through a list that only knew
+    /// "token" and "secret" exactly. So: any name ENDING in token/secret/password ("×_token" is
+    /// how OAuth names every credential it mints); "key"/"auth" only when they are the whole name
+    /// or follow a separator (api_key yes, monkey no); and a short exact list for the rest.
+    /// "code" stays exact-match only — suffix-matching it would eat postcode and countrycode.
     /// </summary>
     private static readonly Regex QuerySecret = new(
-        @"([?&](?:token|access_token|auth|key|api_key|apikey|secret|code|otp|signature|sig|pw|password)=)[^\s&""']+",
+        @"([?&](?:[a-z0-9_\-]*(?:token|secret|password|passwd|pwd)|(?:[a-z0-9_\-]*[_\-])?(?:key|auth)|code|otp|signature|sig|pw)=)[^\s&""']+",
         RegexOptions.IgnoreCase | RegexOptions.Compiled, Timeout);
 
     /// <summary>
@@ -52,9 +59,17 @@ public static class SecretMasker
     /// a short run of separator characters in between ("code: 123456", "je verificatiecode is
     /// 8452"). The keyword requirement is what keeps this off ordinary numbers in ordinary
     /// sentences.
+    ///
+    /// The digits may be grouped — "483 920", "4839-2011" — because grouped is how SMS and
+    /// WhatsApp actually present codes. Requiring a contiguous run meant the single most common
+    /// presentation of the single most common secret passed through unmasked (or worse,
+    /// half-masked: "4839-2011" became "***-2011", which reads as masked while leaving half the
+    /// code standing). Still 4-8 digits total and never a longer run: an 11-digit phone number
+    /// after the word "code" does not match, because every attempt ends adjacent to yet another
+    /// digit.
     /// </summary>
     private static readonly Regex OneTimeCode = new(
-        @"\b((?:verificatie|verificatie-|beveiligings|toegangs)?code|pincode|pin|otp|token|wachtwoord|password)\b(\W{0,4}(?:is|=|:)?\W{0,4})(\d{4,8})\b",
+        @"\b((?:verificatie|verificatie-|beveiligings|toegangs)?code|pincode|pin|otp|token|wachtwoord|password)\b(\W{0,4}(?:is|=|:)?\W{0,4})(\d(?:[ \-]?\d){3,7})(?!\d)",
         RegexOptions.IgnoreCase | RegexOptions.Compiled, Timeout);
 
     /// <summary>
