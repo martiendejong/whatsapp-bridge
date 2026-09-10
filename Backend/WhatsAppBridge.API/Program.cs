@@ -126,6 +126,12 @@ app.UseCors("AllowFrontend");
 app.UseAuthentication();
 app.UseAuthorization();
 
+// After authentication so the audit row knows WHICH API key called, and wrapping everything
+// below so it sees the final status code. Deliberately middleware rather than per-controller:
+// only 3 of the 20+ endpoints invoke the outbound guardrail, and an audit trail wired in the
+// same per-controller way would inherit that same gap on every endpoint added later.
+app.UseMiddleware<WhatsAppBridge.API.Middleware.ApiAuditMiddleware>();
+
 app.MapControllers();
 
 // Deploy-time version tracking: lets JengoAGI (or anyone) confirm which version a running
@@ -261,6 +267,35 @@ using (var scope = app.Services.CreateScope())
             LastInboundAtUtc TEXT NOT NULL
         );
         CREATE UNIQUE INDEX IF NOT EXISTS IX_InboundContacts_Sender ON InboundContacts (Sender);
+        """);
+
+    // Full API audit trail: one row per request, written by ApiAuditMiddleware. Answers
+    // "wat is er via deze API-key verstuurd, naar welk nummer, en ging het eruit of niet".
+    // Same self-heal (CREATE IF NOT EXISTS at startup) reason as the tables above.
+    db.Database.ExecuteSqlRaw("""
+        CREATE TABLE IF NOT EXISTS ApiAuditLogs (
+            Id INTEGER NOT NULL CONSTRAINT PK_ApiAuditLogs PRIMARY KEY AUTOINCREMENT,
+            AtUtc TEXT NOT NULL,
+            UserId INTEGER NULL,
+            ApiConnectionId INTEGER NULL,
+            ApiConnectionName TEXT NULL,
+            AuthScheme TEXT NOT NULL,
+            Method TEXT NOT NULL,
+            Path TEXT NOT NULL,
+            EventType TEXT NOT NULL,
+            Phone TEXT NULL,
+            Body TEXT NULL,
+            ResponsePreview TEXT NULL,
+            StatusCode INTEGER NOT NULL,
+            Outcome TEXT NOT NULL,
+            DurationMs INTEGER NOT NULL,
+            ClientIp TEXT NULL
+        );
+        CREATE INDEX IF NOT EXISTS IX_ApiAuditLogs_AtUtc ON ApiAuditLogs (AtUtc);
+        CREATE INDEX IF NOT EXISTS IX_ApiAuditLogs_Phone_AtUtc ON ApiAuditLogs (Phone, AtUtc);
+        CREATE INDEX IF NOT EXISTS IX_ApiAuditLogs_EventType_AtUtc ON ApiAuditLogs (EventType, AtUtc);
+        CREATE INDEX IF NOT EXISTS IX_ApiAuditLogs_ApiConnectionId_AtUtc ON ApiAuditLogs (ApiConnectionId, AtUtc);
+        CREATE INDEX IF NOT EXISTS IX_ApiAuditLogs_UserId ON ApiAuditLogs (UserId);
         """);
 
     // Global key/value settings (engine switch feature): holds the admin-selected WhatsApp

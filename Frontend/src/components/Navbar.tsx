@@ -21,6 +21,9 @@ export default function Navbar() {
           <Link to="/messages" style={{ color: 'white', textDecoration: 'none' }}>
             Berichten
           </Link>
+          <Link to="/audit" style={{ color: 'white', textDecoration: 'none' }}>
+            Audit log
+          </Link>
           <Link to="/account" style={{ color: 'white', textDecoration: 'none' }}>
             Account
           </Link>
