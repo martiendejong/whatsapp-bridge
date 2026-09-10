@@ -49,7 +49,10 @@ public class OutboundGuardrailServiceTests
             values[$"OutboundGuardrail:AllowList:{i}"] = list[i];
 
         var config = BuildConfig(values);
-        return new OutboundGuardrailService(config, db, NullLogger<OutboundGuardrailService>.Instance);
+        // No OutboundContacts rows are seeded in this suite, so the routing service reports
+        // "not configured" and these tests keep exercising the pre-routing behaviour exactly.
+        var routing = new OutboundRoutingService(db, NullLogger<OutboundRoutingService>.Instance);
+        return new OutboundGuardrailService(config, db, routing, NullLogger<OutboundGuardrailService>.Instance);
     }
 
     // ─── Regression: pre-existing allow-list / rate-limit behavior must be unchanged ──────────

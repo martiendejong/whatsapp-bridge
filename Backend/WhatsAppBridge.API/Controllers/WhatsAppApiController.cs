@@ -141,9 +141,9 @@ public class WhatsAppApiController : ControllerBase
             if (!success)
                 return Unauthorized(new { error });
 
-            var (allowed, blockReason) = await _outboundGuardrail.CheckAsync("sendMessage", request.To, request.Body, userId);
-            if (!allowed)
-                return StatusCode(403, new { error = blockReason, blocked = true });
+            var guard = await _outboundGuardrail.CheckAsync("sendMessage", request.To, request.Body, userId, request.Category);
+            if (!guard.Allowed)
+                return StatusCode(403, new { error = guard.Reason, blocked = true });
 
             var sessionId = await GetUserSessionId(userId!.Value, request.SessionId);
             if (sessionId == null)
@@ -156,9 +156,11 @@ public class WhatsAppApiController : ControllerBase
                 ? _encryptionService.Encrypt(request.Body)
                 : request.Body;
 
-            var result = await _whatsappService.SendMessageAsync(sessionId, request.To, messageToSend);
+            // guard.Recipient, not request.To — routing may have redirected this away from
+            // someone who is asleep. Sending to request.To here would silently undo the policy.
+            var result = await _whatsappService.SendMessageAsync(sessionId, guard.Recipient, messageToSend);
 
-            return Ok(result);
+            return Ok(new { result, routedTo = guard.Recipient, routing = guard.RoutingNote });
         }
         catch (WhatsAppServiceException ex)
         {
@@ -270,9 +272,9 @@ public class WhatsAppApiController : ControllerBase
             if (!success)
                 return Unauthorized(new { error });
 
-            var (allowed, blockReason) = await _outboundGuardrail.CheckAsync("sendMedia", request.To, request.Caption ?? "", userId);
-            if (!allowed)
-                return StatusCode(403, new { error = blockReason, blocked = true });
+            var guard = await _outboundGuardrail.CheckAsync("sendMedia", request.To, request.Caption ?? "", userId, request.Category);
+            if (!guard.Allowed)
+                return StatusCode(403, new { error = guard.Reason, blocked = true });
 
             var sessionId = await GetUserSessionId(userId!.Value, request.SessionId);
             if (sessionId == null)
@@ -293,7 +295,7 @@ public class WhatsAppApiController : ControllerBase
             var uri = new Uri(request.MediaUrl);
             var fn = Path.GetFileName(uri.LocalPath);
             var result = await _whatsappService.SendMediaAsync(
-                sessionId, request.To, mediaType, mimeType, fileBytes,
+                sessionId, guard.Recipient, mediaType, mimeType, fileBytes,
                 request.Caption ?? "", fn);
 
             return Ok(result);
@@ -658,9 +660,9 @@ public class WhatsAppApiController : ControllerBase
         if (!success)
             return Unauthorized(new { error });
 
-        var (allowed, blockReason) = await _outboundGuardrail.CheckAsync("forwardMessage", request.ToJid, request.Text, userId);
-        if (!allowed)
-            return StatusCode(403, new { error = blockReason, blocked = true });
+        var guard = await _outboundGuardrail.CheckAsync("forwardMessage", request.ToJid, request.Text, userId, request.Category);
+        if (!guard.Allowed)
+            return StatusCode(403, new { error = guard.Reason, blocked = true });
 
         var sessionId = await GetUserSessionId(userId!.Value, request.SessionId);
         if (sessionId == null)
@@ -668,7 +670,7 @@ public class WhatsAppApiController : ControllerBase
 
         try
         {
-            var result = await _whatsappService.ForwardMessageAsync(sessionId!, request.ToJid, request.Text);
+            var result = await _whatsappService.ForwardMessageAsync(sessionId!, guard.Recipient, request.Text);
             return Ok(result);
         }
         catch (Exception ex)
@@ -1019,11 +1021,15 @@ public class WhatsAppApiController : ControllerBase
     }
 }
 
-public record SendMessageRequest(string To, string Body, string? SessionId = null);
+// Category is what kind of message this is ("approval", "deploy:valsuani", "serverdown",
+// "reply", ...). OutboundRoutingService uses it to decide who actually receives it and whether
+// their window is open. Optional and defaulted so every existing caller keeps working; an
+// absent category is treated as "other", which by policy only reaches Martien.
+public record SendMessageRequest(string To, string Body, string? SessionId = null, string? Category = null);
 public record SetContactNameApiRequest(string Jid, string? Name = null);
 public record SendReplyRequest(string To, string Body, string QuotedMessageId, string QuotedFromJid, string? SessionId = null);
 public record RequestHistoryRequest(string ChatId, int Count = 50, bool NoAnchor = false, string? SessionId = null);
-public record SendMediaRequest(string To, string MediaUrl, string? Caption = null, string? SessionId = null);
+public record SendMediaRequest(string To, string MediaUrl, string? Caption = null, string? SessionId = null, string? Category = null);
 public record DownloadMediaRequest(
     string? MediaUrl = null,
     string? MediaKey = null,
@@ -1034,7 +1040,7 @@ public record DownloadMediaRequest(
     string? ChatJid = null,
     string? MessageId = null);
 public record RevokeMessageRequest(string ChatJid, string MessageId, bool FromMe = true, string? SessionId = null);
-public record ForwardMessageRequest(string ToJid, string Text, string? SessionId = null);
+public record ForwardMessageRequest(string ToJid, string Text, string? SessionId = null, string? Category = null);
 public record SendTypingRequest(string ChatJid, bool IsTyping = true, string? SessionId = null);
 public record SetPresenceRequest(bool Available, string? SessionId = null);
 public record CreateGroupRequest(string Subject, List<string> Participants, string? SessionId = null);

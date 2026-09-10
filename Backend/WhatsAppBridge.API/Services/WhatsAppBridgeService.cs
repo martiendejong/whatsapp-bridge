@@ -1115,11 +1115,12 @@ public class WhatsAppBridgeService : IAsyncDisposable
                 if (string.IsNullOrWhiteSpace(replyText))
                     return;
 
-                var (allowed, reason) = await guardrail.CheckAsync(
-                    OutboundGuardrailService.CoachOsReplyEndpoint, msg.From, replyText, userId: null);
-                if (!allowed)
+                var guard = await guardrail.CheckAsync(
+                    OutboundGuardrailService.CoachOsReplyEndpoint, msg.From, replyText, userId: null,
+                    category: "reply");
+                if (!guard.Allowed)
                 {
-                    _logger.LogWarning("CoachOsIntake: reply to {From} blocked by guardrail: {Reason}", msg.From, reason);
+                    _logger.LogWarning("CoachOsIntake: reply to {From} blocked by guardrail: {Reason}", msg.From, guard.Reason);
                     return;
                 }
 

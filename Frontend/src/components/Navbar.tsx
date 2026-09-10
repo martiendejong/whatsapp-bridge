@@ -24,6 +24,9 @@ export default function Navbar() {
           <Link to="/audit" style={{ color: 'white', textDecoration: 'none' }}>
             Audit log
           </Link>
+          <Link to="/routing" style={{ color: 'white', textDecoration: 'none' }}>
+            Routing
+          </Link>
           <Link to="/account" style={{ color: 'white', textDecoration: 'none' }}>
             Account
           </Link>
