@@ -326,7 +326,16 @@ using (var scope = app.Services.CreateScope())
     // start because of a typo in a contact list is an outage.
     try
     {
-        if (!db.OutboundContacts.Any() && !AppFlagExists(db, "OutboundRoutingSeeded"))
+        // Backfill for databases whose contacts predate the marker (seeded by an earlier build
+        // of this feature). Without this, exactly those databases still had the resurrection
+        // trap: contacts present, marker absent, so emptying the table in the UI plus one
+        // restart re-seeded the policy anyway. A populated table IS the evidence that seeding
+        // (or manual entry) already happened — record it as such.
+        if (db.OutboundContacts.Any() && !AppFlagExists(db, "OutboundRoutingSeeded"))
+        {
+            SetAppFlag(db, "OutboundRoutingSeeded", "backfilled: contacts already present");
+        }
+        else if (!db.OutboundContacts.Any() && !AppFlagExists(db, "OutboundRoutingSeeded"))
         {
             var seedSection = app.Configuration.GetSection("OutboundRouting:Seed");
             var seed = seedSection.Get<List<WhatsAppBridge.API.Models.OutboundContact>>() ?? new();
