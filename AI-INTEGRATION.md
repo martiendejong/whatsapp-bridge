@@ -262,6 +262,30 @@ The guardrail records every allowed send *before* you perform it (that is what m
 
 The appsettings seed runs once per database, recorded by a marker in `AppFlags`. Emptying the contact table in the admin UI is respected as a decision — a restart does not re-seed. To genuinely re-seed: delete the `OutboundRoutingSeeded` row from `AppFlags` and restart. Seed entries are validated like API writes (usable phone, known timezone, sane hours, non-empty categories); invalid entries are skipped and logged, never half-applied.
 
+## Server monitoring
+
+The bridge is the alerting brain for server monitors. A monitor script reports what it sees — every ~5 minutes, up and down alike — and the bridge decides what is worth a WhatsApp message:
+
+```
+POST /api/wa/monitor
+Authorization: Bearer <api-token>
+
+{ "subject": "portofgiethoorn.com", "status": "down", "detail": "HTTP 502" }
+```
+
+The rules, so your script does not need any of its own:
+
+- **Kritiek** subjects (the production domains: bugattiinsights.com, app.bugattiinsights.com, portofgiethoorn.com, artrevisionist.com) alert after **5 minutes** down; everything else after **30 minutes**. A blip that recovers in between produces nothing, in either direction.
+- **One alert per outage**, however often you repeat "down". Recovery gets its own message ("weer online na 40 min") — but only if the outage was announced.
+- **Silence is an alert.** If your monitor stops reporting for 60 minutes, the bridge announces THAT — a dead watchdog looks identical to a healthy server, and that difference has cost real outage visibility before. This is also why you must report "up" periodically rather than only on state changes.
+- **Unknown subjects are welcome**: they self-register as normaal on first report. Promote them to kritiek in the bridge admin (Routing page, Servermonitor section) or via `POST /api/wa/monitor/subjects` (admin JWT) — no deploy needed.
+
+The response tells you what your report amounted to: `{ "disposition": "recorded" | "waiting" | "alerted" | "already-alerted" | "recovered" | "blip" | "ok", ... }`. `GET /api/wa/monitor` returns the full current picture.
+
+Alerts go out through the same outbound guardrail as every other send, under category `serverdown` — so the routing policy (once armed) decides who is woken, and a runaway monitor is rate-capped like any other runaway sender.
+
+Delivery is not fire-and-forget. If the WhatsApp session happens to be down (or the send fails) at the moment an alert is due, the alert claim is released and the minute-sweep retries until it lands — a bridge outage at the exact threshold minute must not swallow the announcement. When one sweep tick produces several alerts (one VPS taking all its subjects down), they go out as a single combined message rather than racing each other into the volume caps. Alert texts carry the outage's start time, so two outages of the same server minutes apart are never deduplicated into one.
+
 ## Rate Limiting
 
 Routing decides *who*; the caps below decide *how often*. A redirect buys no exemption from them.
@@ -471,6 +495,10 @@ curl -X GET "https://whatsapp.wreckingball.ai/api/wa/getMessages?chatId=31612345
 - **GitHub Issues**: https://github.com/martiendejong/whatsappbridge/issues
 
 ## Changelog
+
+### 2026-09-11 (server monitor)
+
+- New `POST /api/wa/monitor` status feed: monitors report up/down every ~5 minutes, the bridge decides what is worth a WhatsApp message. Kritiek subjects (the four production domains, seeded from config) alert after 5 minutes down, everything else after 30; one alert per outage; recovery messages for announced outages; blips are silent; a monitor that itself goes quiet for an hour is announced ("een stille monitor ziet er hetzelfde uit als een gezonde server"). Subjects self-register as normaal on first report; tiers are editable without a deploy on the Routing page or via `POST /api/wa/monitor/subjects` (admin). Alerts route through the guardrail under category `serverdown`. See [Server monitoring](#server-monitoring).
 
 ### 2026-09-11 (second round, after adversarial review)
 

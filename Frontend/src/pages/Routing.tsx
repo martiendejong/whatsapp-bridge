@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { routing, RoutingContact } from '../api';
+import { routing, RoutingContact, monitor, MonitorSubject, reasonFrom } from '../api';
 
 /**
  * The outbound policy, editable without a deploy: who may be messaged, about what, and at which
@@ -342,6 +342,149 @@ export default function Routing() {
             <div style={{ marginTop: 4, color: '#555' }}>{preview.reason}</div>
           </div>
         )}
+      </div>
+
+      <MonitorSection />
+    </div>
+  );
+}
+
+/**
+ * De servermonitor: welke domeinen kritiek zijn (melding na 5 min offline) en welke normaal
+ * (30 min), plus de actuele staat. Monitors melden zich elke ~5 minuten bij
+ * POST /api/wa/monitor; de bridge beslist wat een appje waard is. Onbekende domeinen
+ * registreren zichzelf als normaal — het niveau is hier aan te passen zonder deploy.
+ */
+function MonitorSection() {
+  const [subjects, setSubjects] = useState<MonitorSubject[]>([]);
+  const [error, setError] = useState('');
+  const [newSubject, setNewSubject] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      setSubjects((await monitor.subjects()).data);
+      setError('');
+    } catch {
+      setError('Kon de monitorlijst niet laden.');
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+    const iv = setInterval(load, 30000);
+    return () => clearInterval(iv);
+  }, [load]);
+
+  const setTier = async (s: MonitorSubject, critical: boolean) => {
+    setBusy(true);
+    try {
+      await monitor.save(s.subject, critical);
+      await load();
+    } catch (e) {
+      setError(reasonFrom(e) ?? 'Niveau wijzigen mislukt.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const add = async () => {
+    if (!newSubject.trim()) return;
+    setBusy(true);
+    try {
+      await monitor.save(newSubject.trim(), true);
+      setNewSubject('');
+      await load();
+    } catch (e) {
+      setError(reasonFrom(e) ?? 'Toevoegen mislukt.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async (s: MonitorSubject) => {
+    setBusy(true);
+    try {
+      await monitor.remove(s.id);
+      await load();
+    } catch (e) {
+      setError(reasonFrom(e) ?? 'Verwijderen mislukt.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const stateLabel = (s: MonitorSubject) => {
+    if (s.minutesSinceLastReport === null) return { text: 'nog nooit gemeld', color: '#777' };
+    if (s.monitorSilent) return { text: `monitor stil (${s.minutesSinceLastReport} min)`, color: '#b45309' };
+    if (s.status === 'down') return { text: s.downAlerted ? 'offline · gemeld' : 'offline · wacht op drempel', color: '#b91c1c' };
+    return { text: 'online', color: '#15803d' };
+  };
+
+  return (
+    <div className="card" style={{ marginTop: 16 }}>
+      <h3 style={{ marginTop: 0 }}>Servermonitor</h3>
+      <p style={{ color: '#555', marginTop: 4 }}>
+        Kritiek = melding na 5 min offline, normaal = na 30 min. Onbekende servers melden zich
+        vanzelf aan als normaal. Een monitor die zelf stilvalt geeft ook een melding.
+      </p>
+      {error && <div style={{ color: '#b91c1c', marginBottom: 8 }}>{error}</div>}
+
+      {subjects.length > 0 && (
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 14 }}>
+          <thead>
+            <tr style={{ textAlign: 'left', borderBottom: '2px solid #e5e7eb' }}>
+              <th style={{ padding: '8px 6px' }}>Server</th>
+              <th style={{ padding: '8px 6px' }}>Niveau</th>
+              <th style={{ padding: '8px 6px' }}>Status</th>
+              <th style={{ padding: '8px 6px' }}>Laatste melding</th>
+              <th style={{ padding: '8px 6px' }}></th>
+            </tr>
+          </thead>
+          <tbody>
+            {subjects.map((s) => {
+              const st = stateLabel(s);
+              return (
+                <tr key={s.id} style={{ borderBottom: '1px solid #f1f5f9' }}>
+                  <td style={{ padding: '8px 6px' }}>
+                    <strong>{s.subject}</strong>
+                    {s.lastDetail && <div style={{ fontSize: 12, color: '#777' }}>{s.lastDetail}</div>}
+                  </td>
+                  <td style={{ padding: '8px 6px' }}>
+                    <select
+                      value={s.critical ? 'kritiek' : 'normaal'}
+                      disabled={busy}
+                      onChange={(e) => setTier(s, e.target.value === 'kritiek')}
+                      style={{ padding: 4 }}
+                    >
+                      <option value="kritiek">kritiek · 5 min</option>
+                      <option value="normaal">normaal · 30 min</option>
+                    </select>
+                  </td>
+                  <td style={{ padding: '8px 6px', fontWeight: 600, color: st.color }}>{st.text}</td>
+                  <td style={{ padding: '8px 6px', color: '#555' }}>
+                    {s.minutesSinceLastReport === null ? '—' : `${s.minutesSinceLastReport} min geleden`}
+                  </td>
+                  <td style={{ padding: '8px 6px', textAlign: 'right' }}>
+                    <button className="btn" disabled={busy} onClick={() => remove(s)}>Verwijder</button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+
+      <div style={{ display: 'flex', gap: 8, marginTop: 12, alignItems: 'center' }}>
+        <input
+          value={newSubject}
+          onChange={(e) => setNewSubject(e.target.value)}
+          placeholder="domein, bv. nieuw.voorbeeld.nl"
+          style={{ padding: 8, minWidth: 260 }}
+        />
+        <button className="btn" disabled={busy || !newSubject.trim()} onClick={add}>
+          Toevoegen als kritiek
+        </button>
       </div>
     </div>
   );

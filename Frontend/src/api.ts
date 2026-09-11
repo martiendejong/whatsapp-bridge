@@ -152,4 +152,25 @@ export const admin = {
     api.put('/api/admin/engine', { engine, restartSessions }),
 };
 
+export interface MonitorSubject {
+  id: number;
+  subject: string;
+  critical: boolean;
+  thresholdMinutes: number;
+  status: string;
+  lastDetail: string | null;
+  firstDownAtUtc: string | null;
+  downAlerted: boolean;
+  monitorSilent: boolean;
+  lastReportAtUtc: string;
+  minutesSinceLastReport: number | null;
+}
+
+export const monitor = {
+  subjects: () => api.get<MonitorSubject[]>('/api/wa/monitor/subjects'),
+  save: (subject: string, critical: boolean) =>
+    api.post('/api/wa/monitor/subjects', { subject, critical }),
+  remove: (id: number) => api.delete(`/api/wa/monitor/subjects/${id}`),
+};
+
 export default api;

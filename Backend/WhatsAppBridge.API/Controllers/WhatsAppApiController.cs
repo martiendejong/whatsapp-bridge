@@ -19,19 +19,25 @@ public class WhatsAppApiController : ControllerBase
     private readonly WhatsAppBridgeService _whatsappService;
     private readonly EncryptionService _encryptionService;
     private readonly OutboundGuardrailService _outboundGuardrail;
+    private readonly ServerMonitorService _monitor;
+    private readonly MonitorAlertDispatcher _monitorDispatcher;
 
     public WhatsAppApiController(
         AppDbContext context,
         AuthService authService,
         WhatsAppBridgeService whatsappService,
         EncryptionService encryptionService,
-        OutboundGuardrailService outboundGuardrail)
+        OutboundGuardrailService outboundGuardrail,
+        ServerMonitorService monitor,
+        MonitorAlertDispatcher monitorDispatcher)
     {
         _context = context;
         _authService = authService;
         _whatsappService = whatsappService;
         _encryptionService = encryptionService;
         _outboundGuardrail = outboundGuardrail;
+        _monitor = monitor;
+        _monitorDispatcher = monitorDispatcher;
     }
 
     /// <summary>
@@ -1095,6 +1101,97 @@ public class WhatsAppApiController : ControllerBase
         var status = _whatsappService.GetMessageStatus(resolvedSessionId!, msgId);
         return Ok(new { messageId = msgId, status = status?.ToString() ?? "unknown" });
     }
+
+    /// <summary>
+    /// Status feed for server monitoring. Monitors POST what they see, every ~5 minutes,
+    /// up or down alike:
+    ///
+    ///   POST /api/wa/monitor  { "subject": "portofgiethoorn.com", "status": "down", "detail": "HTTP 502" }
+    ///
+    /// The BRIDGE decides whether that is worth a WhatsApp message — kritiek subjects alert
+    /// after 5 minutes down, everything else after 30, one alert per outage, a recovery
+    /// message when an announced outage ends, and a "your monitor is silent" alert when the
+    /// reports themselves stop coming. Callers report state; they never decide urgency. That
+    /// split is the point: three separate watchdog scripts each deciding when to alert is how
+    /// the same outage once produced three messages and a different one produced none.
+    /// </summary>
+    [HttpPost("monitor")]
+    public async Task<IActionResult> MonitorReport([FromBody] MonitorReportRequest request)
+    {
+        var (success, _, error) = await ValidateApiToken();
+        if (!success)
+            return Unauthorized(new { error });
+
+        // Same validation bar as the admin form. Without it, subjects self-registered without
+        // limit — a probe URL with a run id in it minted a fresh subject every five minutes,
+        // each earning its own silence alert an hour later.
+        var subject = ServerMonitorService.Normalize(request?.Subject ?? string.Empty);
+        if (!ServerMonitorService.IsValidSubject(subject))
+            return BadRequest(new { error = "subject must be a hostname, e.g. \"portofgiethoorn.com\"." });
+        var status = request!.Status?.Trim().ToLowerInvariant();
+        if (status is not ("up" or "down"))
+            return BadRequest(new { error = "status must be \"up\" or \"down\"." });
+
+        var outcome = await _monitor.ReportAsync(subject, status, request.Detail, DateTime.UtcNow);
+
+        if (outcome.Alert != null)
+        {
+            var dispatched = await _monitorDispatcher.DispatchAsync(outcome.Alert);
+            // A transient failure hands the claim back so the minute-sweep retries; a policy
+            // refusal is a decision and the claim stands. See MonitorAlertDispatcher.
+            if (dispatched == MonitorAlertDispatcher.DispatchOutcome.TransientFailure)
+                await _monitor.ReleaseAlertClaimAsync(outcome.Alert);
+        }
+
+        return Ok(new
+        {
+            subject = outcome.Subject,
+            status = outcome.Status,
+            tier = outcome.Critical ? "kritiek" : "normaal",
+            thresholdMinutes = outcome.ThresholdMinutes,
+            // What this report amounted to: "recorded" (outage clock started), "waiting"
+            // (down, threshold not yet reached), "alerted", "already-alerted", "recovered",
+            // "blip" (came back before anyone was told), or "ok".
+            disposition = outcome.Disposition,
+            alerted = outcome.Alert != null,
+        });
+    }
+
+    /// <summary>
+    /// The monitor's current picture: every known subject with its tier, state and timing.
+    /// GET /api/wa/monitor
+    /// </summary>
+    [HttpGet("monitor")]
+    public async Task<IActionResult> MonitorStatus()
+    {
+        var (success, _, error) = await ValidateApiToken();
+        if (!success)
+            return Unauthorized(new { error });
+
+        var now = DateTime.UtcNow;
+        var subjects = await _context.MonitorSubjects
+            .AsNoTracking()
+            .OrderBy(s => s.Subject)
+            .ToListAsync();
+
+        return Ok(subjects.Select(s => new
+        {
+            s.Subject,
+            tier = s.Critical ? "kritiek" : "normaal",
+            thresholdMinutes = _monitor.ThresholdMinutes(s),
+            s.Status,
+            s.LastDetail,
+            s.FirstDownAtUtc,
+            downAlerted = s.DownAlertAtUtc != null,
+            monitorSilent = s.SilenceAlertAtUtc != null,
+            s.LastReportAtUtc,
+            // Null for a subject that never reported — a default DateTime here rendered as
+            // "silent for a billion minutes", where the truth is "monitor not built yet".
+            minutesSinceLastReport = s.LastReportAtUtc == default
+                ? (int?)null
+                : (int)(now - s.LastReportAtUtc).TotalMinutes,
+        }));
+    }
 }
 
 // Category is what kind of message this is ("approval", "deploy:valsuani", "serverdown",
@@ -1116,6 +1213,7 @@ public record DownloadMediaRequest(
     string? ChatJid = null,
     string? MessageId = null);
 public record RevokeMessageRequest(string ChatJid, string MessageId, bool FromMe = true, string? SessionId = null);
+public record MonitorReportRequest(string Subject, string Status, string? Detail = null);
 public record ForwardMessageRequest(string ToJid, string Text, string? SessionId = null, string? Category = null);
 public record SendTypingRequest(string ChatJid, bool IsTyping = true, string? SessionId = null);
 public record SetPresenceRequest(bool Available, string? SessionId = null);
