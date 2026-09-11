@@ -50,19 +50,23 @@ Authorization: Bearer YOUR_API_TOKEN
 {
   "to": "31612345678",
   "body": "Hello from AI! This is an automated message.",
-  "sessionId": null
+  "sessionId": null,
+  "category": "approval"
 }
 ```
 
 **Parameters:**
-- `to` (string, required): bare phone number, international format, no `+`
+- `to` (string, required): bare phone number, international format, no `+`. May also be a routing alias (`martien`) if one is configured.
 - `body` (string, required): message text content
 - `sessionId` (string, optional): target a specific connected WhatsApp session/number; omitted = your most recently connected session
+- `category` (string, optional, default `other`): what kind of message this is — see [Outbound routing](#outbound-routing). Getting this right is what decides whether a night-time deploy notice reaches the person on call or wakes someone who does not want it.
 
 **Response:**
 ```json
-{ "success": true }
+{ "success": true, "routedTo": "31612345678", "routing": null }
 ```
+
+`routedTo` is who actually received it, which is not always `to`: outside a recipient's window the message is redirected to their fallback, and `routing` then explains why. A 403 with `"blocked": true` means no route existed and nothing was sent.
 
 ### 2. Send Media Message
 
@@ -203,7 +207,64 @@ All endpoints return standard HTTP status codes:
 
 Other endpoints on failure return `{ "error": "..." }` without `errorCode`/`details`.
 
+## Outbound routing
+
+Before anything is sent, the bridge decides who should actually receive it. Three things go into that: who you addressed, what `category` you declared, and what time it is **in the recipient's own timezone**. The policy lives in the bridge rather than in each caller, because there are nine different senders and five of them are scripts that only know how to POST.
+
+Categories in use today:
+
+| category | meaning |
+|---|---|
+| `approval` | something is waiting on a human decision |
+| `deploy:valsuani` | a deployment to the Claude Valsuani server |
+| `serverdown` | a production domain is unreachable |
+| `reply` | an answer to someone who just messaged us |
+| `other` | the default when you declare nothing |
+
+A category may be hierarchical: a contact who accepts `deploy` receives `deploy:valsuani`, but one who accepts only `deploy:valsuani` does not receive `deploy:bugatti`.
+
+### Off by default
+
+Routing enforces nothing until `OutboundRouting:Enabled` is set to `true`. It ships `false`.
+
+This matters if you are wiring up a sender. Deploying the feature seeds the contact table and shows it in the admin UI, but every send still behaves exactly as it did before — nothing is redirected and nothing is blocked. That is deliberate: a policy that arms itself on deploy would start refusing every caller that has not yet learned to declare a `category`, and the first symptom would be a missing alert rather than an error anyone sees.
+
+So the rollout order is: deploy, look at the table, add the categories to your senders, check `preview`, and only then flip the flag. Both conditions are required — the flag on *and* at least one contact — so turning it on against an empty table does not silence everything either.
+
+### Outcomes
+
+- **Allowed** · the recipient accepts this category and is inside their window. `routedTo` equals `to`.
+- **Redirected** · they are outside their window or muted, and have a fallback. `routedTo` is the fallback and `routing` says why. The message is not lost.
+- **Suppressed** · the recipient already received this exact message within ten minutes, so it is not delivered twice. Returns **200** with `{"success": true, "suppressed": true, "reason": "..."}`. Nothing was sent and nothing is wrong: treat it as success. It used to return 403, which made callers retry a duplicate they had deliberately been spared.
+- **Blocked** · no route. Returns 403 with `"blocked": true`. Nothing was sent, and the attempt is visible under `GET /api/wa/blockedOutbound` and in the audit log.
+
+A redirect is one hop and the fallback is evaluated under its own policy, not the original recipient's. A fallback that is not itself a routing contact, does not accept the category, is muted, or is outside its own window does not receive the message — the result is **Blocked**, not a delivery. `FallbackPhone` is therefore not a way around the table.
+
+Numbers with no contact row are never messaged on your initiative. Replying to someone who messaged us first is exempt: that path is governed by the reply window, not by this policy.
+
+Manage the policy at `GET/POST /api/wa/routing`, or in the bridge admin under Routing. Listing and editing contacts requires an **admin JWT** — an API key can call `preview` and `timezones` but cannot read or change who may be messaged. `GET /api/wa/routing/preview?to=…&category=…` answers "who would get this right now" without sending anything — worth calling once when wiring up a new sender.
+
+### Which endpoints are governed
+
+Every outbound path driven by an **API key**, including the two that used to skip the check entirely: `sendReply` and `forwardMessage`. If you relied on either to reach a number outside the policy, it will now be blocked once the flag is on.
+
+The exception is a human: the dashboard's session routes (`sessions/{id}/send`, `/send-media`, `/forward`) skip the guardrail when called with a browser login (JWT). Routing exists to stop automated senders waking people; a person at the keyboard choosing to message someone is the case the policy explicitly preserves, and group chats and customers match no contact by design. The same three routes called with an API key are policed in full.
+
+### Delivery confirmation and duplicate suppression
+
+The guardrail records every allowed send *before* you perform it (that is what makes the volume caps unskippable), and marks it delivered only after the send succeeds. The duplicate suppression reads only delivered rows — a send that failed can never suppress the retry or redirect that would actually deliver it. Consequences for callers:
+
+- A `suppressed: true` response means the recipient genuinely already received that exact message (same text, same category) within the last 10 minutes. Treat it as success.
+- Suppression is order-independent: the direct leg of a fan-out is suppressed if a redirect already delivered the same message, and vice versa.
+- A message with an empty body is never suppressed. Media dedupes on caption **plus** file identity (URL or filename), so distinct captionless files do not collide.
+
+### Seeding
+
+The appsettings seed runs once per database, recorded by a marker in `AppFlags`. Emptying the contact table in the admin UI is respected as a decision — a restart does not re-seed. To genuinely re-seed: delete the `OutboundRoutingSeeded` row from `AppFlags` and restart. Seed entries are validated like API writes (usable phone, known timezone, sane hours, non-empty categories); invalid entries are skipped and logged, never half-applied.
+
 ## Rate Limiting
+
+Routing decides *who*; the caps below decide *how often*. A redirect buys no exemption from them.
 
 The bridge itself does not currently enforce a request rate limit. WhatsApp's own servers apply anti-spam heuristics to accounts that send too fast or too much (especially to numbers that haven't messaged you first) — space out bulk sends (e.g. one message per second) and expect occasional throttling from WhatsApp's side, not from this API.
 
@@ -410,6 +471,40 @@ curl -X GET "https://whatsapp.wreckingball.ai/api/wa/getMessages?chatId=31612345
 - **GitHub Issues**: https://github.com/martiendejong/whatsappbridge/issues
 
 ## Changelog
+
+### 2026-09-11 (second round, after adversarial review)
+
+Three independent reviews of the round below produced eleven findings; all are fixed here.
+
+- **A failed send can no longer suppress its own rescue.** Send-log rows are written as attempts and confirmed as delivered only after the WhatsApp send succeeds; duplicate suppression reads confirmed rows only. Previously a send that failed still counted as "already delivered" and the redirect that would have rescued it was suppressed — the alert vanished with all indicators green.
+- **Duplicate suppression is order-independent** (the direct leg after a redirect used to slip through) and **blank bodies never dedupe** (two distinct captionless media files collided on the empty caption and the second was silently dropped). Media now dedupes on caption + file identity.
+- **Muting no longer widens delivery.** The category check runs before the mute check, so muting a contact cannot forward categories they never accepted to their fallback.
+- **Human dashboard sends are exempt from the guardrail** (JWT only; API keys on the same routes stay policed). Without this, arming the flag made the Messages screen unable to reach group chats, customers, or anyone but Martien.
+- **The seed runs once per database** (AppFlags marker) instead of "whenever the table is empty" — emptying the table in the UI no longer resurrects the shipped policy on the next restart. Seed entries are validated like API writes.
+- **The audit middleware sits before authentication**, so framework-rejected 401/403s — the credential-guessing an audit log exists to catch — are now logged. It writes rows in its own DI scope (a controller's failed SaveChanges could poison the shared context and eat the audit row for exactly the failing request), bounds how much request body it buffers, and encrypts stored bodies under the same key as the Messages table when encryption is on.
+- **SecretMasker recognises grouped one-time codes** ("483 920", "4839-2011") and suffixed credential parameters (`refresh_token=`, `id_token=`, `api-key=`) while leaving `postcode`/`countrycode`/`monkey` alone.
+- **`request-history` and `send-retry-receipt` check session ownership**, not just authentication — an authenticated stranger with someone else's sessionId got history pulls and protocol injection past the login.
+- **Deleting a contact that is someone's fallback is refused** with the list of dependants; **duplicate aliases are refused**; the DevelopmentOnly gate runs before model binding so a malformed POST no longer leaks a validation problem from a route that claims not to exist; `preview` reports whether the policy is actually enforced and fabricates no log lines; the Routing page is hidden from non-admin users; and the audit page's phone filter uses the shared normalizer (a fifth private copy had the leading-"+" bug, so filtering on "+31…" matched nothing).
+
+### 2026-09-11
+
+Follow-up on the routing and audit work below, after review.
+
+- **Routing is off by default.** New `OutboundRouting:Enabled` flag, shipped `false`. The previous version seeded contacts from `appsettings.json` and enforced against them immediately, so merging it would have armed the policy in production without anyone deciding to. Nothing is enforced until the flag is set *and* the contact table is non-empty.
+- **Suppressed now answers 200, not 403.** A duplicate that was deliberately not re-sent is not a failure; returning 403 had callers retrying it.
+- **`sendReply` and `forwardMessage` are guardrailed.** Both bypassed the check completely, so any caller could reach any number through them regardless of policy. `sessions/{id}/forward` is covered too and accepts a `category`.
+- **A fallback is evaluated under its own policy.** Redirects previously delivered to `FallbackPhone` unchecked — a number in no routing table could receive production alerts. It must now be a contact, accept the category, be enabled and be inside its own window, and a self-referencing fallback terminates instead of recursing.
+- **Routing admin requires an admin JWT.** `GET`/`POST`/`DELETE /api/wa/routing` were reachable with any API key, which meant a key could rewrite the policy governing it. `preview` and `timezones` remain open.
+- **Phone normalisation is one function.** It existed four times and the copies had drifted: one turned `+31633984381` into the empty string. Numbers written with spaces or dashes now normalise correctly, and a device-suffixed JID is cut rather than absorbed.
+- **`Categories` no longer defaults to `*` on save.** An omitted value silently granted a contact everything; it is now a validation error.
+- **The `test-*` endpoints are Development-only.** Fourteen `[AllowAnonymous]` actions that send messages, read stored chats and wipe pairing state now return 404 outside Development. They previously needed no credential at all.
+- **`sessions/{id}/request-history` and `send-retry-receipt` require authentication.** Both were anonymous. The history route's only caller is the bridge's own (logged-in) frontend; the retry-receipt route has no callers and exists for manual incident recovery, so it stays available in production — behind a login.
+
+### 2026-09-10
+
+- Outbound routing: `sendMessage`, `sendMedia` and `forwardMessage` accept an optional `category`, and the response reports `routedTo`/`routing`. Recipients have their own timezone, window and accepted categories; outside a window a message goes to the recipient's fallback instead of being lost. Managed at `/api/wa/routing`, with a `preview` endpoint that dry-runs the decision.
+- The session-level send endpoints (`/api/whatsapp/sessions/{id}/send` and `/send-media`) now pass through the same guardrail as the API endpoints. They previously bypassed it.
+- API audit log: every request through `/api/wa` and `/api/whatsapp` is recorded with the API key that made it, the number involved, the outcome and the response preview. Filterable by phone and event type at `/api/wa/audit`. Message bodies are kept indefinitely, with approve/reject links and one-time codes masked on the way in.
 
 ### 2026-09-07
 

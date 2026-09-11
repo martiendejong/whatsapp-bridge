@@ -49,7 +49,11 @@ public class OutboundGuardrailServiceTests
             values[$"OutboundGuardrail:AllowList:{i}"] = list[i];
 
         var config = BuildConfig(values);
-        return new OutboundGuardrailService(config, db, NullLogger<OutboundGuardrailService>.Instance);
+        // Routing is left off here — both because OutboundRouting:Enabled is absent (and defaults
+        // to false) and because no OutboundContacts rows are seeded. This suite is the regression
+        // net for the pre-routing behaviour, so it must keep exercising exactly that.
+        var routing = new OutboundRoutingService(db, NullLogger<OutboundRoutingService>.Instance, config);
+        return new OutboundGuardrailService(config, db, routing, NullLogger<OutboundGuardrailService>.Instance);
     }
 
     // ─── Regression: pre-existing allow-list / rate-limit behavior must be unchanged ──────────

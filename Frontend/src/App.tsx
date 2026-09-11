@@ -9,11 +9,20 @@ import WhatsAppSessions from './pages/WhatsAppSessions';
 import AccountSettings from './pages/AccountSettings';
 import Messages from './pages/Messages';
 import AuditLog from './pages/AuditLog';
+import Routing from './pages/Routing';
 import Navbar from './components/Navbar';
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuth();
   return isAuthenticated ? <>{children}</> : <Navigate to="/login" />;
+}
+
+// The server enforces the real gate (403); this only spares a non-admin a page where every
+// request fails with errors that never explain themselves.
+function AdminRoute({ children }: { children: React.ReactNode }) {
+  const { isAuthenticated, user } = useAuth();
+  if (!isAuthenticated) return <Navigate to="/login" />;
+  return user?.isAdmin ? <>{children}</> : <Navigate to="/dashboard" />;
 }
 
 function PublicRoute({ children }: { children: React.ReactNode }) {
@@ -83,6 +92,14 @@ function AppRoutes() {
             <PrivateRoute>
               <AuditLog />
             </PrivateRoute>
+          }
+        />
+        <Route
+          path="/routing"
+          element={
+            <AdminRoute>
+              <Routing />
+            </AdminRoute>
           }
         />
         <Route
