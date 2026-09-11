@@ -205,6 +205,19 @@ No manual copy-paste between the bridge's and JengoAGI's own config files is
 needed anymore — both sides read the same vault credential, so they cannot
 drift apart by definition.
 
+**`Jwt:Key`** (task 3300) is sourced the same way — vault project 9,
+credential 217, `Mappings` entry `ConfigKey: "Jwt:Key"`. The placeholder in
+`appsettings.json` (`your-super-secret-key-change-this-in-production-...`)
+stays committed as a harmless local-dev default; it is never a real secret in
+production once the vault mapping is live. Unlike `InboundWebhook:ApiKey`,
+rotating `Jwt:Key` has a **user-facing side effect**: every previously-issued
+bearer token is signed with the old key and is rejected (401) the moment the
+app pool picks up the new one — every logged-in user, on every client, is
+forced to log in again. Pick a deliberate, low-traffic moment for the
+`WhatsAppBridgeAPIPool` recycle that applies this change, and communicate it
+beforehand — never let it happen silently as a side effect of an unrelated
+deploy.
+
 ## API Documentation
 
 Base URL: `http://your-server:5000/api/wa`
