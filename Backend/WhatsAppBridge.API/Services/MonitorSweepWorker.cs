@@ -36,8 +36,18 @@ public sealed class MonitorSweepWorker : BackgroundService
                 var dispatcher = scope.ServiceProvider.GetRequiredService<MonitorAlertDispatcher>();
 
                 var alerts = await monitor.SweepAsync(DateTime.UtcNow);
-                foreach (var alert in alerts)
-                    await dispatcher.DispatchAsync(alert);
+                if (alerts.Count > 0)
+                {
+                    // One combined message per tick: a dead VPS takes all its subjects down in
+                    // the same minute, and N separate sends against the global hourly cap meant
+                    // the tail of the batch was silently lost.
+                    var dispatched = await dispatcher.DispatchBatchAsync(alerts);
+                    if (dispatched == MonitorAlertDispatcher.DispatchOutcome.TransientFailure)
+                    {
+                        foreach (var alert in alerts)
+                            await monitor.ReleaseAlertClaimAsync(alert);
+                    }
+                }
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {

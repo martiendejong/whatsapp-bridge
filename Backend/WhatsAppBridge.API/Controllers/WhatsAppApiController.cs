@@ -1122,16 +1122,26 @@ public class WhatsAppApiController : ControllerBase
         if (!success)
             return Unauthorized(new { error });
 
-        if (string.IsNullOrWhiteSpace(request?.Subject))
-            return BadRequest(new { error = "subject is required (e.g. \"portofgiethoorn.com\")." });
-        var status = request.Status?.Trim().ToLowerInvariant();
+        // Same validation bar as the admin form. Without it, subjects self-registered without
+        // limit — a probe URL with a run id in it minted a fresh subject every five minutes,
+        // each earning its own silence alert an hour later.
+        var subject = ServerMonitorService.Normalize(request?.Subject ?? string.Empty);
+        if (!ServerMonitorService.IsValidSubject(subject))
+            return BadRequest(new { error = "subject must be a hostname, e.g. \"portofgiethoorn.com\"." });
+        var status = request!.Status?.Trim().ToLowerInvariant();
         if (status is not ("up" or "down"))
             return BadRequest(new { error = "status must be \"up\" or \"down\"." });
 
-        var outcome = await _monitor.ReportAsync(request.Subject, status, request.Detail, DateTime.UtcNow);
+        var outcome = await _monitor.ReportAsync(subject, status, request.Detail, DateTime.UtcNow);
 
         if (outcome.Alert != null)
-            await _monitorDispatcher.DispatchAsync(outcome.Alert);
+        {
+            var dispatched = await _monitorDispatcher.DispatchAsync(outcome.Alert);
+            // A transient failure hands the claim back so the minute-sweep retries; a policy
+            // refusal is a decision and the claim stands. See MonitorAlertDispatcher.
+            if (dispatched == MonitorAlertDispatcher.DispatchOutcome.TransientFailure)
+                await _monitor.ReleaseAlertClaimAsync(outcome.Alert);
+        }
 
         return Ok(new
         {
@@ -1175,7 +1185,11 @@ public class WhatsAppApiController : ControllerBase
             downAlerted = s.DownAlertAtUtc != null,
             monitorSilent = s.SilenceAlertAtUtc != null,
             s.LastReportAtUtc,
-            minutesSinceLastReport = (int)(now - s.LastReportAtUtc).TotalMinutes,
+            // Null for a subject that never reported — a default DateTime here rendered as
+            // "silent for a billion minutes", where the truth is "monitor not built yet".
+            minutesSinceLastReport = s.LastReportAtUtc == default
+                ? (int?)null
+                : (int)(now - s.LastReportAtUtc).TotalMinutes,
         }));
     }
 }

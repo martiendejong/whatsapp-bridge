@@ -60,4 +60,14 @@ public class MonitorSubject
 
     public DateTime CreatedAtUtc { get; set; }
     public DateTime UpdatedAtUtc { get; set; }
+
+    /// <summary>
+    /// Optimistic concurrency token, incremented on every state change. The report path and
+    /// the minute-sweep run in separate scopes and can reach the same subject at the same
+    /// moment — most likely at the exact minute an outage crosses its threshold, since both
+    /// actors act on precisely that transition. Without the token both would claim the alert
+    /// and Martien would be paged twice; with it, EF turns the second save into a
+    /// DbUpdateConcurrencyException and that caller stands down.
+    /// </summary>
+    public long Version { get; set; }
 }

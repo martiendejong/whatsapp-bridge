@@ -66,7 +66,7 @@ public class MonitorAdminController : ControllerBase
     public async Task<IActionResult> Upsert([FromBody] UpsertRequest request)
     {
         var key = ServerMonitorService.Normalize(request.Subject);
-        if (key.Length < 3 || !key.Contains('.'))
+        if (!ServerMonitorService.IsValidSubject(key))
             return BadRequest(new { error = "Subject must be a hostname, e.g. \"portofgiethoorn.com\"." });
 
         var now = DateTime.UtcNow;

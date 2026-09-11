@@ -284,6 +284,8 @@ The response tells you what your report amounted to: `{ "disposition": "recorded
 
 Alerts go out through the same outbound guardrail as every other send, under category `serverdown` — so the routing policy (once armed) decides who is woken, and a runaway monitor is rate-capped like any other runaway sender.
 
+Delivery is not fire-and-forget. If the WhatsApp session happens to be down (or the send fails) at the moment an alert is due, the alert claim is released and the minute-sweep retries until it lands — a bridge outage at the exact threshold minute must not swallow the announcement. When one sweep tick produces several alerts (one VPS taking all its subjects down), they go out as a single combined message rather than racing each other into the volume caps. Alert texts carry the outage's start time, so two outages of the same server minutes apart are never deduplicated into one.
+
 ## Rate Limiting
 
 Routing decides *who*; the caps below decide *how often*. A redirect buys no exemption from them.

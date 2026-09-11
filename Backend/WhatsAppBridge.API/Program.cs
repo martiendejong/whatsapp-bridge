@@ -310,7 +310,8 @@ using (var scope = app.Services.CreateScope())
             SilenceAlertAtUtc TEXT NULL,
             LastReportAtUtc TEXT NOT NULL,
             CreatedAtUtc TEXT NOT NULL,
-            UpdatedAtUtc TEXT NOT NULL
+            UpdatedAtUtc TEXT NOT NULL,
+            Version INTEGER NOT NULL DEFAULT 0
         );
         CREATE UNIQUE INDEX IF NOT EXISTS IX_MonitorSubjects_Subject ON MonitorSubjects (Subject);
         """);

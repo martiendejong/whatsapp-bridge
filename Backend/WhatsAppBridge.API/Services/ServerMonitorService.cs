@@ -78,11 +78,18 @@ public sealed class ServerMonitorService
         }
 
         var resumed = row.SilenceAlertAtUtc != null;
-        var silentFor = resumed ? (int)Math.Round((nowUtc - row.LastReportAtUtc).TotalMinutes) : 0;
+        var silentFor = resumed ? Math.Max(1, (int)Math.Round((nowUtc - row.LastReportAtUtc).TotalMinutes)) : 0;
         row.SilenceAlertAtUtc = null;
         row.LastReportAtUtc = nowUtc;
-        row.UpdatedAtUtc = nowUtc;
-        if (!string.IsNullOrWhiteSpace(detail)) row.LastDetail = detail.Trim();
+        Touch(row, nowUtc);
+        // Truncated at the source: this string is interpolated into the outgoing WhatsApp
+        // message, and a monitor that POSTs a 50 KB stack trace as "detail" should not produce
+        // a 50 KB WhatsApp message.
+        if (!string.IsNullOrWhiteSpace(detail))
+        {
+            var trimmed = detail.Trim();
+            row.LastDetail = trimmed.Length > 200 ? trimmed[..200] : trimmed;
+        }
 
         MonitorAlert? alert = null;
         string disposition;
@@ -114,7 +121,7 @@ public sealed class ServerMonitorService
                     // Recovery is only news when the outage was news.
                     var minutes = Math.Max(1, (int)Math.Round((nowUtc - row.FirstDownAtUtc.Value).TotalMinutes));
                     alert = new MonitorAlert(key, "recovered",
-                        $"{key} is weer online na {minutes} min offline.");
+                        $"{key} is weer online na {minutes} min offline (sinds {row.FirstDownAtUtc:HH:mm} UTC).");
                     disposition = "recovered";
                 }
                 else
@@ -133,20 +140,75 @@ public sealed class ServerMonitorService
 
         // A monitor that resumes after a silence alert closes that loop explicitly — otherwise
         // the operator is left holding an open "is it still broken?" question the log answers
-        // but nobody re-reads.
+        // but nobody re-reads. When the resume carries bad news, the outage/recovery message
+        // wins the single slot: it is the more actionable of the two.
         if (resumed && alert == null)
         {
             alert = new MonitorAlert(key, "monitor-resumed",
                 $"De monitor voor {key} meldt zich weer na {silentFor} min stilte. Status: {(isDown ? "down" : "up")}.");
         }
 
-        await _context.SaveChangesAsync();
+        try
+        {
+            await _context.SaveChangesAsync();
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            // The sweep got to this subject in the same instant and won the version race. Its
+            // scope handles whatever alert this transition warranted; this report stands down
+            // rather than double-page. The next report (~5 min) re-syncs the row's bookkeeping.
+            _logger.LogDebug("Monitor report for {Subject} lost the version race to the sweep; standing down.", key);
+            return new ReportOutcome(key, isDown ? "down" : "up", row.Critical,
+                ThresholdMinutes(row), "conflict", null);
+        }
 
         if (alert != null)
             _logger.LogInformation("Monitor alert ({Kind}) for {Subject}: {Text}", alert.Kind, key, alert.Text);
 
         return new ReportOutcome(key, isDown ? "down" : "up", row.Critical,
             ThresholdMinutes(row), disposition, alert);
+    }
+
+    /// <summary>
+    /// Undoes an alert claim after a TRANSIENT dispatch failure (no connected session, send
+    /// exception), so the next sweep tick re-decides and re-fires — once a minute until it
+    /// lands. Without this, the state machine believed an alert was announced the moment it
+    /// decided to announce it, and a WhatsApp session that happened to be down at the threshold
+    /// minute swallowed the outage alert forever while the recovery message later arrived for
+    /// an outage nobody was told about.
+    ///
+    /// Deliberately NOT called for policy refusals (guardrail block, dedupe suppress): those
+    /// are decisions, and retrying a decision once a minute is how a blocked-messages list
+    /// fills up overnight. Only "down" and "monitor-silent" carry a claim; "recovered" and
+    /// "monitor-resumed" are informational and their loss leaves no lie in the state.
+    /// </summary>
+    public async Task ReleaseAlertClaimAsync(MonitorAlert alert)
+    {
+        var row = await _context.MonitorSubjects.FirstOrDefaultAsync(s => s.Subject == alert.Subject);
+        if (row == null) return;
+
+        switch (alert.Kind)
+        {
+            case "down":
+                row.DownAlertAtUtc = null;
+                break;
+            case "monitor-silent":
+                row.SilenceAlertAtUtc = null;
+                break;
+            default:
+                return;
+        }
+
+        Touch(row, DateTime.UtcNow);
+        try
+        {
+            await _context.SaveChangesAsync();
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            // Someone else changed the subject's state in the meantime (a report arrived).
+            // Their view of the world is newer; leave it be.
+        }
     }
 
     /// <summary>
@@ -165,27 +227,43 @@ public sealed class ServerMonitorService
             // against. It shows as "nog nooit gemeld" in the list, which is the right nag.
             if (row.LastReportAtUtc == default) continue;
 
+            var changed = false;
             var outage = EvaluateOutage(row, nowUtc);
             if (outage != null)
             {
-                row.UpdatedAtUtc = nowUtc;
                 alerts.Add(outage);
+                changed = true;
             }
 
             var silentMinutes = (nowUtc - row.LastReportAtUtc).TotalMinutes;
             if (row.SilenceAlertAtUtc == null && silentMinutes >= _options.SilenceAfterMinutes)
             {
                 row.SilenceAlertAtUtc = nowUtc;
-                row.UpdatedAtUtc = nowUtc;
                 alerts.Add(new MonitorAlert(row.Subject, "monitor-silent",
-                    $"De monitor voor {row.Subject} heeft al {(int)silentMinutes} min niets gemeld " +
-                    $"(laatste status: {row.Status}). Een stille monitor ziet er hetzelfde uit als een gezonde server."));
+                    $"De monitor voor {row.Subject} heeft sinds {row.LastReportAtUtc:HH:mm} UTC " +
+                    $"({(int)silentMinutes} min) niets gemeld; laatste status: {row.Status}. " +
+                    "Een stille monitor ziet er hetzelfde uit als een gezonde server."));
+                changed = true;
             }
+
+            if (changed) Touch(row, nowUtc);
         }
 
         if (alerts.Count > 0)
         {
-            await _context.SaveChangesAsync();
+            try
+            {
+                await _context.SaveChangesAsync();
+            }
+            catch (DbUpdateConcurrencyException)
+            {
+                // A report raced us on one of these subjects — its scope has fresher state and
+                // handles its own alert. Nothing was persisted here, so every still-valid alert
+                // simply regenerates on the next tick; dropping this batch cannot lose an
+                // outage, only delay its announcement by a minute.
+                _logger.LogDebug("Monitor sweep lost a version race; retrying next tick.");
+                return new List<MonitorAlert>();
+            }
             foreach (var a in alerts)
                 _logger.LogInformation("Monitor sweep alert ({Kind}) for {Subject}: {Text}", a.Kind, a.Subject, a.Text);
         }
@@ -208,16 +286,48 @@ public sealed class ServerMonitorService
 
         row.DownAlertAtUtc = nowUtc;
         var detail = string.IsNullOrWhiteSpace(row.LastDetail) ? "" : $" ({row.LastDetail})";
+        // The "sinds HH:mm" stamp is not decoration: it makes the text unique per OUTAGE. The
+        // guardrail dedupes identical bodies within ten minutes, and without the stamp a server
+        // that flaps twice inside that window produces byte-identical alerts — the second
+        // outage's announcement would be suppressed as a duplicate of the first.
         return new MonitorAlert(row.Subject, "down",
-            $"{row.Subject} is al {(int)downMinutes} min offline{detail}. " +
-            $"Niveau: {(row.Critical ? "kritiek" : "normaal")}.");
+            $"{row.Subject} is al {(int)downMinutes} min offline{detail}, sinds " +
+            $"{row.FirstDownAtUtc:HH:mm} UTC. Niveau: {(row.Critical ? "kritiek" : "normaal")}.");
     }
 
     public int ThresholdMinutes(MonitorSubject row) =>
         row.Critical ? _options.CriticalThresholdMinutes : _options.NormalThresholdMinutes;
 
-    /// <summary>Subjects are domains, not phone numbers — identity is lowercase + trim.</summary>
-    public static string Normalize(string subject) => (subject ?? string.Empty).Trim().ToLowerInvariant();
+    private static void Touch(MonitorSubject row, DateTime nowUtc)
+    {
+        row.UpdatedAtUtc = nowUtc;
+        row.Version++;
+    }
+
+    /// <summary>
+    /// Subjects are hostnames. A monitor that reports its full probe URL — scheme, path, query
+    /// and all — used to register a NEW subject per unique URL, and a probe with a run id in
+    /// the query string would mint a fresh subject every five minutes, each earning its own
+    /// silence alert an hour later. So identity is the host part only: scheme stripped, cut at
+    /// the first slash, lowercased.
+    /// </summary>
+    public static string Normalize(string subject)
+    {
+        var s = (subject ?? string.Empty).Trim().ToLowerInvariant();
+        var schemeEnd = s.IndexOf("://", StringComparison.Ordinal);
+        if (schemeEnd >= 0) s = s[(schemeEnd + 3)..];
+        var slash = s.IndexOf('/');
+        if (slash >= 0) s = s[..slash];
+        return s;
+    }
+
+    /// <summary>
+    /// Same bar for every writer — the report endpoint and the admin form alike. Length-capped
+    /// because SQLite does not enforce the EF max length, and dot-required because every real
+    /// subject is a hostname; without this, junk subjects self-registered without limit.
+    /// </summary>
+    public static bool IsValidSubject(string normalized) =>
+        normalized.Length >= 3 && normalized.Length <= 200 && normalized.Contains('.');
 }
 
 /// <summary>Bound from configuration section "Monitor".</summary>

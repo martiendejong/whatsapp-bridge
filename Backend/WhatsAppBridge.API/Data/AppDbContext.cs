@@ -113,6 +113,9 @@ public class AppDbContext : DbContext
             entity.Property(e => e.Subject).HasMaxLength(200);
             entity.Property(e => e.Status).HasMaxLength(10);
             entity.Property(e => e.LastDetail).HasMaxLength(400);
+            // See MonitorSubject.Version — the report path and the sweep race at exactly the
+            // threshold minute, and the loser of this token is what keeps that to one alert.
+            entity.Property(e => e.Version).IsConcurrencyToken();
         });
 
         modelBuilder.Entity<ApiAuditLog>(entity =>

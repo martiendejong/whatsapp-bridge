@@ -250,6 +250,175 @@ public class ServerMonitorServiceTests
         Assert.Empty(alerts);
     }
 
+    // ─── Silence × outage: the cells where two stories collide ──────────────────────────────
+
+    /// <summary>
+    /// The monitor resumes WITH bad news. One message, and the outage wins the slot — it is
+    /// the actionable one. Two messages here would be the cry-wolf mode for a paging system.
+    /// </summary>
+    [Fact]
+    public async Task A_monitor_resuming_with_a_threshold_crossed_outage_sends_one_alert_the_outage()
+    {
+        using var db = NewContext();
+        var svc = NewService(db);
+
+        await svc.ReportAsync(Pog, "down", null, T0);                    // clock starts
+        await svc.SweepAsync(T0.AddMinutes(6));                          // outage announced by sweep
+        await svc.SweepAsync(T0.AddMinutes(70));                         // silence announced
+        var resumed = await svc.ReportAsync(Pog, "up", null, T0.AddMinutes(80));
+
+        Assert.NotNull(resumed.Alert);
+        Assert.Equal("recovered", resumed.Alert!.Kind);                  // not "monitor-resumed"
+    }
+
+    /// <summary>Resume with still-down status before the threshold: the resume message carries the status.</summary>
+    [Fact]
+    public async Task A_monitor_resuming_while_down_but_unannounced_reports_the_resume_with_status()
+    {
+        using var db = NewContext();
+        var svc = NewService(db);
+
+        await svc.ReportAsync(Pog, "up", null, T0);
+        await svc.SweepAsync(T0.AddMinutes(61));                         // silence announced
+        var resumed = await svc.ReportAsync(Pog, "down", "HTTP 502", T0.AddMinutes(70));
+
+        Assert.NotNull(resumed.Alert);
+        Assert.Equal("monitor-resumed", resumed.Alert!.Kind);
+        Assert.Contains("down", resumed.Alert.Text);
+    }
+
+    // ─── Claim release: transient dispatch failure must not eat the alert ────────────────────
+
+    /// <summary>
+    /// The WhatsApp session is down at the threshold minute — strongly correlated with real
+    /// incidents. The dispatcher reports a transient failure, the claim is released, and the
+    /// next sweep decides (and fires) again. Without the release, the state machine believed
+    /// the alert was announced and the outage stayed invisible until the recovery message
+    /// arrived for a story nobody had heard.
+    /// </summary>
+    [Fact]
+    public async Task A_released_claim_makes_the_next_sweep_fire_the_alert_again()
+    {
+        using var db = NewContext();
+        var svc = NewService(db);
+
+        await svc.ReportAsync(Pog, "down", null, T0);
+        var first = Assert.Single(await svc.SweepAsync(T0.AddMinutes(6)));
+        Assert.Equal("down", first.Kind);
+
+        await svc.ReleaseAlertClaimAsync(first);                         // dispatch failed transiently
+
+        var retry = Assert.Single(await svc.SweepAsync(T0.AddMinutes(7)));
+        Assert.Equal("down", retry.Kind);
+
+        // And once it sticks (no release), it stays one-per-outage.
+        Assert.Empty(await svc.SweepAsync(T0.AddMinutes(8)));
+    }
+
+    [Fact]
+    public async Task A_released_silence_claim_is_retried_too()
+    {
+        using var db = NewContext();
+        var svc = NewService(db);
+
+        await svc.ReportAsync(Pog, "up", null, T0);
+        var first = Assert.Single(await svc.SweepAsync(T0.AddMinutes(61)));
+        Assert.Equal("monitor-silent", first.Kind);
+
+        await svc.ReleaseAlertClaimAsync(first);
+
+        Assert.Single(await svc.SweepAsync(T0.AddMinutes(62)));
+    }
+
+    // ─── Dedupe safety: texts must be unique per episode ─────────────────────────────────────
+
+    /// <summary>
+    /// The guardrail suppresses identical bodies within ten minutes. A server that flaps twice
+    /// inside that window must therefore produce DIFFERENT alert texts, or the second outage's
+    /// announcement is swallowed as a duplicate of the first.
+    /// </summary>
+    [Fact]
+    public async Task Two_outages_of_the_same_subject_produce_distinct_alert_texts()
+    {
+        using var db = NewContext();
+        var svc = NewService(db);
+
+        await svc.ReportAsync(Pog, "down", "HTTP 502", T0);
+        var first = await svc.ReportAsync(Pog, "down", "HTTP 502", T0.AddMinutes(5));
+        await svc.ReportAsync(Pog, "up", null, T0.AddMinutes(6));
+        await svc.ReportAsync(Pog, "down", "HTTP 502", T0.AddMinutes(7));
+        var second = await svc.ReportAsync(Pog, "down", "HTTP 502", T0.AddMinutes(12));
+
+        Assert.NotNull(first.Alert);
+        Assert.NotNull(second.Alert);
+        Assert.NotEqual(first.Alert!.Text, second.Alert!.Text);
+    }
+
+    // ─── Subject identity ────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// A monitor reporting its full probe URL must land on the same subject as one reporting
+    /// the bare hostname — a run id in the query string used to mint a fresh subject every
+    /// five minutes, each earning its own silence alert an hour later.
+    /// </summary>
+    [Theory]
+    [InlineData("https://portofgiethoorn.com/health?run=1234")]
+    [InlineData("http://PortOfGiethoorn.com/status")]
+    [InlineData("  portofgiethoorn.com  ")]
+    public void A_probe_url_normalizes_to_its_hostname(string reported)
+    {
+        Assert.Equal("portofgiethoorn.com", ServerMonitorService.Normalize(reported));
+    }
+
+    [Theory]
+    [InlineData("portofgiethoorn.com", true)]
+    [InlineData("app.bugattiinsights.com", true)]
+    [InlineData("vps1", false)]           // no dot: not a hostname
+    [InlineData("x.", false)]             // has a dot but too short to be real
+    [InlineData("", false)]
+    public void Subject_validation_requires_a_plausible_hostname(string subject, bool expected)
+    {
+        Assert.Equal(expected, ServerMonitorService.IsValidSubject(ServerMonitorService.Normalize(subject)));
+    }
+
+    // ─── The version race ────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Report and sweep run in separate scopes and both act at exactly the threshold minute —
+    /// both read "not yet alerted", both decide to alert, and without the concurrency token
+    /// both saves succeeded and Martien was paged twice. The token makes the stale save lose:
+    /// exactly one alert survives and the loser reports "conflict".
+    ///
+    /// The stale read is arranged through the identity map: the report context has the row
+    /// tracked from before the sweep's save, so its ReportAsync acts on pre-sweep state —
+    /// which is precisely what an in-flight request scope holds during the real race.
+    /// </summary>
+    [Fact]
+    public async Task When_report_and_sweep_race_at_the_threshold_exactly_one_alert_survives()
+    {
+        var storeName = Guid.NewGuid().ToString();
+        AppDbContext Ctx() => new(new DbContextOptionsBuilder<AppDbContext>()
+            .UseInMemoryDatabase(storeName).Options);
+
+        using (var setup = Ctx())
+            await NewService(setup).ReportAsync(Pog, "down", null, T0);
+
+        using var reportCtx = Ctx();
+        using var sweepCtx = Ctx();
+        var reportSvc = NewService(reportCtx);
+
+        // The report scope reads the subject first (still unalerted)...
+        _ = await reportCtx.MonitorSubjects.FirstAsync(s => s.Subject == Pog);
+        // ...then the sweep claims the alert and saves...
+        var sweepAlerts = await NewService(sweepCtx).SweepAsync(T0.AddMinutes(6));
+        // ...and the report, still holding pre-sweep state, tries to claim it too.
+        var report = await reportSvc.ReportAsync(Pog, "down", null, T0.AddMinutes(6));
+
+        Assert.Single(sweepAlerts);
+        Assert.Null(report.Alert);
+        Assert.Equal("conflict", report.Disposition);
+    }
+
     // ─── State visibility ────────────────────────────────────────────────────────────────────
 
     [Fact]
