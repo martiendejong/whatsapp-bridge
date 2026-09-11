@@ -93,6 +93,12 @@ builder.Services.AddSingleton<InboundWebhookForwarder>();
 builder.Services.AddSingleton<CoachOsIntakeForwarder>();
 builder.Services.AddScoped<OutboundRoutingService>();
 builder.Services.AddScoped<OutboundGuardrailService>();
+// Server monitor (POST /api/wa/monitor): the state machine and its dispatcher are Scoped
+// (both write AppDbContext); the sweep worker creates its own scope each minute to catch
+// dead-reporter outages and silent monitors — the two alerts no incoming report can trigger.
+builder.Services.AddScoped<ServerMonitorService>();
+builder.Services.AddScoped<MonitorAlertDispatcher>();
+builder.Services.AddHostedService<MonitorSweepWorker>();
 // Singleton: transcribes inbound audio via OpenAI Whisper (task 869ejuycr). Resolves its API
 // key lazily from config or the Prospergenics vault — see WhisperTranscriptionService.
 builder.Services.AddSingleton<WhisperTranscriptionService>();
@@ -288,6 +294,53 @@ using (var scope = app.Services.CreateScope())
             SetAtUtc TEXT NOT NULL
         );
         """);
+
+    // Server monitor state (POST /api/wa/monitor): one row per monitored subject with the
+    // bridge's current belief about it — down since when, alerted or not, monitor still
+    // reporting. Same self-heal reason as the tables above.
+    db.Database.ExecuteSqlRaw("""
+        CREATE TABLE IF NOT EXISTS MonitorSubjects (
+            Id INTEGER NOT NULL CONSTRAINT PK_MonitorSubjects PRIMARY KEY AUTOINCREMENT,
+            Subject TEXT NOT NULL,
+            Critical INTEGER NOT NULL DEFAULT 0,
+            Status TEXT NOT NULL DEFAULT 'up',
+            LastDetail TEXT NULL,
+            FirstDownAtUtc TEXT NULL,
+            DownAlertAtUtc TEXT NULL,
+            SilenceAlertAtUtc TEXT NULL,
+            LastReportAtUtc TEXT NOT NULL,
+            CreatedAtUtc TEXT NOT NULL,
+            UpdatedAtUtc TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS IX_MonitorSubjects_Subject ON MonitorSubjects (Subject);
+        """);
+
+    // The four production domains ship as kritiek (Monitor:CriticalSubjects). Create-if-absent
+    // only: a tier changed at runtime through the admin API must survive every subsequent
+    // restart, so existing rows are never touched — unlike the routing seed there is no
+    // marker, because creation is idempotent and rows carry no other config to clobber.
+    try
+    {
+        foreach (var subject in app.Configuration.GetSection("Monitor:CriticalSubjects").Get<List<string>>() ?? new())
+        {
+            var key = WhatsAppBridge.API.Services.ServerMonitorService.Normalize(subject);
+            if (key.Length == 0 || db.MonitorSubjects.Any(s => s.Subject == key)) continue;
+            db.MonitorSubjects.Add(new WhatsAppBridge.API.Models.MonitorSubject
+            {
+                Subject = key,
+                Critical = true,
+                Status = "up",
+                CreatedAtUtc = DateTime.UtcNow,
+                UpdatedAtUtc = DateTime.UtcNow,
+            });
+        }
+        db.SaveChanges();
+    }
+    catch (Exception ex)
+    {
+        app.Logger.LogError(ex, "Seeding monitor subjects failed. The monitor continues; subjects " +
+                                "self-register as 'normaal' on their first report.");
+    }
 
     // Outbound routing policy: who may be messaged, about what, and at what hour in THEIR
     // timezone. Creating the table and filling it changes nothing on its own — the policy is

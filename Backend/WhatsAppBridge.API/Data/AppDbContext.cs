@@ -20,6 +20,7 @@ public class AppDbContext : DbContext
     public DbSet<InboundContact> InboundContacts { get; set; }
     public DbSet<ApiAuditLog> ApiAuditLogs { get; set; }
     public DbSet<OutboundContact> OutboundContacts { get; set; }
+    public DbSet<MonitorSubject> MonitorSubjects { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -104,6 +105,14 @@ public class AppDbContext : DbContext
         {
             entity.HasIndex(e => e.Sender).IsUnique();
             entity.Property(e => e.Sender).HasMaxLength(200);
+        });
+
+        modelBuilder.Entity<MonitorSubject>(entity =>
+        {
+            entity.HasIndex(e => e.Subject).IsUnique();
+            entity.Property(e => e.Subject).HasMaxLength(200);
+            entity.Property(e => e.Status).HasMaxLength(10);
+            entity.Property(e => e.LastDetail).HasMaxLength(400);
         });
 
         modelBuilder.Entity<ApiAuditLog>(entity =>
