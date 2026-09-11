@@ -379,3 +379,32 @@ allowed 3/3 times under a `MaxPerRecipientPer24h=3` test config then blocked on 
 a "volume cap reached" reason; both blocks land in `BlockedOutboundMessages` (the table
 `GET /api/wa/blockedOutbound` reads) and the 3 allowed sends land in `OutboundSendLogs`.
 Left: nothing agent-doable. Re-pairing `31641406266` is a manual QR-scan step for Martien.
+
+## 2026-09-11 — task 3299
+Done: ported jengo-agi's Prospergenics vault IConfigurationSource into
+`Backend/WhatsAppBridge.API/Services/VaultConfiguration.cs` (PR #15), wired
+`builder.Configuration.AddProspergenicsVault()` in Program.cs, mapped
+`InboundWebhook:ApiKey` -> vault project 9 credential 216. Strict HTTP-200-only
+acceptance (202 approval-pending envelopes are rejected even when their body
+happens to contain a `password` field), fail-safe on any fetch/network failure,
+loads once at config-build time (never reloads — matches the singleton-bound
+`InboundWebhookOptions` in `InboundWebhookForwarder`). Minted a new read-only,
+project-9-scoped vault API key (id 40, `whatsappbridge-runtime-vault-config`)
+via the JIT broker (`C:\tools\vault-access\service.py`'s `POST /api/api-keys`
+contract) and wrote it as `Vault:ApiKey` into the live
+`appsettings.Production.json` on 85.215.217.154 (backed up first as
+`.bak-3299`) so the bootstrap secret is ready ahead of deploy. Filed jengo-agi
+PR #191 (docs/vault-config.md) simplifying the shared-credential rotation
+section now both sides read vault 9/216 — PR #190 (a concurrent session) had
+landed the JengoAGI side of this exact mapping while this session was mid-flight.
+Also found and filed task 3300: production's `Jwt:Key` is still the literal
+placeholder string from the (public) committed `appsettings.json` — a real,
+active auth-bypass hole, deliberately NOT fixed in this PR since rotating it
+force-logs-out every active session and needs its own reviewed timing.
+Verified: build clean, 190/190 tests pass (19 new — the 200-only path across
+202/2xx/4xx/5xx/missing/empty/null/unparseable-body cases, plus the provider's
+disabled/no-key/no-mappings no-op guards).
+Left: live end-to-end verification (deploy + app-pool recycle + POST
+`/api/whatsapp/inbound` with the vault-sourced key, then clearing the
+plaintext once confirmed identical) needs this PR merged and picked up by the
+hourly `WhatsAppBridgeScheduledDeploy` build agent — not done in this session.
