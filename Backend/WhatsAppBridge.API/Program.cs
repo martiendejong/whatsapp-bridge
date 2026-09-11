@@ -12,6 +12,12 @@ var builder = WebApplication.CreateBuilder(args);
 // or in environment variables (e.g. TASKINTAKE__APIKEY). Placeholders only in appsettings.json.
 builder.Configuration.AddJsonFile("appsettings.Local.json", optional: true, reloadOnChange: true);
 
+// Prospergenics vault (task 3299): added LAST among the config sources so a successful
+// fetch overrides appsettings.json/appsettings.Production.json/Local/env. Loads once here,
+// before anything below reads configuration — see Services/VaultConfiguration.cs and
+// README.md "Secrets & Vault Rotation" for the fail-safe/no-reload contract.
+builder.Configuration.AddProspergenicsVault();
+
 // Configure IIS integration for production
 if (builder.Environment.IsProduction())
 {
