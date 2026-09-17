@@ -408,3 +408,15 @@ Left: live end-to-end verification (deploy + app-pool recycle + POST
 `/api/whatsapp/inbound` with the vault-sourced key, then clearing the
 plaintext once confirmed identical) needs this PR merged and picked up by the
 hourly `WhatsAppBridgeScheduledDeploy` build agent — not done in this session.
+
+## 2026-09-17 — task 3308
+Done: converted `bugatti-uptime-check.ps1` (prod-server-only script, C:\scripts
+on 85.215.217.154, not previously in any repo) to report every probe result
+("up" included) to `POST /api/wa/monitor` instead of self-alerting. Removed
+its own dedup state file and direct `/api/wa/sendMessage` call; reused
+`monitor-report.ps1`'s (task 3305) already-deployed, project-8-only vault
+bootstrap key (`C:\tools\wa-watchdog\vault-key.txt`) for the fresh-token-per-run
+pattern instead of provisioning a duplicate. Test app-pool self-heal block is
+untouched.
+Verified: see PR for live verification evidence.
+Left: nothing planned.
