@@ -78,6 +78,37 @@ public class WhatsAppBridgeService : IAsyncDisposable
             ? File.Exists(Path.Combine(sessionDir, "baileys-auth", "creds.json"))
             : File.Exists(Path.Combine(sessionDir, "creds.json"));
 
+    /// <summary>Session status after the engine reports a disconnect. needs_qr sticks (the engine reports the
+    /// disconnect first and needs_qr right after, and again when the process later exits); a session that
+    /// never connected is "failed" on the interactive path, "disconnected" when restoring a saved one.</summary>
+    internal static string StatusAfterDisconnect(string? current, bool everConnected, bool restoring) =>
+        current == StatusNeedsQr ? StatusNeedsQr
+        : restoring || everConnected ? "disconnected"
+        : "failed";
+
+    internal const string StatusNeedsQr = "needs_qr";
+
+    // Credential-write warnings per session (in-memory; the engine clears it when writes recover).
+    private readonly ConcurrentDictionary<string, string> _authWarnings = new();
+
+    private void WireAuthHealth(string sessionId, IWhatsAppEngine client)
+    {
+        client.NeedsQr += (_, reason) =>
+        {
+            _logger.LogWarning("Session {SessionId} needs a QR scan (reason: {Reason})", sessionId, reason);
+            _ = UpdateSessionAsync(sessionId, s =>
+            {
+                s.Status = StatusNeedsQr;
+                s.LastSeenAt = DateTime.UtcNow;
+            });
+        };
+        client.AuthWarning += (_, text) =>
+        {
+            if (text == null) _authWarnings.TryRemove(sessionId, out string? _);
+            else _authWarnings[sessionId] = text;
+        };
+    }
+
     /// <summary>Live engine info per active session — used by the admin engine endpoint.</summary>
     public List<object> GetActiveSessionEngines() =>
         _clients.Select(kv => (object)new
@@ -85,6 +116,7 @@ public class WhatsAppBridgeService : IAsyncDisposable
             sessionId = kv.Key,
             engine = kv.Value.EngineName,
             isConnected = kv.Value.IsConnected,
+            authWarning = _authWarnings.TryGetValue(kv.Key, out string? w) ? w : (string?)null,
         }).ToList();
 
     /// <summary>
@@ -142,6 +174,7 @@ public class WhatsAppBridgeService : IAsyncDisposable
         client.HistoryMessageReceived += (_, msg) => StoreMessage(sessionId, msg, isHistory: true);
         client.HistorySyncCompleted   += (_, n)   => { _logger.LogInformation("HistorySync: persisting {N} msgs for {Sid}", n, sessionId); PersistMessages(sessionId); };
         client.MessageStatusUpdated   += (_, evt) => UpdateMessageStatus(sessionId, evt.Jid, evt.MessageId, evt.Status);
+        WireAuthHealth(sessionId, client);
 
         client.Connected += (_, _) =>
         {
@@ -165,12 +198,11 @@ public class WhatsAppBridgeService : IAsyncDisposable
         {
             // If we never reached "connected", the server rejected us (e.g. rate limiting, bad payload).
             // Mark as "failed" so the frontend stops polling instead of hanging on "qr_pending".
-            var status = everConnected ? "disconnected" : "failed";
-            _logger.LogInformation("Session {SessionId} disconnected (status → {Status})", sessionId, status);
-            qrTcs.TrySetException(new Exception($"Connection rejected by server (status: {status})"));
+            qrTcs.TrySetException(new Exception("Connection rejected by server"));
             _ = UpdateSessionAsync(sessionId, s =>
             {
-                s.Status = status;
+                s.Status = StatusAfterDisconnect(s.Status, everConnected, restoring: false);
+                _logger.LogInformation("Session {SessionId} disconnected (status → {Status})", sessionId, s.Status);
                 s.LastSeenAt = DateTime.UtcNow;
             });
         };
@@ -230,6 +262,7 @@ public class WhatsAppBridgeService : IAsyncDisposable
         client.HistoryMessageReceived += (_, msg) => StoreMessage(sessionId, msg, isHistory: true);
         client.HistorySyncCompleted   += (_, n)   => { _logger.LogInformation("HistorySync: persisting {N} msgs for {Sid}", n, sessionId); PersistMessages(sessionId); };
         client.MessageStatusUpdated   += (_, evt) => UpdateMessageStatus(sessionId, evt.Jid, evt.MessageId, evt.Status);
+        WireAuthHealth(sessionId, client);
 
         client.Connected += (_, _) =>
         {
@@ -248,7 +281,7 @@ public class WhatsAppBridgeService : IAsyncDisposable
         client.Disconnected += (_, _) =>
             _ = UpdateSessionAsync(sessionId, s =>
             {
-                s.Status = "disconnected";
+                s.Status = StatusAfterDisconnect(s.Status, everConnected: false, restoring: true);
                 s.LastSeenAt = DateTime.UtcNow;
             });
 

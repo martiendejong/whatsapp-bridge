@@ -420,3 +420,18 @@ pattern instead of provisioning a duplicate. Test app-pool self-heal block is
 untouched.
 Verified: see PR for live verification evidence.
 Left: nothing planned.
+
+## 2026-10-07 - task 4998
+Done (code side only; no prod access): reliable credential saving + needs-QR for the Baileys sidecar.
+baileys-sidecar/reliable-auth-state.js replaces useMultiFileAuthState: atomic writes (tmp+fsync+rename), per-attempt
+timeout so a hung write cannot block later ones, retries then in-memory pending + background retry, errors logged and
+emitted (auth_write_error), flush before shutdown, health for a >10 min warning (auth_write_warning/auth_write_ok).
+Corrupt/orphaned/rejected (401 loggedOut) credentials: folder is renamed (baileys-auth.<reason>-<ts>, never deleted),
+sidecar emits needs_qr and restarts with empty creds so a QR appears. C#: BaileysEngine maps needs_qr/auth_write_*,
+session status needs_qr (sticky, WhatsAppBridgeService.StatusAfterDisconnect), warning on GET admin engine info
+(authWarning) + API log; frontend status type + "Scan QR to reconnect" button; csproj copies reliable-auth-state.js.
+Verified: node --test 9/9 (sidecar), dotnet test 225/225, dotnet build clean. Frontend not built (no node_modules).
+Not verified / needs humans: root cause from live evidence (creds.json vs session-* mtimes, API log grep for EPERM/EBUSY
+since 14 Sep needs prod 85.215.217.154); sidecar run against real Baileys (not installed here); the live session
+31641406266 (id 94e81b67) still needs a QR re-scan by its owner. Warning is not yet pushed to the WhatsApp monitor alert
+dispatcher (log + admin endpoint only).

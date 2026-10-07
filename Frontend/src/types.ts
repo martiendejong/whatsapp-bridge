@@ -20,7 +20,7 @@ export interface WhatsAppSession {
   id: number;
   sessionId: string;
   phoneNumber: string;
-  status: 'connected' | 'disconnected' | 'qr_pending';
+  status: 'connected' | 'disconnected' | 'qr_pending' | 'needs_qr';
   createdAt: string;
   connectedAt?: string;
   lastSeenAt?: string;
