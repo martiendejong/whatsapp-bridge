@@ -37,4 +37,11 @@
     <Content Include="..\..\baileys-sidecar\package.json" Link="baileys-sidecar\package.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- WhatsApp Web sidecar (whatsapp-web.js + Puppeteer) for the waweb engine — same
+         deal as baileys-sidecar: node_modules is installed by deploy.py, not shipped here. -->
+    <Content Include="..\..\waweb-sidecar\index.js" Link="waweb-sidecar\index.js" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\waweb-sidecar\package.json" Link="waweb-sidecar\package.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

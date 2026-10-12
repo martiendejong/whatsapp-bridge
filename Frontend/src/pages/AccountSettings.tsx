@@ -48,7 +48,10 @@ function EngineSettings() {
   };
 
   const engineLabel = (e: string) =>
-    e === 'dawa' ? 'Dawa (built-in C# client)' : e === 'baileys' ? 'Baileys (Node.js sidecar)' : e;
+    e === 'dawa' ? 'Dawa (built-in C# client)'
+    : e === 'baileys' ? 'Baileys (Node.js sidecar)'
+    : e === 'waweb' ? 'WhatsApp Web (real client in headless browser)'
+    : e;
 
   return (
     <div className="bg-white shadow rounded-lg p-6">

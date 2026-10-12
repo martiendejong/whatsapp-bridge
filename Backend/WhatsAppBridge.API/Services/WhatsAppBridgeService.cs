@@ -63,20 +63,25 @@ public class WhatsAppBridgeService : IAsyncDisposable
     private async Task<IWhatsAppEngine> CreateEngineAsync(string sessionDir)
     {
         var engine = await _engineSettings.GetEngineAsync();
-        return engine == EngineSettingsService.BaileysEngine
-            ? new BaileysEngine(sessionDir, _configuration, _loggerFactory)
-            : new DawaEngine(sessionDir, _loggerFactory);
+        return engine switch
+        {
+            EngineSettingsService.BaileysEngine => new BaileysEngine(sessionDir, _configuration, _loggerFactory),
+            EngineSettingsService.WaWebEngine => new WaWebEngine(sessionDir, _configuration, _loggerFactory),
+            _ => new DawaEngine(sessionDir, _loggerFactory),
+        };
     }
 
     /// <summary>
     /// Whether the given engine has saved credentials for this session directory.
-    /// Dawa and Baileys store creds in different (incompatible) formats, so a session
-    /// switching engines needs a fresh QR pairing on the new engine.
+    /// Dawa, Baileys and WaWeb store creds in different (incompatible) formats, so a
+    /// session switching engines needs a fresh QR pairing on the new engine.
     /// </summary>
-    public static bool EngineHasSavedSession(string engine, string sessionDir) =>
-        engine == EngineSettingsService.BaileysEngine
-            ? File.Exists(Path.Combine(sessionDir, "baileys-auth", "creds.json"))
-            : File.Exists(Path.Combine(sessionDir, "creds.json"));
+    public static bool EngineHasSavedSession(string engine, string sessionDir) => engine switch
+    {
+        EngineSettingsService.BaileysEngine => File.Exists(Path.Combine(sessionDir, "baileys-auth", "creds.json")),
+        EngineSettingsService.WaWebEngine => WaWebEngine.HasWaWebProfile(sessionDir),
+        _ => File.Exists(Path.Combine(sessionDir, "creds.json")),
+    };
 
     /// <summary>Live engine info per active session — used by the admin engine endpoint.</summary>
     public List<object> GetActiveSessionEngines() =>
