@@ -181,7 +181,7 @@ async function startSocket() {
     },
     logger,
     printQRInTerminal: false,
-    browser: ['Ubuntu', 'Chrome', '20.0.04'],
+    browser: ['Windows', 'Chrome', '137.0.7151.68'],
     syncFullHistory: false,
     markOnlineOnConnect: false,
   })
