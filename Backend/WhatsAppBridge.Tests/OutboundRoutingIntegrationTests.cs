@@ -172,6 +172,32 @@ public class OutboundRoutingIntegrationTests
     }
 
     /// <summary>
+    /// Task 6003: with the contact table armed, "the contact table IS the allow-list" — a contact
+    /// in it can be messaged on the ordinary endpoints. A task-intake auto-reply is an answer, not
+    /// a send, so it must stay on the static allow-list only: being a routing contact (Sjoerd, who
+    /// is deliberately absent from the static list here) must not make him answerable by it.
+    /// </summary>
+    [Fact]
+    public async Task A_task_intake_reply_is_not_cleared_by_a_routing_contact_row()
+    {
+        using var db = NewContext();
+        await SeedPolicyAsync(db, sjoerdWindowStart: 0, sjoerdWindowEnd: 24);
+        var svc = NewService(db);
+
+        var viaNormalEndpoint = await svc.CheckAsync("sendMessage", Sjoerd, "a", 1, "deploy:valsuani");
+        var viaTaskIntake = await svc.CheckAsync(
+            OutboundGuardrailService.TaskIntakeReplyEndpoint, Sjoerd, "a", userId: null, category: "reply");
+        var toMartien = await svc.CheckAsync(
+            OutboundGuardrailService.TaskIntakeReplyEndpoint, Martien, "a", userId: null, category: "reply");
+
+        Assert.True(viaNormalEndpoint.Allowed);
+        Assert.False(viaTaskIntake.Allowed);
+        Assert.Contains("not on the outbound allow-list", viaTaskIntake.Reason);
+        Assert.True(toMartien.Allowed);
+        Assert.Equal(Martien, toMartien.Recipient);
+    }
+
+    /// <summary>
     /// Routing decides who; the caps decide how often. A redirect must not become a way around
     /// the limits that exist because this number was once banned for exactly that pattern.
     /// </summary>

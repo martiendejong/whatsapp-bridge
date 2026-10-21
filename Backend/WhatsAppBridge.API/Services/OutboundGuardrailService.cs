@@ -81,6 +81,18 @@ public sealed class OutboundGuardrailService
     /// </summary>
     public const string DirectReplyEndpoint = "sendReply";
 
+    /// <summary>
+    /// The task-intake auto-reply (WhatsAppBridgeService.DispatchTaskIntake). Task 6003: this
+    /// path used to call SendMessageAsync directly, bypassing this class entirely — the gap
+    /// flagged after task 869edf485 and left open, because TaskIntake was off. It is a reply in
+    /// the same sense as <see cref="DirectReplyEndpoint"/> (it answers a message that just
+    /// arrived, quoting nothing a third party can't see), so it is exempt from ROUTING for the
+    /// same reasons, but it is NOT exempt from the allow-list or the volume caps, and it gets no
+    /// reply-window exception (that stays CoachOS-only): a task-intake sender must be on the
+    /// outbound allow-list to be answered at all.
+    /// </summary>
+    public const string TaskIntakeReplyEndpoint = "taskIntakeReply";
+
     private readonly OutboundGuardrailOptions _options;
     private readonly AppDbContext _context;
     private readonly OutboundRoutingService _routing;
@@ -141,7 +153,7 @@ public sealed class OutboundGuardrailService
         // is strictly narrower: it demands a genuine inbound message within the last N hours.
         // Without this exemption, replying to anyone outside the contact table would break the
         // one thing Martien explicitly wants to keep working: "als ze zelf iets vragen".
-        var isReply = endpoint is CoachOsReplyEndpoint or DirectReplyEndpoint;
+        var isReply = endpoint is CoachOsReplyEndpoint or DirectReplyEndpoint or TaskIntakeReplyEndpoint;
 
         var routedTo = to;
         string? routingNote = null;

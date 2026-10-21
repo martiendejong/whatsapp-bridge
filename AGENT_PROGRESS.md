@@ -420,3 +420,8 @@ pattern instead of provisioning a duplicate. Test app-pool self-heal block is
 untouched.
 Verified: see PR for live verification evidence.
 Left: nothing planned.
+
+## 2026-10-21 — task 6003
+Done: the task-intake auto-reply (WhatsAppBridgeService.DispatchTaskIntake) now goes through OutboundGuardrailService (new TaskIntakeReplyEndpoint: allow-list + volume caps, no routing, no reply-window exception). It was the one internal send path that skipped the guardrail (flagged after task 869edf485). 4 new tests.
+Verified: dotnet test 220/220 pass. Live bridge audit (read-only) shows no send attempt at all 2026-10-20 07:40-08:30 UTC and the only session disconnected, so this gap is hardening, not the cause of the incident.
+Left: the sender of the 2026-10-20 07:58 UTC messages is still unnamed (not the bridge; needs the admin Audit view or a participant's forwarded message); owner is Martien.

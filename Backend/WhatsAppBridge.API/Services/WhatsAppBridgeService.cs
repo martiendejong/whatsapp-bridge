@@ -1065,9 +1065,31 @@ public class WhatsAppBridgeService : IAsyncDisposable
         // Reply target: the conversation JID the message arrived on.
         var replyTo = msg.RemoteJid;
 
+        // Task 6003: this reply used to go straight to SendMessageAsync, the one internal send path
+        // that skipped OutboundGuardrailService (allow-list, volume caps, blocked-outbound record).
+        // It now takes the same gate as every other outbound, so an inbound sender who is not on
+        // the outbound allow-list gets no answer, and a flood of inbound messages cannot become a
+        // flood of replies.
         Func<string, string, Task> reply = async (to, body) =>
         {
-            try { await SendMessageAsync(sessionId, to, body); }
+            try
+            {
+                using var scope = _scopeFactory.CreateScope();
+                var guardrail = scope.ServiceProvider.GetRequiredService<OutboundGuardrailService>();
+
+                var guard = await guardrail.CheckAsync(
+                    OutboundGuardrailService.TaskIntakeReplyEndpoint, to, body, userId: null,
+                    category: "reply");
+                if (!guard.Allowed)
+                {
+                    _logger.LogWarning("TaskIntake: reply to {To} not sent for session {Sid}: {Reason}",
+                        to, sessionId, guard.Reason);
+                    return;
+                }
+
+                await SendMessageAsync(sessionId, guard.Recipient, body);
+                await guardrail.ConfirmDeliveredAsync(guard);
+            }
             catch (Exception ex) { _logger.LogWarning(ex, "TaskIntake reply send failed for session {Sid}", sessionId); }
         };
 
