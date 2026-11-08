@@ -76,6 +76,10 @@ public abstract class SidecarEngine : IWhatsAppEngine
     public event EventHandler<string>? QRCodeReceived;
     public event EventHandler? Connected;
     public event EventHandler? Disconnected;
+    /// <inheritdoc cref="IWhatsAppEngine.NeedsQr"/>
+    public event EventHandler<string>? NeedsQr;
+    /// <inheritdoc cref="IWhatsAppEngine.AuthWarning"/>
+    public event EventHandler<string?>? AuthWarning;
     public event EventHandler<IncomingMessage>? MessageReceived;
     public event EventHandler<IncomingMessage>? HistoryMessageReceived;
     public event EventHandler<int>? HistorySyncCompleted;
@@ -182,7 +186,7 @@ public abstract class SidecarEngine : IWhatsAppEngine
 
     private static string Truncate(string s, int max) => s.Length <= max ? s : s[..max] + "…";
 
-    private void HandleLine(string line)
+    internal void HandleLine(string line)
     {
         using var doc = JsonDocument.Parse(line);
         var root = doc.RootElement;
@@ -225,7 +229,40 @@ public abstract class SidecarEngine : IWhatsAppEngine
 
             case "disconnected":
                 _connected = false;
+                // A rejected resume (WhatsApp logged the credentials out) is not a plain disconnect: the sidecar
+                // follows up with needs_qr once it has moved the dead credentials aside.
+                if (data.ValueKind == JsonValueKind.Object && data.TryGetProperty("loggedOut", out var lo) && lo.ValueKind == JsonValueKind.True)
+                    _logger.LogWarning("{Engine} session {Dir}: WhatsApp rejected the saved credentials (logged out)", EngineName, SessionDirectory);
                 Disconnected?.Invoke(this, EventArgs.Empty);
+                break;
+
+            case "needs_qr":
+            {
+                _connected = false;
+                var reason = data.ValueKind == JsonValueKind.Object && data.TryGetProperty("reason", out var rs) ? rs.GetString() ?? "unknown" : "unknown";
+                _logger.LogWarning("{Engine} session {Dir} needs a QR scan again (reason: {Reason})", EngineName, SessionDirectory, reason);
+                NeedsQr?.Invoke(this, reason);
+                break;
+            }
+
+            case "auth_write_error":
+                _logger.LogError("{Engine} credential write failed for {Dir}: {Detail}", EngineName, SessionDirectory,
+                    data.ValueKind == JsonValueKind.Object ? data.ToString() : "?");
+                break;
+
+            case "auth_write_warning":
+            {
+                var failingMin = data.ValueKind == JsonValueKind.Object && data.TryGetProperty("failingForMs", out var ff) && ff.TryGetInt64(out var ms) ? ms / 60000 : 0;
+                var last = data.ValueKind == JsonValueKind.Object && data.TryGetProperty("lastError", out var le) ? le.GetString() : null;
+                var text = $"Credential writes have been failing for {failingMin} min while connected; a restart would resume from stale credentials. Last error: {last ?? "unknown"}";
+                _logger.LogError("{Engine} session {Dir}: {Text}", EngineName, SessionDirectory, text);
+                AuthWarning?.Invoke(this, text);
+                break;
+            }
+
+            case "auth_write_ok":
+                _logger.LogInformation("{Engine} session {Dir}: credential writes recovered", EngineName, SessionDirectory);
+                AuthWarning?.Invoke(this, null);
                 break;
 
             case "message":
