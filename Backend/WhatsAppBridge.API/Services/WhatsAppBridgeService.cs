@@ -63,20 +63,25 @@ public class WhatsAppBridgeService : IAsyncDisposable
     private async Task<IWhatsAppEngine> CreateEngineAsync(string sessionDir)
     {
         var engine = await _engineSettings.GetEngineAsync();
-        return engine == EngineSettingsService.BaileysEngine
-            ? new BaileysEngine(sessionDir, _configuration, _loggerFactory)
-            : new DawaEngine(sessionDir, _loggerFactory);
+        return engine switch
+        {
+            EngineSettingsService.BaileysEngine => new BaileysEngine(sessionDir, _configuration, _loggerFactory),
+            EngineSettingsService.WaWebEngine => new WaWebEngine(sessionDir, _configuration, _loggerFactory),
+            _ => new DawaEngine(sessionDir, _loggerFactory),
+        };
     }
 
     /// <summary>
     /// Whether the given engine has saved credentials for this session directory.
-    /// Dawa and Baileys store creds in different (incompatible) formats, so a session
-    /// switching engines needs a fresh QR pairing on the new engine.
+    /// Dawa, Baileys and WaWeb store creds in different (incompatible) formats, so a
+    /// session switching engines needs a fresh QR pairing on the new engine.
     /// </summary>
-    public static bool EngineHasSavedSession(string engine, string sessionDir) =>
-        engine == EngineSettingsService.BaileysEngine
-            ? File.Exists(Path.Combine(sessionDir, "baileys-auth", "creds.json"))
-            : File.Exists(Path.Combine(sessionDir, "creds.json"));
+    public static bool EngineHasSavedSession(string engine, string sessionDir) => engine switch
+    {
+        EngineSettingsService.BaileysEngine => File.Exists(Path.Combine(sessionDir, "baileys-auth", "creds.json")),
+        EngineSettingsService.WaWebEngine => WaWebEngine.HasWaWebProfile(sessionDir),
+        _ => File.Exists(Path.Combine(sessionDir, "creds.json")),
+    };
 
     /// <summary>Session status after the engine reports a disconnect. needs_qr sticks (the engine reports the
     /// disconnect first and needs_qr right after, and again when the process later exits); a session that
@@ -1093,9 +1098,31 @@ public class WhatsAppBridgeService : IAsyncDisposable
         // Reply target: the conversation JID the message arrived on.
         var replyTo = msg.RemoteJid;
 
+        // Task 6003: this reply used to go straight to SendMessageAsync, the one internal send path
+        // that skipped OutboundGuardrailService (allow-list, volume caps, blocked-outbound record).
+        // It now takes the same gate as every other outbound, so an inbound sender who is not on
+        // the outbound allow-list gets no answer, and a flood of inbound messages cannot become a
+        // flood of replies.
         Func<string, string, Task> reply = async (to, body) =>
         {
-            try { await SendMessageAsync(sessionId, to, body); }
+            try
+            {
+                using var scope = _scopeFactory.CreateScope();
+                var guardrail = scope.ServiceProvider.GetRequiredService<OutboundGuardrailService>();
+
+                var guard = await guardrail.CheckAsync(
+                    OutboundGuardrailService.TaskIntakeReplyEndpoint, to, body, userId: null,
+                    category: "reply");
+                if (!guard.Allowed)
+                {
+                    _logger.LogWarning("TaskIntake: reply to {To} not sent for session {Sid}: {Reason}",
+                        to, sessionId, guard.Reason);
+                    return;
+                }
+
+                await SendMessageAsync(sessionId, guard.Recipient, body);
+                await guardrail.ConfirmDeliveredAsync(guard);
+            }
             catch (Exception ex) { _logger.LogWarning(ex, "TaskIntake reply send failed for session {Sid}", sessionId); }
         };
 

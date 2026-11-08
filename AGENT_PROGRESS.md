@@ -427,11 +427,17 @@ baileys-sidecar/reliable-auth-state.js replaces useMultiFileAuthState: atomic wr
 timeout so a hung write cannot block later ones, retries then in-memory pending + background retry, errors logged and
 emitted (auth_write_error), flush before shutdown, health for a >10 min warning (auth_write_warning/auth_write_ok).
 Corrupt/orphaned/rejected (401 loggedOut) credentials: folder is renamed (baileys-auth.<reason>-<ts>, never deleted),
-sidecar emits needs_qr and restarts with empty creds so a QR appears. C#: BaileysEngine maps needs_qr/auth_write_*,
-session status needs_qr (sticky, WhatsAppBridgeService.StatusAfterDisconnect), warning on GET admin engine info
-(authWarning) + API log; frontend status type + "Scan QR to reconnect" button; csproj copies reliable-auth-state.js.
+sidecar emits needs_qr and restarts with empty creds so a QR appears. C#: SidecarEngine maps needs_qr/auth_write_*
+via NeedsQr/AuthWarning events on IWhatsAppEngine, session status needs_qr (sticky, WhatsAppBridgeService.StatusAfterDisconnect),
+warning on GET admin engine info (authWarning) + API log; frontend status type + "Scan QR to reconnect" button;
+csproj copies reliable-auth-state.js.
 Verified: node --test 9/9 (sidecar), dotnet test 225/225, dotnet build clean. Frontend not built (no node_modules).
 Not verified / needs humans: root cause from live evidence (creds.json vs session-* mtimes, API log grep for EPERM/EBUSY
 since 14 Sep needs prod 85.215.217.154); sidecar run against real Baileys (not installed here); the live session
 31641406266 (id 94e81b67) still needs a QR re-scan by its owner. Warning is not yet pushed to the WhatsApp monitor alert
 dispatcher (log + admin endpoint only).
+
+## 2026-10-21 — task 6003
+Done: the task-intake auto-reply (WhatsAppBridgeService.DispatchTaskIntake) now goes through OutboundGuardrailService (new TaskIntakeReplyEndpoint: allow-list + volume caps, no routing, no reply-window exception). It was the one internal send path that skipped the guardrail (flagged after task 869edf485). 4 new tests.
+Verified: dotnet test 220/220 pass. Live bridge audit (read-only) shows no send attempt at all 2026-10-20 07:40-08:30 UTC and the only session disconnected, so this gap is hardening, not the cause of the incident.
+Left: the sender of the 2026-10-20 07:58 UTC messages is still unnamed (not the bridge; needs the admin Audit view or a participant's forwarded message); owner is Martien.

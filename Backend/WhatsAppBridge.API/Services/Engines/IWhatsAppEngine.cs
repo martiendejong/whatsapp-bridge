@@ -12,7 +12,7 @@ namespace WhatsAppBridge.API.Services.Engines;
 /// </summary>
 public interface IWhatsAppEngine : IAsyncDisposable
 {
-    /// <summary>"dawa" or "baileys" — matches the persisted admin setting.</summary>
+    /// <summary>"dawa", "baileys" or "waweb" — matches the persisted admin setting.</summary>
     string EngineName { get; }
 
     bool IsConnected { get; }

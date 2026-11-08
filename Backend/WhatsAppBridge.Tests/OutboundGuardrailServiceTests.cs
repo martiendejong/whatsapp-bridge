@@ -218,6 +218,60 @@ public class OutboundGuardrailServiceTests
         Assert.Contains("volume cap reached", second.Reason);
     }
 
+    // ─── Task 6003: the task-intake auto-reply used to skip this class entirely ────────────────
+
+    [Fact]
+    public async Task TaskIntakeReply_ToNonAllowListedSender_IsBlockedAndRecorded_EvenWithReplyRouteAndInbound()
+    {
+        using var db = NewContext();
+        var svc = NewService(db, replyRouteEnabled: true);
+        // A genuine recent inbound row opens the CoachOS reply window for this number. It must
+        // NOT open anything for the task-intake endpoint: that exception is CoachOS-only.
+        await svc.RecordInboundContactAsync("31699999999");
+
+        var result = await svc.CheckAsync(
+            OutboundGuardrailService.TaskIntakeReplyEndpoint, "31699999999@s.whatsapp.net", "got it",
+            userId: null, category: "reply");
+
+        Assert.False(result.Allowed);
+        Assert.Contains("not on the outbound allow-list", result.Reason);
+        var blocked = Assert.Single(await db.BlockedOutboundMessages.ToListAsync());
+        Assert.Equal(OutboundGuardrailService.TaskIntakeReplyEndpoint, blocked.Endpoint);
+        Assert.Empty(await db.OutboundSendLogs.ToListAsync());
+    }
+
+    [Fact]
+    public async Task TaskIntakeReply_ToAllowListedSender_IsAllowed_AndKeepsTheRequestedJid()
+    {
+        using var db = NewContext();
+        var svc = NewService(db, allowList: new[] { "31633984381" });
+
+        var result = await svc.CheckAsync(
+            OutboundGuardrailService.TaskIntakeReplyEndpoint, "31633984381@s.whatsapp.net", "task created",
+            userId: null, category: "reply");
+
+        Assert.True(result.Allowed);
+        // A reply is never redirected: the caller must answer on the conversation it came from.
+        Assert.Equal("31633984381@s.whatsapp.net", result.Recipient);
+        Assert.Single(await db.OutboundSendLogs.ToListAsync());
+    }
+
+    [Fact]
+    public async Task TaskIntakeReply_IsSubjectToTheVolumeCaps()
+    {
+        using var db = NewContext();
+        var svc = NewService(db, allowList: new[] { "31633984381" }, maxPerRecipientPer24h: 2);
+
+        var first = await svc.CheckAsync(OutboundGuardrailService.TaskIntakeReplyEndpoint, "31633984381", "1", null);
+        var second = await svc.CheckAsync(OutboundGuardrailService.TaskIntakeReplyEndpoint, "31633984381", "2", null);
+        var third = await svc.CheckAsync(OutboundGuardrailService.TaskIntakeReplyEndpoint, "31633984381", "3", null);
+
+        Assert.True(first.Allowed);
+        Assert.True(second.Allowed);
+        Assert.False(third.Allowed);
+        Assert.Contains("volume cap reached", third.Reason);
+    }
+
     [Fact]
     public async Task RecordInboundContact_Upserts_DoesNotDuplicateRows()
     {

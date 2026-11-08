@@ -4,7 +4,7 @@ using WhatsAppBridge.API.Data;
 namespace WhatsAppBridge.API.Services;
 
 /// <summary>
-/// Persists the admin-selected WhatsApp engine ("dawa" or "baileys") in the AppSettings
+/// Persists the admin-selected WhatsApp engine ("dawa", "baileys" or "waweb") in the AppSettings
 /// key/value table (self-healed in Program.cs). Falls back to WhatsApp:Engine from
 /// configuration, then to "dawa". Registered as singleton; the value is cached and
 /// only re-read after a write, so the hot path (every session create/restore) is free.
@@ -13,7 +13,8 @@ public class EngineSettingsService
 {
     public const string DawaEngine = "dawa";
     public const string BaileysEngine = "baileys";
-    public static readonly string[] AvailableEngines = { DawaEngine, BaileysEngine };
+    public const string WaWebEngine = "waweb";
+    public static readonly string[] AvailableEngines = { DawaEngine, BaileysEngine, WaWebEngine };
 
     private const string SettingKey = "WhatsAppEngine";
 
