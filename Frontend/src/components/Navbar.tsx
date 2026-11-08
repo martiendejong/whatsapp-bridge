@@ -28,9 +28,14 @@ export default function Navbar() {
               non-admin only leads them to a page of failing requests. The audit link stays:
               non-admins legitimately see their own rows there. */}
           {user?.isAdmin && (
-            <Link to="/routing" style={{ color: 'white', textDecoration: 'none' }}>
-              Routing
-            </Link>
+            <>
+              <Link to="/routing" style={{ color: 'white', textDecoration: 'none' }}>
+                Routing
+              </Link>
+              <Link to="/admin/users" style={{ color: 'white', textDecoration: 'none' }}>
+                Users
+              </Link>
+            </>
           )}
           <Link to="/account" style={{ color: 'white', textDecoration: 'none' }}>
             Account
