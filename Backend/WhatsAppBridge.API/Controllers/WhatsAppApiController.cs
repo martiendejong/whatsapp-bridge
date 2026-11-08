@@ -392,6 +392,65 @@ public class WhatsAppApiController : ControllerBase
     }
 
     /// <summary>
+    /// Send media by uploading a file directly (multipart/form-data).
+    /// POST /api/wa/sendMediaFile
+    /// Fields: File (binary), To (phone/JID), Caption (optional), FileName (optional), SessionId (optional)
+    /// Mirrors /api/wa/sendMedia but accepts an uploaded file instead of a URL.
+    /// </summary>
+    [HttpPost("sendMediaFile")]
+    public async Task<IActionResult> SendMediaFile([FromForm] SendMediaFileRequest request)
+    {
+        try
+        {
+            var (success, userId, error) = await ValidateApiToken();
+            if (!success)
+                return Unauthorized(new { error });
+
+            if (request.File == null || request.File.Length == 0)
+                return BadRequest(new { error = "File is required" });
+
+            var guard = await _outboundGuardrail.CheckAsync("sendMediaFile", request.To,
+                $"{request.Caption}\n{request.FileName ?? request.File.FileName}:{request.File.Length}", userId, request.Category);
+            if (guard.Suppressed)
+                return Ok(new { success = true, suppressed = true, reason = guard.Reason });
+            if (!guard.Allowed)
+                return StatusCode(403, new { error = guard.Reason, blocked = true });
+
+            var sessionId = await GetUserSessionId(userId!.Value, request.SessionId);
+            if (sessionId == null)
+                return BadRequest(new { error = request.SessionId != null
+                    ? $"WhatsApp session '{request.SessionId}' not found or not connected"
+                    : "No active WhatsApp session" });
+
+            using var ms = new MemoryStream();
+            await request.File.CopyToAsync(ms);
+            var fileBytes = ms.ToArray();
+            var mimeType = request.File.ContentType;
+            var mediaType = mimeType.StartsWith("image/") ? "image"
+                          : mimeType.StartsWith("audio/") ? "audio"
+                          : mimeType.StartsWith("video/") ? "video"
+                          : "document";
+            var fileName = request.FileName ?? request.File.FileName;
+
+            var result = await _whatsappService.SendMediaAsync(
+                sessionId, guard.Recipient, mediaType, mimeType, fileBytes,
+                request.Caption ?? "", fileName);
+            await _outboundGuardrail.ConfirmDeliveredAsync(guard);
+
+            return Ok(result);
+        }
+        catch (WhatsAppServiceException ex)
+        {
+            return StatusCode(400, new
+            {
+                error = ex.Error.UserMessage,
+                errorCode = ex.Error.ErrorCode,
+                details = ex.Error.AdditionalInfo
+            });
+        }
+    }
+
+    /// <summary>
     /// Get chat messages
     /// GET /api/wa/getMessages?chatId=123456789@c.us&limit=50
     /// </summary>
@@ -1203,6 +1262,15 @@ public record SetContactNameApiRequest(string Jid, string? Name = null);
 public record SendReplyRequest(string To, string Body, string QuotedMessageId, string QuotedFromJid, string? SessionId = null);
 public record RequestHistoryRequest(string ChatId, int Count = 50, bool NoAnchor = false, string? SessionId = null);
 public record SendMediaRequest(string To, string MediaUrl, string? Caption = null, string? SessionId = null, string? Category = null);
+public class SendMediaFileRequest
+{
+    public required IFormFile File { get; init; }
+    public required string To { get; init; }
+    public string? Caption { get; init; }
+    public string? FileName { get; init; }
+    public string? SessionId { get; init; }
+    public string? Category { get; init; }
+}
 public record DownloadMediaRequest(
     string? MediaUrl = null,
     string? MediaKey = null,
