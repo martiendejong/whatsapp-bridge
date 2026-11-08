@@ -33,8 +33,12 @@ export default function Login() {
 
     try {
       const response = await auth.login(email, password);
-      login(response.data.user, response.data.token);
-      navigate('/dashboard');
+      if (response.data.requiresTwoFactor) {
+        navigate('/verify-2fa', { state: { message: response.data.message, twoFactorMethod: response.data.twoFactorMethod } });
+      } else {
+        login(response.data.user, response.data.token);
+        navigate('/dashboard');
+      }
     } catch (err: any) {
       setError(err.response?.data?.message || 'Login failed');
     } finally {
