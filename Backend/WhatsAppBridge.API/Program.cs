@@ -87,6 +87,7 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
 // Services
 builder.Services.AddHttpClient();
 builder.Services.AddScoped<AuthService>();
+builder.Services.AddScoped<EmailService>();
 builder.Services.AddScoped<IamService>();
 builder.Services.AddScoped<TwoFactorService>();
 builder.Services.AddSingleton<EncryptionService>();
