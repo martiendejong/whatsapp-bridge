@@ -3,6 +3,7 @@ import { AuthProvider, useAuth } from './AuthContext';
 import Login from './pages/Login';
 import Register from './pages/Register';
 import IamCallback from './pages/IamCallback';
+import VerifyTwoFactor from './pages/VerifyTwoFactor';
 import Dashboard from './pages/Dashboard';
 import ApiConnections from './pages/ApiConnections';
 import WhatsAppSessions from './pages/WhatsAppSessions';
@@ -44,6 +45,7 @@ function AppRoutes() {
           }
         />
         <Route path="/auth/iam/callback" element={<IamCallback />} />
+        <Route path="/verify-2fa" element={<VerifyTwoFactor />} />
         <Route
           path="/dashboard"
           element={

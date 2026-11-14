@@ -9,17 +9,20 @@ public class TwoFactorService
 {
     private readonly AppDbContext _context;
     private readonly WhatsAppBridgeService _whatsappService;
+    private readonly EmailService _emailService;
     private readonly ILogger<TwoFactorService> _logger;
     private readonly IConfiguration _configuration;
 
     public TwoFactorService(
         AppDbContext context,
         WhatsAppBridgeService whatsappService,
+        EmailService emailService,
         ILogger<TwoFactorService> logger,
         IConfiguration configuration)
     {
         _context = context;
         _whatsappService = whatsappService;
+        _emailService = emailService;
         _logger = logger;
         _configuration = configuration;
     }
@@ -30,6 +33,26 @@ public class TwoFactorService
     public string GenerateToken()
     {
         return RandomNumberGenerator.GetInt32(100000, 999999).ToString();
+    }
+
+    /// <summary>
+    /// Send 2FA token via email
+    /// </summary>
+    public async Task<bool> SendEmailTokenAsync(int userId, string token)
+    {
+        try
+        {
+            var user = await _context.Users.FindAsync(userId);
+            if (user == null)
+                return false;
+
+            return await _emailService.SendTwoFactorTokenAsync(user.Email, token);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error sending email 2FA token to user {UserId}", userId);
+            return false;
+        }
     }
 
     /// <summary>

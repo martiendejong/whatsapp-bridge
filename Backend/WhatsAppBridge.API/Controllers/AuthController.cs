@@ -62,6 +62,12 @@ public class AuthController : ControllerBase
                 if (!sent)
                     return BadRequest(new { message = "Failed to send WhatsApp 2FA code. Please ensure you have a phone number linked." });
             }
+            else
+            {
+                var sent = await _twoFactorService.SendEmailTokenAsync(user.Id, twoFactorToken.Token);
+                if (!sent)
+                    return BadRequest(new { message = "Failed to send email verification code. Please contact support." });
+            }
 
             // Return pending 2FA status (no JWT token yet)
             return Ok(new
@@ -146,6 +152,36 @@ public class AuthController : ControllerBase
 
         return Ok(new { message = "Password updated successfully" });
     }
+
+    [Authorize]
+    [HttpGet("2fa-settings")]
+    public async Task<IActionResult> Get2FASettings()
+    {
+        var userId = GetUserId();
+        var user = await _authService.GetUserByIdAsync(userId);
+
+        if (user == null)
+            return NotFound();
+
+        return Ok(new
+        {
+            twoFactorEnabled = user.TwoFactorEnabled,
+            twoFactorMethod = user.TwoFactorMethod
+        });
+    }
+
+    [Authorize]
+    [HttpPut("2fa-settings")]
+    public async Task<IActionResult> Update2FASettings([FromBody] Update2FASettingsRequest request)
+    {
+        var userId = GetUserId();
+        var result = await _authService.Update2FASettingsAsync(userId, request.TwoFactorEnabled, request.TwoFactorMethod ?? "email");
+
+        if (!result)
+            return NotFound();
+
+        return Ok(new { message = "Two-factor authentication settings updated." });
+    }
 }
 
 public record RegisterRequest(string Email, string Password);
@@ -153,3 +189,4 @@ public record LoginRequest(string Email, string Password);
 public record UpdateEmailRequest(string Email);
 public record UpdatePasswordRequest(string CurrentPassword, string NewPassword);
 public record Verify2FARequest(string Token);
+public record Update2FASettingsRequest(bool TwoFactorEnabled, string? TwoFactorMethod);

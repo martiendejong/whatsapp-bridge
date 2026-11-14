@@ -42,8 +42,14 @@ export const auth = {
     api.post('/api/auth/register', { Email: email, Password: password }),
   login: (email: string, password: string) =>
     api.post('/api/auth/login', { Email: email, Password: password }),
+  verify2fa: (token: string) =>
+    api.post('/api/auth/verify-2fa', { Token: token }),
   me: (token: string) =>
     api.get('/api/auth/me', { headers: { Authorization: `Bearer ${token}` } }),
+  get2faSettings: () =>
+    api.get('/api/auth/2fa-settings'),
+  update2faSettings: (twoFactorEnabled: boolean, twoFactorMethod: string = 'email') =>
+    api.put('/api/auth/2fa-settings', { TwoFactorEnabled: twoFactorEnabled, TwoFactorMethod: twoFactorMethod }),
 };
 
 export const iam = {

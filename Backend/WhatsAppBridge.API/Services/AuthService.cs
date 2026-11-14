@@ -154,6 +154,18 @@ public class AuthService
 
     public async Task<User?> GetUserByIdAsync(int userId) => await _context.Users.FindAsync(userId);
 
+    public async Task<bool> Update2FASettingsAsync(int userId, bool enabled, string method)
+    {
+        var user = await _context.Users.FindAsync(userId);
+        if (user == null)
+            return false;
+
+        user.TwoFactorEnabled = enabled;
+        user.TwoFactorMethod = method;
+        await _context.SaveChangesAsync();
+        return true;
+    }
+
     // Maps an IAM identity to the matching bridge account by email (case-insensitive). If no
     // local account exists yet, one is created SSO-only: PasswordHash is a random, never-shared
     // value so password login stays impossible for that account until the user sets one via

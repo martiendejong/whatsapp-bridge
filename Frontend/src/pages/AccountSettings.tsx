@@ -1,6 +1,77 @@
 import { useEffect, useState } from 'react';
 import { useAuth } from '../AuthContext';
-import api, { admin } from '../api';
+import api, { admin, auth } from '../api';
+
+function TwoFactorSettings() {
+  const [enabled, setEnabled] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    auth.get2faSettings()
+      .then((res) => { setEnabled(res.data.twoFactorEnabled); })
+      .catch(() => setError('Failed to load 2FA settings'))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const handleToggle = async () => {
+    setError('');
+    setMessage('');
+    setSaving(true);
+    const next = !enabled;
+    try {
+      await auth.update2faSettings(next, 'email');
+      setEnabled(next);
+      setMessage(next ? 'Email two-factor authentication enabled.' : 'Two-factor authentication disabled.');
+    } catch (err: any) {
+      setError(err.response?.data?.error || 'Failed to update 2FA settings');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="bg-white shadow rounded-lg p-6">
+      <h2 className="text-xl font-semibold mb-1">Two-Factor Authentication</h2>
+      <p className="text-sm text-gray-600 mb-4">
+        When enabled, you will receive a 6-digit code by email each time you log in.
+        You can verify by entering the code or clicking the link in the email.
+      </p>
+
+      {message && (
+        <div className="mb-4 p-3 bg-green-100 border border-green-400 text-green-700 rounded text-sm">{message}</div>
+      )}
+      {error && (
+        <div className="mb-4 p-3 bg-red-100 border border-red-400 text-red-700 rounded text-sm">{error}</div>
+      )}
+
+      {loading ? (
+        <p className="text-sm text-gray-500">Loading...</p>
+      ) : (
+        <div className="flex items-center gap-4">
+          <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
+            enabled ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-700'
+          }`}>
+            {enabled ? 'Enabled' : 'Disabled'}
+          </span>
+          <button
+            onClick={handleToggle}
+            disabled={saving}
+            className={`px-6 py-2 text-white rounded-lg transition disabled:cursor-not-allowed ${
+              enabled
+                ? 'bg-red-600 hover:bg-red-700 disabled:bg-red-400'
+                : 'bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400'
+            }`}
+          >
+            {saving ? 'Saving...' : enabled ? 'Disable 2FA' : 'Enable 2FA'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
 
 interface ActiveSessionEngine {
   sessionId: string;
@@ -338,6 +409,9 @@ export default function AccountSettings() {
             </button>
           </form>
         </div>
+
+        {/* Two-Factor Authentication */}
+        <TwoFactorSettings />
 
         {/* WhatsApp engine (admin only) */}
         {user?.isAdmin && <EngineSettings />}
