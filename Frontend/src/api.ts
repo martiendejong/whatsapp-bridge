@@ -160,6 +160,9 @@ export const admin = {
   getEngine: () => api.get('/api/admin/engine'),
   setEngine: (engine: string, restartSessions: boolean) =>
     api.put('/api/admin/engine', { engine, restartSessions }),
+  getUsers: () => api.get('/api/admin/users'),
+  toggleAdmin: (id: number) => api.put(`/api/admin/users/${id}/toggle-admin`),
+  toggleActive: (id: number) => api.put(`/api/admin/users/${id}/toggle-active`),
 };
 
 export interface MonitorSubject {
