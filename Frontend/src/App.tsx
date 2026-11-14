@@ -11,6 +11,7 @@ import AccountSettings from './pages/AccountSettings';
 import Messages from './pages/Messages';
 import AuditLog from './pages/AuditLog';
 import Routing from './pages/Routing';
+import AdminUsers from './pages/AdminUsers';
 import Navbar from './components/Navbar';
 import Verify2FA from './pages/Verify2FA';
 
@@ -102,6 +103,14 @@ function AppRoutes() {
           element={
             <AdminRoute>
               <Routing />
+            </AdminRoute>
+          }
+        />
+        <Route
+          path="/admin/users"
+          element={
+            <AdminRoute>
+              <AdminUsers />
             </AdminRoute>
           }
         />

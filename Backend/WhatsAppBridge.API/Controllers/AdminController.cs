@@ -1,5 +1,8 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using System.Security.Claims;
+using WhatsAppBridge.API.Data;
 using WhatsAppBridge.API.Services;
 
 namespace WhatsAppBridge.API.Controllers;
@@ -17,14 +20,80 @@ public class AdminController : ControllerBase
     private readonly WhatsAppBridgeService _whatsappService;
     private readonly IConfiguration _configuration;
     private readonly ILogger<AdminController> _logger;
+    private readonly AppDbContext _context;
 
     public AdminController(EngineSettingsService engineSettings, WhatsAppBridgeService whatsappService,
-        IConfiguration configuration, ILogger<AdminController> logger)
+        IConfiguration configuration, ILogger<AdminController> logger, AppDbContext context)
     {
         _engineSettings = engineSettings;
         _whatsappService = whatsappService;
         _configuration = configuration;
         _logger = logger;
+        _context = context;
+    }
+
+    private int GetUserId()
+    {
+        var claim = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+        return int.Parse(claim!);
+    }
+
+    // ── User management ──────────────────────────────────────────────────────
+
+    [HttpGet("users")]
+    public async Task<IActionResult> GetUsers()
+    {
+        var users = await _context.Users
+            .OrderBy(u => u.CreatedAt)
+            .Select(u => new
+            {
+                u.Id,
+                u.Email,
+                u.IsAdmin,
+                u.IsActive,
+                u.CreatedAt,
+                u.LastLoginAt,
+            })
+            .ToListAsync();
+
+        return Ok(users);
+    }
+
+    [HttpPut("users/{id}/toggle-admin")]
+    public async Task<IActionResult> ToggleAdmin(int id)
+    {
+        var user = await _context.Users.FindAsync(id);
+        if (user == null) return NotFound();
+
+        // Prevent an admin from removing their own admin status
+        if (user.Id == GetUserId() && user.IsAdmin)
+            return BadRequest(new { error = "You cannot remove your own admin status." });
+
+        user.IsAdmin = !user.IsAdmin;
+        await _context.SaveChangesAsync();
+
+        _logger.LogInformation("Admin {Actor} set user {Target} IsAdmin={IsAdmin}",
+            User.Identity?.Name, user.Email, user.IsAdmin);
+
+        return Ok(new { user.Id, user.Email, user.IsAdmin, user.IsActive });
+    }
+
+    [HttpPut("users/{id}/toggle-active")]
+    public async Task<IActionResult> ToggleActive(int id)
+    {
+        var user = await _context.Users.FindAsync(id);
+        if (user == null) return NotFound();
+
+        if (user.Id == GetUserId())
+            return BadRequest(new { error = "You cannot deactivate your own account." });
+
+        user.IsActive = !user.IsActive;
+        await _context.SaveChangesAsync();
+
+        _logger.LogInformation("Admin {Actor} set user {Target} IsActive={IsActive}",
+            User.Identity?.Name, user.Email, user.IsActive);
+
+        return Ok(new { user.Id, user.Email, user.IsAdmin, user.IsActive });
     }
 
     /// <summary>Current WhatsApp engine setting plus per-session live engine state.</summary>
