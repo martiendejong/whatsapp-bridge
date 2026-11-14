@@ -358,7 +358,7 @@ def _smoke_request(method, url, **kwargs):
     deploy always fails loudly with clear evidence instead of an unhandled traceback."""
     import requests
     try:
-        return requests.request(method, url, timeout=15, **kwargs)
+        return requests.request(method, url, timeout=60, **kwargs)
     except requests.exceptions.RequestException as e:
         raise SmokeCheckFailed(f"{method} {url} failed: {e}") from e
 
@@ -525,6 +525,8 @@ def main():
                 else:
                     log("[3/5] --skip-frontend set, skipping frontend deploy.")
 
+                log(f"[4/5] Waiting 30s for backend cold-start (JIT + EF Core init) before smoke checks ...")
+                time.sleep(30)
                 log(f"[4/5] Running post-deploy smoke checks against {API_URL} (API) and "
                     f"{FRONTEND_URL} (frontend) ...")
                 version_info = smoke_check_version(API_URL)
