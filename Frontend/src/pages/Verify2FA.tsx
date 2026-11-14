@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams, useLocation } from 'react-router-dom';
 import { auth } from '../api';
 import { useAuth } from '../AuthContext';
 
@@ -10,6 +10,8 @@ export default function Verify2FA() {
   const { login } = useAuth();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
+  const location = useLocation();
+  const { method, message: deliveryMessage } = (location.state as any) || {};
 
   useEffect(() => {
     const urlToken = searchParams.get('token');
@@ -41,7 +43,11 @@ export default function Verify2FA() {
       <div className="card">
         <h2 style={{ marginBottom: '8px', textAlign: 'center' }}>Verify Login</h2>
         <p style={{ textAlign: 'center', color: '#666', marginBottom: '24px' }}>
-          Enter the 6-digit code sent to your WhatsApp or email.
+          {deliveryMessage || (method === 'whatsapp'
+            ? 'Enter the 6-digit code sent to your WhatsApp.'
+            : method === 'email'
+            ? 'Enter the 6-digit code sent to your email.'
+            : 'Enter the 6-digit code sent to your WhatsApp or email.')}
         </p>
         <form onSubmit={handleSubmit}>
           <div className="form-group">

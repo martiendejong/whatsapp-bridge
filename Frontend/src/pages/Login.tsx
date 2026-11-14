@@ -34,7 +34,9 @@ export default function Login() {
     try {
       const response = await auth.login(email, password);
       if (response.data.requiresTwoFactor) {
-        navigate('/verify-2fa');
+        navigate('/verify-2fa', {
+          state: { method: response.data.twoFactorMethod, message: response.data.message },
+        });
       } else {
         login(response.data.user, response.data.token);
         navigate('/dashboard');

@@ -128,7 +128,7 @@ function EngineSettings() {
 
 function TwoFactorSettings() {
   const [status, setStatus] = useState<{ twoFactorEnabled: boolean; twoFactorMethod: string; hasPhoneNumber: boolean } | null>(null);
-  const [method, setMethod] = useState('whatsapp');
+  const [method, setMethod] = useState('email');
   const [phoneNumber, setPhoneNumber] = useState('');
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
