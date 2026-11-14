@@ -56,6 +56,8 @@ export const auth = {
     api.post('/api/auth/register', { Email: email, Password: password }),
   login: (email: string, password: string) =>
     api.post('/api/auth/login', { Email: email, Password: password }),
+  verify2FA: (token: string) =>
+    api.post('/api/auth/verify-2fa', { Token: token }),
   me: (token: string) =>
     api.get('/api/auth/me', { headers: { Authorization: `Bearer ${token}` } }),
   verify2fa: (token: string) =>

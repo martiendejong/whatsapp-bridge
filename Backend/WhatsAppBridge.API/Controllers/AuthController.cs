@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using System.Security.Claims;
+using WhatsAppBridge.API.Data;
 using WhatsAppBridge.API.Services;
 
 namespace WhatsAppBridge.API.Controllers;
@@ -11,11 +12,15 @@ public class AuthController : ControllerBase
 {
     private readonly AuthService _authService;
     private readonly TwoFactorService _twoFactorService;
+    private readonly EmailService _emailService;
+    private readonly AppDbContext _context;
 
-    public AuthController(AuthService authService, TwoFactorService twoFactorService)
+    public AuthController(AuthService authService, TwoFactorService twoFactorService, EmailService emailService, AppDbContext context)
     {
         _authService = authService;
         _twoFactorService = twoFactorService;
+        _emailService = emailService;
+        _context = context;
     }
 
     private int GetUserId()

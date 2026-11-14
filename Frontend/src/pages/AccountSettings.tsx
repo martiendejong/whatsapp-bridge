@@ -180,6 +180,7 @@ function TwoFactorSettings() {
 
   if (!status) return null;
 
+
   return (
     <div className="bg-white shadow rounded-lg p-6">
       <h2 className="text-xl font-semibold mb-1">Two-Factor Authentication</h2>
@@ -222,7 +223,7 @@ function TwoFactorSettings() {
           {method === 'whatsapp' && (
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
-                Phone Number <span className="text-gray-400 font-normal">(optional — uses your linked WhatsApp number if blank)</span>
+                Phone Number <span className="text-gray-400 font-normal">(optional -- uses your linked WhatsApp number if blank)</span>
               </label>
               <input
                 type="tel"
