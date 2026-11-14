@@ -1,0 +1,13 @@
+{
+  "name": "whatsappbridge-waweb-sidecar",
+  "version": "1.0.0",
+  "description": "WhatsApp Web engine sidecar for WhatsAppBridge.API - drives the real WhatsApp Web client via whatsapp-web.js (Puppeteer), NDJSON over stdio, one process per session",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js --session-dir ./session"
+  },
+  "dependencies": {
+    "whatsapp-web.js": "1.34.7"
+  }
+}

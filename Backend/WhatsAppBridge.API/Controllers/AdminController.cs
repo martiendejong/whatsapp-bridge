@@ -43,11 +43,11 @@ public class AdminController : ControllerBase
     public record SetEngineRequest(string Engine, bool RestartSessions = false);
 
     /// <summary>
-    /// Switches the WhatsApp engine ("dawa" or "baileys"). The new engine applies to every
-    /// session (re)connect from now on; with RestartSessions=true, all active sessions are
-    /// reconnected immediately. Dawa and Baileys credentials are not interchangeable — a
-    /// session's first connect on the other engine requires scanning a new QR code (which
-    /// links an extra device; avoid rapid back-and-forth switching, that is a ban footprint).
+    /// Switches the WhatsApp engine ("dawa", "baileys" or "waweb"). The new engine applies to
+    /// every session (re)connect from now on; with RestartSessions=true, all active sessions
+    /// are reconnected immediately. Engine credentials are not interchangeable — a session's
+    /// first connect on another engine requires scanning a new QR code (which links an extra
+    /// device; avoid rapid back-and-forth switching, that is a ban footprint).
     /// </summary>
     [HttpPut("engine")]
     public async Task<IActionResult> SetEngine([FromBody] SetEngineRequest request)

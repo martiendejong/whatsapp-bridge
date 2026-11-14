@@ -260,18 +260,28 @@ export default function WhatsAppSessions() {
                         className={`status-badge ${
                           session.status === 'connected'
                             ? 'status-connected'
-                            : session.status === 'qr_pending'
+                            : session.status === 'qr_pending' || session.status === 'needs_qr'
                             ? 'status-pending'
                             : 'status-disconnected'
                         }`}
                       >
-                        {session.status}
+                        {session.status === 'needs_qr' ? 'needs QR scan' : session.status}
                       </span>
                     </td>
                     <td>{new Date(session.createdAt).toLocaleDateString()}</td>
                     <td>{session.connectedAt ? new Date(session.connectedAt).toLocaleDateString() : 'N/A'}</td>
                     <td>{session.lastSeenAt ? new Date(session.lastSeenAt).toLocaleString() : 'N/A'}</td>
                     <td>
+                      {session.status === 'needs_qr' && (
+                        <button
+                          className="btn btn-primary"
+                          onClick={() => { setError(''); setQrCode(null); setDisconnectedAt(null); setCurrentSessionId(session.sessionId); }}
+                          disabled={currentSessionId === session.sessionId}
+                          style={{ marginRight: '8px' }}
+                        >
+                          Scan QR to reconnect
+                        </button>
+                      )}
                       <button
                         className="btn btn-secondary"
                         onClick={() => handleTestSession(session.sessionId, session.id)}
@@ -442,7 +452,7 @@ export default function WhatsAppSessions() {
                                 </tr>
                               </thead>
                               <tbody>
-                                {contactPanels[session.sessionId].contacts.map((c) => (
+                                {contactPanels[session.sessionId].contacts.map((c: Contact) => (
                                   <tr key={c.jid} style={{ borderTop: '1px solid #f1f5f9' }}>
                                     <td style={{ padding: '6px 8px' }}>{c.name}</td>
                                     <td style={{ padding: '6px 8px' }}>{c.phoneNumber}</td>

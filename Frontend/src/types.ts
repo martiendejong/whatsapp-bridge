@@ -5,6 +5,9 @@ export interface User {
   lastLoginAt?: string;
   isActive?: boolean;
   isAdmin?: boolean;
+  twoFactorEnabled?: boolean;
+  twoFactorMethod?: string;
+  phoneNumber?: string;
 }
 
 export interface ApiConnection {
@@ -20,7 +23,7 @@ export interface WhatsAppSession {
   id: number;
   sessionId: string;
   phoneNumber: string;
-  status: 'connected' | 'disconnected' | 'qr_pending';
+  status: 'connected' | 'disconnected' | 'qr_pending' | 'needs_qr';
   createdAt: string;
   connectedAt?: string;
   lastSeenAt?: string;

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { whatsapp } from '../api';
+import { whatsapp, reasonFrom } from '../api';
 import { WhatsAppSession } from '../types';
 
 interface StoredChat {
@@ -129,12 +129,23 @@ export default function Messages() {
     if (!draft.trim() || !sessionId || !selectedChat || sending) return;
     setSending(true);
     try {
-      await whatsapp.sendMessage(sessionId, selectedChat.split('@')[0], draft.trim());
+      const res = await whatsapp.sendMessage(sessionId, selectedChat.split('@')[0], draft.trim());
+      // A suppressed send answers 200: the guardrail decided this recipient already had this
+      // exact message. Nothing left, nothing arrived. Saying so beats an empty text box that
+      // implies it went out.
+      if (res.data?.suppressed) {
+        setError(`Niet verstuurd: ${res.data.reason ?? 'onderdrukt door de routeringsregels'}`);
+        return;
+      }
       setDraft('');
+      setError('');
       // the durable store mirrors sends; refresh soon after
       setTimeout(() => loadMessages(sessionId, selectedChat), 1500);
-    } catch {
-      setError('Versturen mislukt');
+    } catch (e) {
+      // The backend explains a block precisely ("outside Sjoerd's window, 23:12 Europe/Amsterdam").
+      // Throwing that away for a flat "Versturen mislukt" left the operator with no idea whether
+      // to retry, pick another number, or wait until morning.
+      setError(reasonFrom(e) ?? 'Versturen mislukt');
     } finally {
       setSending(false);
     }

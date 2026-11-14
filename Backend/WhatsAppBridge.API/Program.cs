@@ -12,6 +12,12 @@ var builder = WebApplication.CreateBuilder(args);
 // or in environment variables (e.g. TASKINTAKE__APIKEY). Placeholders only in appsettings.json.
 builder.Configuration.AddJsonFile("appsettings.Local.json", optional: true, reloadOnChange: true);
 
+// Prospergenics vault (task 3299): added LAST among the config sources so a successful
+// fetch overrides appsettings.json/appsettings.Production.json/Local/env. Loads once here,
+// before anything below reads configuration — see Services/VaultConfiguration.cs and
+// README.md "Secrets & Vault Rotation" for the fail-safe/no-reload contract.
+builder.Configuration.AddProspergenicsVault();
+
 // Configure IIS integration for production
 if (builder.Environment.IsProduction())
 {
@@ -81,6 +87,7 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
 // Services
 builder.Services.AddHttpClient();
 builder.Services.AddScoped<AuthService>();
+builder.Services.AddScoped<EmailService>();
 builder.Services.AddScoped<IamService>();
 builder.Services.AddScoped<TwoFactorService>();
 builder.Services.AddSingleton<EncryptionService>();
@@ -91,7 +98,14 @@ builder.Services.AddSingleton<InboundWebhookForwarder>();
 // Singleton: asks coachingplatform (CoachOS) for an AI reply for non-allow-listed senders
 // (task 1067, default-OFF, additive). Never sends anything itself — see class doc comment.
 builder.Services.AddSingleton<CoachOsIntakeForwarder>();
+builder.Services.AddScoped<OutboundRoutingService>();
 builder.Services.AddScoped<OutboundGuardrailService>();
+// Server monitor (POST /api/wa/monitor): the state machine and its dispatcher are Scoped
+// (both write AppDbContext); the sweep worker creates its own scope each minute to catch
+// dead-reporter outages and silent monitors — the two alerts no incoming report can trigger.
+builder.Services.AddScoped<ServerMonitorService>();
+builder.Services.AddScoped<MonitorAlertDispatcher>();
+builder.Services.AddHostedService<MonitorSweepWorker>();
 // Singleton: transcribes inbound audio via OpenAI Whisper (task 869ejuycr). Resolves its API
 // key lazily from config or the Prospergenics vault — see WhisperTranscriptionService.
 builder.Services.AddSingleton<WhisperTranscriptionService>();
@@ -122,6 +136,20 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseCors("AllowFrontend");
+
+// BEFORE authentication and authorization, and the position is the point. The audit row is
+// written in this middleware's `finally`, which runs after everything downstream — including
+// the auth middlewares — has finished, so the row still sees the authenticated identity and the
+// final status code. What sitting upstream buys is the refusals: when this middleware sat after
+// UseAuthorization, a request rejected with 401/403 never reached it at all, so the log recorded
+// every successful call and none of the credential-guessing — the one traffic class an audit
+// log exists to catch. (After UseCors on purpose: a short-circuited CORS preflight is browser
+// plumbing, not API traffic worth a row.)
+//
+// Deliberately middleware rather than per-controller: only 3 of the 20+ endpoints invoke the
+// outbound guardrail, and an audit trail wired in the same per-controller way would inherit
+// that same gap on every endpoint added later.
+app.UseMiddleware<WhatsAppBridge.API.Middleware.ApiAuditMiddleware>();
 
 app.UseAuthentication();
 app.UseAuthorization();
@@ -250,6 +278,213 @@ using (var scope = app.Services.CreateScope())
         CREATE INDEX IF NOT EXISTS IX_OutboundSendLogs_SentAtUtc ON OutboundSendLogs (SentAtUtc);
         """);
 
+    // Category + BodyHash arrived after this table was already live, and SQLite has no
+    // "ADD COLUMN IF NOT EXISTS" — so ask the schema first. Without these two the routing
+    // redirect cannot tell a duplicate fan-out from a genuine repeat alert.
+    AddColumnIfMissing(db, "OutboundSendLogs", "Category", "TEXT NULL");
+    AddColumnIfMissing(db, "OutboundSendLogs", "BodyHash", "TEXT NULL");
+    // DEFAULT 1, deliberately backwards: rows from before this column existed were
+    // overwhelmingly real deliveries, and reading them as unconfirmed attempts would switch the
+    // duplicate suppression off for its whole lookback window on deploy day. New rows are
+    // written 0 by the guardrail and flipped to 1 only after the send actually succeeds.
+    AddColumnIfMissing(db, "OutboundSendLogs", "Delivered", "INTEGER NOT NULL DEFAULT 1");
+    db.Database.ExecuteSqlRaw(
+        "CREATE INDEX IF NOT EXISTS IX_OutboundSendLogs_Recipient_BodyHash_SentAtUtc " +
+        "ON OutboundSendLogs (Recipient, BodyHash, SentAtUtc);");
+
+    // Single-row bookkeeping the tables above cannot express: "has X ever happened on this
+    // database". First (and so far only) use is the routing seed marker below.
+    db.Database.ExecuteSqlRaw("""
+        CREATE TABLE IF NOT EXISTS AppFlags (
+            Name TEXT NOT NULL CONSTRAINT PK_AppFlags PRIMARY KEY,
+            Value TEXT NOT NULL,
+            SetAtUtc TEXT NOT NULL
+        );
+        """);
+
+    // Server monitor state (POST /api/wa/monitor): one row per monitored subject with the
+    // bridge's current belief about it — down since when, alerted or not, monitor still
+    // reporting. Same self-heal reason as the tables above.
+    db.Database.ExecuteSqlRaw("""
+        CREATE TABLE IF NOT EXISTS MonitorSubjects (
+            Id INTEGER NOT NULL CONSTRAINT PK_MonitorSubjects PRIMARY KEY AUTOINCREMENT,
+            Subject TEXT NOT NULL,
+            Critical INTEGER NOT NULL DEFAULT 0,
+            Status TEXT NOT NULL DEFAULT 'up',
+            LastDetail TEXT NULL,
+            FirstDownAtUtc TEXT NULL,
+            DownAlertAtUtc TEXT NULL,
+            SilenceAlertAtUtc TEXT NULL,
+            LastReportAtUtc TEXT NOT NULL,
+            CreatedAtUtc TEXT NOT NULL,
+            UpdatedAtUtc TEXT NOT NULL,
+            Version INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS IX_MonitorSubjects_Subject ON MonitorSubjects (Subject);
+        """);
+
+    // The four production domains ship as kritiek (Monitor:CriticalSubjects). Create-if-absent
+    // only: a tier changed at runtime through the admin API must survive every subsequent
+    // restart, so existing rows are never touched — unlike the routing seed there is no
+    // marker, because creation is idempotent and rows carry no other config to clobber.
+    try
+    {
+        foreach (var subject in app.Configuration.GetSection("Monitor:CriticalSubjects").Get<List<string>>() ?? new())
+        {
+            var key = WhatsAppBridge.API.Services.ServerMonitorService.Normalize(subject);
+            if (key.Length == 0 || db.MonitorSubjects.Any(s => s.Subject == key)) continue;
+            db.MonitorSubjects.Add(new WhatsAppBridge.API.Models.MonitorSubject
+            {
+                Subject = key,
+                Critical = true,
+                Status = "up",
+                CreatedAtUtc = DateTime.UtcNow,
+                UpdatedAtUtc = DateTime.UtcNow,
+            });
+        }
+        db.SaveChanges();
+    }
+    catch (Exception ex)
+    {
+        app.Logger.LogError(ex, "Seeding monitor subjects failed. The monitor continues; subjects " +
+                                "self-register as 'normaal' on their first report.");
+    }
+
+    // Outbound routing policy: who may be messaged, about what, and at what hour in THEIR
+    // timezone. Creating the table and filling it changes nothing on its own — the policy is
+    // only enforced once OutboundRouting:Enabled is set, which is false by default.
+    db.Database.ExecuteSqlRaw("""
+        CREATE TABLE IF NOT EXISTS OutboundContacts (
+            Id INTEGER NOT NULL CONSTRAINT PK_OutboundContacts PRIMARY KEY AUTOINCREMENT,
+            Phone TEXT NOT NULL,
+            Name TEXT NOT NULL,
+            Alias TEXT NULL,
+            Enabled INTEGER NOT NULL DEFAULT 1,
+            TimeZoneId TEXT NOT NULL DEFAULT 'Europe/Amsterdam',
+            WindowStartHour INTEGER NOT NULL DEFAULT 0,
+            WindowEndHour INTEGER NOT NULL DEFAULT 24,
+            Categories TEXT NOT NULL DEFAULT '*',
+            FallbackPhone TEXT NULL,
+            CreatedAtUtc TEXT NOT NULL,
+            UpdatedAtUtc TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS IX_OutboundContacts_Phone ON OutboundContacts (Phone);
+        CREATE INDEX IF NOT EXISTS IX_OutboundContacts_Alias ON OutboundContacts (Alias);
+        """);
+
+    // Seed the policy once, from config — and "once" means once per DATABASE, not "whenever the
+    // table is empty". The emptiness check alone had a trap: deleting every contact in the UI is
+    // the natural way to disarm routing without a deploy, and the next process restart (the
+    // watchdog restarts services routinely) would quietly re-seed the lot and re-arm the policy
+    // Martien had just switched off. So the seed leaves a marker in AppFlags, and an empty table
+    // WITH the marker is respected as a decision. To genuinely re-seed: delete the
+    // 'OutboundRoutingSeeded' row from AppFlags and restart.
+    //
+    // Wrapped, because everything in here is driven by hand-edited configuration and the failure
+    // mode without the wrapper is the worst one available: two entries with the same number
+    // violate the unique index, SaveChanges throws inside startup, and the bridge does not come
+    // up at all. A policy that cannot be seeded is a problem; a WhatsApp bridge that will not
+    // start because of a typo in a contact list is an outage.
+    try
+    {
+        // Backfill for databases whose contacts predate the marker (seeded by an earlier build
+        // of this feature). Without this, exactly those databases still had the resurrection
+        // trap: contacts present, marker absent, so emptying the table in the UI plus one
+        // restart re-seeded the policy anyway. A populated table IS the evidence that seeding
+        // (or manual entry) already happened — record it as such.
+        if (db.OutboundContacts.Any() && !AppFlagExists(db, "OutboundRoutingSeeded"))
+        {
+            SetAppFlag(db, "OutboundRoutingSeeded", "backfilled: contacts already present");
+        }
+        else if (!db.OutboundContacts.Any() && !AppFlagExists(db, "OutboundRoutingSeeded"))
+        {
+            var seedSection = app.Configuration.GetSection("OutboundRouting:Seed");
+            var seed = seedSection.Get<List<WhatsAppBridge.API.Models.OutboundContact>>() ?? new();
+
+            // Distinguish "no seed configured" from "a seed is configured but did not bind" —
+            // one malformed hour turns the whole list into zero entries, and without this the
+            // only symptom is an empty table that looks exactly like the intended default.
+            if (seed.Count == 0 && seedSection.GetChildren().Any())
+            {
+                app.Logger.LogError(
+                    "OutboundRouting:Seed has {Count} configured entries but none of them bound to a contact. " +
+                    "Check the field names and that the hours are numbers, not strings. No contacts were seeded.",
+                    seedSection.GetChildren().Count());
+            }
+
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            var accepted = 0;
+            foreach (var contact in seed)
+            {
+                var phone = WhatsAppBridge.API.Services.PhoneNumber.Normalize(contact.Phone);
+                if (!WhatsAppBridge.API.Services.PhoneNumber.IsUsable(phone))
+                {
+                    app.Logger.LogError("Skipped routing seed entry '{Name}': '{Phone}' is not a usable number.",
+                        contact.Name, contact.Phone);
+                    continue;
+                }
+                if (!seen.Add(phone))
+                {
+                    app.Logger.LogError("Skipped duplicate routing seed entry for {Phone} ('{Name}').", phone, contact.Name);
+                    continue;
+                }
+
+                // The same bar RoutingController.Upsert sets. The seed used to skip these checks,
+                // which produced the exact failure Upsert's validation exists to prevent — a
+                // typo'd timezone seeded cleanly and then fell back to UTC at send time, shifting
+                // the contact's whole window by hours with nothing anywhere saying why.
+                try
+                {
+                    TimeZoneInfo.FindSystemTimeZoneById(contact.TimeZoneId);
+                }
+                catch (Exception ex) when (ex is TimeZoneNotFoundException or InvalidTimeZoneException)
+                {
+                    app.Logger.LogError("Skipped routing seed entry '{Name}': unknown TimeZoneId '{Tz}'.",
+                        contact.Name, contact.TimeZoneId);
+                    continue;
+                }
+                if (contact.WindowStartHour is < 0 or > 23 || contact.WindowEndHour is < 1 or > 24)
+                {
+                    app.Logger.LogError(
+                        "Skipped routing seed entry '{Name}': window {Start}-{End} is out of range (start 0-23, end 1-24).",
+                        contact.Name, contact.WindowStartHour, contact.WindowEndHour);
+                    continue;
+                }
+                if (string.IsNullOrWhiteSpace(contact.Categories))
+                {
+                    app.Logger.LogError(
+                        "Skipped routing seed entry '{Name}': Categories is empty. Use '*' or a comma-separated list.",
+                        contact.Name);
+                    continue;
+                }
+
+                contact.Id = 0;
+                contact.Phone = phone;
+                contact.CreatedAtUtc = contact.UpdatedAtUtc = DateTime.UtcNow;
+                db.OutboundContacts.Add(contact);
+                accepted++;
+            }
+
+            if (accepted > 0)
+            {
+                db.SaveChanges();
+                // Marker only on a successful seed: a malformed config that bound nothing must
+                // stay retryable, or fixing the typo would do nothing until someone also finds
+                // and deletes the flag.
+                SetAppFlag(db, "OutboundRoutingSeeded", $"{accepted} contacts");
+                app.Logger.LogInformation(
+                    "Seeded {Count} outbound routing contacts from configuration. Routing enforcement is {State}.",
+                    accepted,
+                    app.Configuration.GetValue("OutboundRouting:Enabled", false) ? "ON" : "OFF (OutboundRouting:Enabled is false)");
+            }
+        }
+    }
+    catch (Exception ex)
+    {
+        app.Logger.LogError(ex, "Seeding outbound routing contacts failed. The bridge continues without a seeded " +
+                                "policy; add contacts under Routing in the admin UI.");
+    }
+
     // CoachOS service-route reply-window tracking (task 1067): every genuine inbound message's
     // sender + timestamp, so OutboundGuardrailService can prove a reply is answering a real prior
     // inbound message before allowing it through the allow-list exception. Same self-heal reason
@@ -261,6 +496,35 @@ using (var scope = app.Services.CreateScope())
             LastInboundAtUtc TEXT NOT NULL
         );
         CREATE UNIQUE INDEX IF NOT EXISTS IX_InboundContacts_Sender ON InboundContacts (Sender);
+        """);
+
+    // Full API audit trail: one row per request, written by ApiAuditMiddleware. Answers
+    // "wat is er via deze API-key verstuurd, naar welk nummer, en ging het eruit of niet".
+    // Same self-heal (CREATE IF NOT EXISTS at startup) reason as the tables above.
+    db.Database.ExecuteSqlRaw("""
+        CREATE TABLE IF NOT EXISTS ApiAuditLogs (
+            Id INTEGER NOT NULL CONSTRAINT PK_ApiAuditLogs PRIMARY KEY AUTOINCREMENT,
+            AtUtc TEXT NOT NULL,
+            UserId INTEGER NULL,
+            ApiConnectionId INTEGER NULL,
+            ApiConnectionName TEXT NULL,
+            AuthScheme TEXT NOT NULL,
+            Method TEXT NOT NULL,
+            Path TEXT NOT NULL,
+            EventType TEXT NOT NULL,
+            Phone TEXT NULL,
+            Body TEXT NULL,
+            ResponsePreview TEXT NULL,
+            StatusCode INTEGER NOT NULL,
+            Outcome TEXT NOT NULL,
+            DurationMs INTEGER NOT NULL,
+            ClientIp TEXT NULL
+        );
+        CREATE INDEX IF NOT EXISTS IX_ApiAuditLogs_AtUtc ON ApiAuditLogs (AtUtc);
+        CREATE INDEX IF NOT EXISTS IX_ApiAuditLogs_Phone_AtUtc ON ApiAuditLogs (Phone, AtUtc);
+        CREATE INDEX IF NOT EXISTS IX_ApiAuditLogs_EventType_AtUtc ON ApiAuditLogs (EventType, AtUtc);
+        CREATE INDEX IF NOT EXISTS IX_ApiAuditLogs_ApiConnectionId_AtUtc ON ApiAuditLogs (ApiConnectionId, AtUtc);
+        CREATE INDEX IF NOT EXISTS IX_ApiAuditLogs_UserId ON ApiAuditLogs (UserId);
         """);
 
     // Global key/value settings (engine switch feature): holds the admin-selected WhatsApp
@@ -335,3 +599,59 @@ using (var scope = app.Services.CreateScope())
 }
 
 app.Run();
+
+/// <summary>
+/// SQLite's ALTER TABLE has no IF NOT EXISTS, and re-running a plain ADD COLUMN on an existing
+/// column throws — which at startup means the app refuses to boot. So read the current schema
+/// via pragma and only add what is genuinely absent. Idempotent by construction, in keeping
+/// with the CREATE TABLE IF NOT EXISTS blocks above.
+/// </summary>
+static void AddColumnIfMissing(WhatsAppBridge.API.Data.AppDbContext db, string table, string column, string definition)
+{
+    var connection = db.Database.GetDbConnection();
+    if (connection.State != System.Data.ConnectionState.Open) connection.Open();
+
+    using (var probe = connection.CreateCommand())
+    {
+        probe.CommandText = $"SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = '{column}';";
+        if (Convert.ToInt32(probe.ExecuteScalar()) > 0) return;
+    }
+
+    using var alter = connection.CreateCommand();
+    alter.CommandText = $"ALTER TABLE {table} ADD COLUMN {column} {definition};";
+    alter.ExecuteNonQuery();
+}
+
+/// <summary>
+/// Reads a one-time marker from AppFlags. ADO rather than an EF entity: these two helpers are
+/// the only consumers, and a DbSet would put startup bookkeeping in the application model.
+/// </summary>
+static bool AppFlagExists(WhatsAppBridge.API.Data.AppDbContext db, string name)
+{
+    var connection = db.Database.GetDbConnection();
+    if (connection.State != System.Data.ConnectionState.Open) connection.Open();
+
+    using var cmd = connection.CreateCommand();
+    cmd.CommandText = "SELECT COUNT(*) FROM AppFlags WHERE Name = @name;";
+    var p = cmd.CreateParameter();
+    p.ParameterName = "@name";
+    p.Value = name;
+    cmd.Parameters.Add(p);
+    return Convert.ToInt32(cmd.ExecuteScalar()) > 0;
+}
+
+static void SetAppFlag(WhatsAppBridge.API.Data.AppDbContext db, string name, string value)
+{
+    var connection = db.Database.GetDbConnection();
+    if (connection.State != System.Data.ConnectionState.Open) connection.Open();
+
+    using var cmd = connection.CreateCommand();
+    cmd.CommandText = """
+        INSERT INTO AppFlags (Name, Value, SetAtUtc) VALUES (@name, @value, @at)
+        ON CONFLICT(Name) DO UPDATE SET Value = @value, SetAtUtc = @at;
+        """;
+    var pn = cmd.CreateParameter(); pn.ParameterName = "@name"; pn.Value = name; cmd.Parameters.Add(pn);
+    var pv = cmd.CreateParameter(); pv.ParameterName = "@value"; pv.Value = value; cmd.Parameters.Add(pv);
+    var pa = cmd.CreateParameter(); pa.ParameterName = "@at"; pa.Value = DateTime.UtcNow.ToString("O"); cmd.Parameters.Add(pa);
+    cmd.ExecuteNonQuery();
+}

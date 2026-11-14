@@ -13,7 +13,7 @@ public class WhatsAppSession
 
     public string PhoneNumber { get; set; } = string.Empty; // Encrypted if encryption enabled
 
-    public string Status { get; set; } = "disconnected"; // disconnected, qr_pending, connected
+    public string Status { get; set; } = "disconnected"; // disconnected, qr_pending, connected, failed, needs_qr (saved creds rejected/unusable: QR re-scan)
 
     public string? QrCode { get; set; } // Base64 QR code when status is qr_pending
 

@@ -63,20 +63,56 @@ public class WhatsAppBridgeService : IAsyncDisposable
     private async Task<IWhatsAppEngine> CreateEngineAsync(string sessionDir)
     {
         var engine = await _engineSettings.GetEngineAsync();
-        return engine == EngineSettingsService.BaileysEngine
-            ? new BaileysEngine(sessionDir, _configuration, _loggerFactory)
-            : new DawaEngine(sessionDir, _loggerFactory);
+        return engine switch
+        {
+            EngineSettingsService.BaileysEngine => new BaileysEngine(sessionDir, _configuration, _loggerFactory),
+            EngineSettingsService.WaWebEngine => new WaWebEngine(sessionDir, _configuration, _loggerFactory),
+            _ => new DawaEngine(sessionDir, _loggerFactory),
+        };
     }
 
     /// <summary>
     /// Whether the given engine has saved credentials for this session directory.
-    /// Dawa and Baileys store creds in different (incompatible) formats, so a session
-    /// switching engines needs a fresh QR pairing on the new engine.
+    /// Dawa, Baileys and WaWeb store creds in different (incompatible) formats, so a
+    /// session switching engines needs a fresh QR pairing on the new engine.
     /// </summary>
-    public static bool EngineHasSavedSession(string engine, string sessionDir) =>
-        engine == EngineSettingsService.BaileysEngine
-            ? File.Exists(Path.Combine(sessionDir, "baileys-auth", "creds.json"))
-            : File.Exists(Path.Combine(sessionDir, "creds.json"));
+    public static bool EngineHasSavedSession(string engine, string sessionDir) => engine switch
+    {
+        EngineSettingsService.BaileysEngine => File.Exists(Path.Combine(sessionDir, "baileys-auth", "creds.json")),
+        EngineSettingsService.WaWebEngine => WaWebEngine.HasWaWebProfile(sessionDir),
+        _ => File.Exists(Path.Combine(sessionDir, "creds.json")),
+    };
+
+    /// <summary>Session status after the engine reports a disconnect. needs_qr sticks (the engine reports the
+    /// disconnect first and needs_qr right after, and again when the process later exits); a session that
+    /// never connected is "failed" on the interactive path, "disconnected" when restoring a saved one.</summary>
+    internal static string StatusAfterDisconnect(string? current, bool everConnected, bool restoring) =>
+        current == StatusNeedsQr ? StatusNeedsQr
+        : restoring || everConnected ? "disconnected"
+        : "failed";
+
+    internal const string StatusNeedsQr = "needs_qr";
+
+    // Credential-write warnings per session (in-memory; the engine clears it when writes recover).
+    private readonly ConcurrentDictionary<string, string> _authWarnings = new();
+
+    private void WireAuthHealth(string sessionId, IWhatsAppEngine client)
+    {
+        client.NeedsQr += (_, reason) =>
+        {
+            _logger.LogWarning("Session {SessionId} needs a QR scan (reason: {Reason})", sessionId, reason);
+            _ = UpdateSessionAsync(sessionId, s =>
+            {
+                s.Status = StatusNeedsQr;
+                s.LastSeenAt = DateTime.UtcNow;
+            });
+        };
+        client.AuthWarning += (_, text) =>
+        {
+            if (text == null) _authWarnings.TryRemove(sessionId, out string? _);
+            else _authWarnings[sessionId] = text;
+        };
+    }
 
     /// <summary>Live engine info per active session — used by the admin engine endpoint.</summary>
     public List<object> GetActiveSessionEngines() =>
@@ -85,6 +121,7 @@ public class WhatsAppBridgeService : IAsyncDisposable
             sessionId = kv.Key,
             engine = kv.Value.EngineName,
             isConnected = kv.Value.IsConnected,
+            authWarning = _authWarnings.TryGetValue(kv.Key, out string? w) ? w : (string?)null,
         }).ToList();
 
     /// <summary>
@@ -142,6 +179,7 @@ public class WhatsAppBridgeService : IAsyncDisposable
         client.HistoryMessageReceived += (_, msg) => StoreMessage(sessionId, msg, isHistory: true);
         client.HistorySyncCompleted   += (_, n)   => { _logger.LogInformation("HistorySync: persisting {N} msgs for {Sid}", n, sessionId); PersistMessages(sessionId); };
         client.MessageStatusUpdated   += (_, evt) => UpdateMessageStatus(sessionId, evt.Jid, evt.MessageId, evt.Status);
+        WireAuthHealth(sessionId, client);
 
         client.Connected += (_, _) =>
         {
@@ -165,12 +203,11 @@ public class WhatsAppBridgeService : IAsyncDisposable
         {
             // If we never reached "connected", the server rejected us (e.g. rate limiting, bad payload).
             // Mark as "failed" so the frontend stops polling instead of hanging on "qr_pending".
-            var status = everConnected ? "disconnected" : "failed";
-            _logger.LogInformation("Session {SessionId} disconnected (status → {Status})", sessionId, status);
-            qrTcs.TrySetException(new Exception($"Connection rejected by server (status: {status})"));
+            qrTcs.TrySetException(new Exception("Connection rejected by server"));
             _ = UpdateSessionAsync(sessionId, s =>
             {
-                s.Status = status;
+                s.Status = StatusAfterDisconnect(s.Status, everConnected, restoring: false);
+                _logger.LogInformation("Session {SessionId} disconnected (status → {Status})", sessionId, s.Status);
                 s.LastSeenAt = DateTime.UtcNow;
             });
         };
@@ -230,6 +267,7 @@ public class WhatsAppBridgeService : IAsyncDisposable
         client.HistoryMessageReceived += (_, msg) => StoreMessage(sessionId, msg, isHistory: true);
         client.HistorySyncCompleted   += (_, n)   => { _logger.LogInformation("HistorySync: persisting {N} msgs for {Sid}", n, sessionId); PersistMessages(sessionId); };
         client.MessageStatusUpdated   += (_, evt) => UpdateMessageStatus(sessionId, evt.Jid, evt.MessageId, evt.Status);
+        WireAuthHealth(sessionId, client);
 
         client.Connected += (_, _) =>
         {
@@ -248,7 +286,7 @@ public class WhatsAppBridgeService : IAsyncDisposable
         client.Disconnected += (_, _) =>
             _ = UpdateSessionAsync(sessionId, s =>
             {
-                s.Status = "disconnected";
+                s.Status = StatusAfterDisconnect(s.Status, everConnected: false, restoring: true);
                 s.LastSeenAt = DateTime.UtcNow;
             });
 
@@ -1060,9 +1098,31 @@ public class WhatsAppBridgeService : IAsyncDisposable
         // Reply target: the conversation JID the message arrived on.
         var replyTo = msg.RemoteJid;
 
+        // Task 6003: this reply used to go straight to SendMessageAsync, the one internal send path
+        // that skipped OutboundGuardrailService (allow-list, volume caps, blocked-outbound record).
+        // It now takes the same gate as every other outbound, so an inbound sender who is not on
+        // the outbound allow-list gets no answer, and a flood of inbound messages cannot become a
+        // flood of replies.
         Func<string, string, Task> reply = async (to, body) =>
         {
-            try { await SendMessageAsync(sessionId, to, body); }
+            try
+            {
+                using var scope = _scopeFactory.CreateScope();
+                var guardrail = scope.ServiceProvider.GetRequiredService<OutboundGuardrailService>();
+
+                var guard = await guardrail.CheckAsync(
+                    OutboundGuardrailService.TaskIntakeReplyEndpoint, to, body, userId: null,
+                    category: "reply");
+                if (!guard.Allowed)
+                {
+                    _logger.LogWarning("TaskIntake: reply to {To} not sent for session {Sid}: {Reason}",
+                        to, sessionId, guard.Reason);
+                    return;
+                }
+
+                await SendMessageAsync(sessionId, guard.Recipient, body);
+                await guardrail.ConfirmDeliveredAsync(guard);
+            }
             catch (Exception ex) { _logger.LogWarning(ex, "TaskIntake reply send failed for session {Sid}", sessionId); }
         };
 
@@ -1115,15 +1175,17 @@ public class WhatsAppBridgeService : IAsyncDisposable
                 if (string.IsNullOrWhiteSpace(replyText))
                     return;
 
-                var (allowed, reason) = await guardrail.CheckAsync(
-                    OutboundGuardrailService.CoachOsReplyEndpoint, msg.From, replyText, userId: null);
-                if (!allowed)
+                var guard = await guardrail.CheckAsync(
+                    OutboundGuardrailService.CoachOsReplyEndpoint, msg.From, replyText, userId: null,
+                    category: "reply");
+                if (!guard.Allowed)
                 {
-                    _logger.LogWarning("CoachOsIntake: reply to {From} blocked by guardrail: {Reason}", msg.From, reason);
+                    _logger.LogWarning("CoachOsIntake: reply to {From} blocked by guardrail: {Reason}", msg.From, guard.Reason);
                     return;
                 }
 
                 await SendMessageAsync(sessionId, replyTo, replyText);
+                await guardrail.ConfirmDeliveredAsync(guard);
             }
             catch (Exception ex)
             {

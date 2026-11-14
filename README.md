@@ -166,6 +166,45 @@ When encryption is enabled:
 - Phone numbers
 - Message content (optional)
 
+### Secrets & Vault Rotation
+
+`InboundWebhook:ApiKey` (the shared secret with JengoAGI's `/api/whatsapp/inbound`
+endpoint) is sourced from the Prospergenics vault (vault.prospergenics.com,
+project 9, credential 216) at startup instead of living only as plaintext in
+`appsettings.Production.json`. This is additive and fail-safe:
+
+- The bridge's only server-side secret for this is the bootstrap `Vault:ApiKey`
+  — set it via the `VAULT__APIKEY` environment variable, or in
+  `appsettings.Production.json` (that file is excluded from deploys, see
+  `deploy/deploy.py`'s `BACKEND_CONFIG_EXCLUDE`, so it is the right place for a
+  server-only value). It is read-only and scoped to vault project 9 only —
+  never reuse JengoAGI's own vault key here.
+- If the vault is disabled, has no bootstrap key, or is unreachable at boot,
+  the app still starts normally and `InboundWebhook:ApiKey` simply keeps
+  whatever `appsettings.Production.json` already had (fail-safe, not
+  fail-closed, on boot).
+- The startup log prints the **count** and **names** of successfully-sourced
+  config keys (e.g. `Sourced 1 secret(s) from Prospergenics vault:
+  InboundWebhook:ApiKey.`) — it never prints a secret value.
+- The vault fetch only accepts an exact HTTP 200. A credential behind
+  `RequiresApproval` answers 202 with an approval-pending envelope, which is
+  deliberately rejected rather than treated as a successful fetch.
+
+**The vault source loads exactly once, during configuration build at startup,
+and never reloads.** `InboundWebhookForwarder` additionally binds its own
+`InboundWebhookOptions` once in its singleton constructor. Both of these mean a
+vault edit alone does nothing to a running process — rotation always needs a
+restart on both sides:
+
+1. Update the credential's password in the vault (project 9, credential 216).
+2. Restart JengoAGI (it sources the same credential — see
+   `jengo-agi/docs/vault-config.md`).
+3. Recycle the `WhatsAppBridgeAPIPool` IIS app pool on 85.215.217.154.
+
+No manual copy-paste between the bridge's and JengoAGI's own config files is
+needed anymore — both sides read the same vault credential, so they cannot
+drift apart by definition.
+
 ## API Documentation
 
 Base URL: `http://your-server:5000/api/wa`

@@ -27,6 +27,10 @@ public sealed class DawaEngine : IWhatsAppEngine
     { add => _client.Connected += value; remove => _client.Connected -= value; }
     public event EventHandler? Disconnected
     { add => _client.Disconnected += value; remove => _client.Disconnected -= value; }
+#pragma warning disable CS0067 // Dawa keeps its creds in-process; these are Baileys-sidecar concepts
+    public event EventHandler<string>? NeedsQr;
+    public event EventHandler<string?>? AuthWarning;
+#pragma warning restore CS0067
     public event EventHandler<IncomingMessage>? MessageReceived
     { add => _client.MessageReceived += value; remove => _client.MessageReceived -= value; }
     public event EventHandler<IncomingMessage>? HistoryMessageReceived

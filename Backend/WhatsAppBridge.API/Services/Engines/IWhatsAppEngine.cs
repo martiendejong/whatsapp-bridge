@@ -12,7 +12,7 @@ namespace WhatsAppBridge.API.Services.Engines;
 /// </summary>
 public interface IWhatsAppEngine : IAsyncDisposable
 {
-    /// <summary>"dawa" or "baileys" — matches the persisted admin setting.</summary>
+    /// <summary>"dawa", "baileys" or "waweb" — matches the persisted admin setting.</summary>
     string EngineName { get; }
 
     bool IsConnected { get; }
@@ -22,6 +22,10 @@ public interface IWhatsAppEngine : IAsyncDisposable
     event EventHandler<string>? QRCodeReceived;
     event EventHandler? Connected;
     event EventHandler? Disconnected;
+    /// <summary>The saved credentials cannot be used any more (rejected, corrupt or missing): a QR scan is needed. Arg = reason.</summary>
+    event EventHandler<string>? NeedsQr;
+    /// <summary>Credential writes keep failing while connected (arg = description), or null when that cleared.</summary>
+    event EventHandler<string?>? AuthWarning;
     event EventHandler<IncomingMessage>? MessageReceived;
     event EventHandler<IncomingMessage>? HistoryMessageReceived;
     event EventHandler<int>? HistorySyncCompleted;

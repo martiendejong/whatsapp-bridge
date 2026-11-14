@@ -107,9 +107,10 @@ def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
-def run(cmd, cwd):
+def run(cmd, cwd, env=None):
     log(f"$ {' '.join(cmd)}  (cwd={cwd})")
-    result = subprocess.run(cmd, cwd=str(cwd), shell=(os.name == "nt"), capture_output=True, text=True)
+    full_env = {**os.environ, **env} if env else None
+    result = subprocess.run(cmd, cwd=str(cwd), shell=(os.name == "nt"), capture_output=True, text=True, env=full_env)
     if result.stdout.strip():
         print(result.stdout)
     if result.stderr.strip():
@@ -144,19 +145,29 @@ def build_backend():
     if not entry_dll.exists():
         raise DeployAborted(f"Publish output is missing the entry assembly: {entry_dll}")
 
-    # Baileys engine sidecar (engine-switch feature): the csproj copies baileys-sidecar/
-    # (index.js + package.json) into the publish output; install its node_modules here so
-    # the server never needs to run npm itself. Non-fatal when npm is unavailable — the
-    # bridge runs fine on the default Dawa engine without it.
-    sidecar_dir = publish_dir / "baileys-sidecar"
-    if sidecar_dir.exists():
+    # Node engine sidecars (engine-switch feature): the csproj copies baileys-sidecar/ and
+    # waweb-sidecar/ (index.js + package.json) into the publish output; install their
+    # node_modules here so the server never needs to run npm itself. Non-fatal when npm is
+    # unavailable — the bridge runs fine on the default Dawa engine without them.
+    # waweb note: PUPPETEER_SKIP_DOWNLOAD=1 keeps puppeteer from downloading a ~170MB
+    # Chromium into the publish output; the server points the waweb engine at an installed
+    # Chrome via WhatsApp:WaWeb:ChromePath instead (see ENGINE-SWITCHING.md).
+    sidecars = [
+        ("baileys-sidecar", "Baileys engine", {}),
+        ("waweb-sidecar", "WhatsApp Web engine", {"PUPPETEER_SKIP_DOWNLOAD": "1"}),
+    ]
+    for folder, label, extra_env in sidecars:
+        sidecar_dir = publish_dir / folder
+        if not sidecar_dir.exists():
+            continue
         try:
-            log("[backend] npm install for baileys-sidecar (Baileys engine)...")
-            run(["npm", "install", "--omit=dev", "--no-audit", "--no-fund"], cwd=sidecar_dir)
+            log(f"[backend] npm install for {folder} ({label})...")
+            run(["npm", "install", "--omit=dev", "--no-audit", "--no-fund"], cwd=sidecar_dir,
+                env=extra_env or None)
         except (DeployAborted, FileNotFoundError) as ex:
-            log(f"[backend] WARNING: baileys-sidecar npm install failed ({ex}). "
-                "Deploy continues — Dawa engine unaffected, but switching to the Baileys "
-                "engine will fail until node_modules exists in the deployed baileys-sidecar/.")
+            log(f"[backend] WARNING: {folder} npm install failed ({ex}). "
+                f"Deploy continues — Dawa engine unaffected, but switching to the {label} "
+                f"will fail until node_modules exists in the deployed {folder}/.")
 
     return publish_dir
 

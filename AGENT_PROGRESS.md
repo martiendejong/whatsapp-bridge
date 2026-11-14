@@ -379,3 +379,65 @@ allowed 3/3 times under a `MaxPerRecipientPer24h=3` test config then blocked on 
 a "volume cap reached" reason; both blocks land in `BlockedOutboundMessages` (the table
 `GET /api/wa/blockedOutbound` reads) and the 3 allowed sends land in `OutboundSendLogs`.
 Left: nothing agent-doable. Re-pairing `31641406266` is a manual QR-scan step for Martien.
+
+## 2026-09-11 — task 3299
+Done: ported jengo-agi's Prospergenics vault IConfigurationSource into
+`Backend/WhatsAppBridge.API/Services/VaultConfiguration.cs` (PR #15), wired
+`builder.Configuration.AddProspergenicsVault()` in Program.cs, mapped
+`InboundWebhook:ApiKey` -> vault project 9 credential 216. Strict HTTP-200-only
+acceptance (202 approval-pending envelopes are rejected even when their body
+happens to contain a `password` field), fail-safe on any fetch/network failure,
+loads once at config-build time (never reloads — matches the singleton-bound
+`InboundWebhookOptions` in `InboundWebhookForwarder`). Minted a new read-only,
+project-9-scoped vault API key (id 40, `whatsappbridge-runtime-vault-config`)
+via the JIT broker (`C:\tools\vault-access\service.py`'s `POST /api/api-keys`
+contract) and wrote it as `Vault:ApiKey` into the live
+`appsettings.Production.json` on 85.215.217.154 (backed up first as
+`.bak-3299`) so the bootstrap secret is ready ahead of deploy. Filed jengo-agi
+PR #191 (docs/vault-config.md) simplifying the shared-credential rotation
+section now both sides read vault 9/216 — PR #190 (a concurrent session) had
+landed the JengoAGI side of this exact mapping while this session was mid-flight.
+Also found and filed task 3300: production's `Jwt:Key` is still the literal
+placeholder string from the (public) committed `appsettings.json` — a real,
+active auth-bypass hole, deliberately NOT fixed in this PR since rotating it
+force-logs-out every active session and needs its own reviewed timing.
+Verified: build clean, 190/190 tests pass (19 new — the 200-only path across
+202/2xx/4xx/5xx/missing/empty/null/unparseable-body cases, plus the provider's
+disabled/no-key/no-mappings no-op guards).
+Left: live end-to-end verification (deploy + app-pool recycle + POST
+`/api/whatsapp/inbound` with the vault-sourced key, then clearing the
+plaintext once confirmed identical) needs this PR merged and picked up by the
+hourly `WhatsAppBridgeScheduledDeploy` build agent — not done in this session.
+
+## 2026-09-17 — task 3308
+Done: converted `bugatti-uptime-check.ps1` (prod-server-only script, C:\scripts
+on 85.215.217.154, not previously in any repo) to report every probe result
+("up" included) to `POST /api/wa/monitor` instead of self-alerting. Removed
+its own dedup state file and direct `/api/wa/sendMessage` call; reused
+`monitor-report.ps1`'s (task 3305) already-deployed, project-8-only vault
+bootstrap key (`C:\tools\wa-watchdog\vault-key.txt`) for the fresh-token-per-run
+pattern instead of provisioning a duplicate. Test app-pool self-heal block is
+untouched.
+Verified: see PR for live verification evidence.
+Left: nothing planned.
+
+## 2026-10-07 - task 4998
+Done (code side only; no prod access): reliable credential saving + needs-QR for the Baileys sidecar.
+baileys-sidecar/reliable-auth-state.js replaces useMultiFileAuthState: atomic writes (tmp+fsync+rename), per-attempt
+timeout so a hung write cannot block later ones, retries then in-memory pending + background retry, errors logged and
+emitted (auth_write_error), flush before shutdown, health for a >10 min warning (auth_write_warning/auth_write_ok).
+Corrupt/orphaned/rejected (401 loggedOut) credentials: folder is renamed (baileys-auth.<reason>-<ts>, never deleted),
+sidecar emits needs_qr and restarts with empty creds so a QR appears. C#: SidecarEngine maps needs_qr/auth_write_*
+via NeedsQr/AuthWarning events on IWhatsAppEngine, session status needs_qr (sticky, WhatsAppBridgeService.StatusAfterDisconnect),
+warning on GET admin engine info (authWarning) + API log; frontend status type + "Scan QR to reconnect" button;
+csproj copies reliable-auth-state.js.
+Verified: node --test 9/9 (sidecar), dotnet test 225/225, dotnet build clean. Frontend not built (no node_modules).
+Not verified / needs humans: root cause from live evidence (creds.json vs session-* mtimes, API log grep for EPERM/EBUSY
+since 14 Sep needs prod 85.215.217.154); sidecar run against real Baileys (not installed here); the live session
+31641406266 (id 94e81b67) still needs a QR re-scan by its owner. Warning is not yet pushed to the WhatsApp monitor alert
+dispatcher (log + admin endpoint only).
+
+## 2026-10-21 — task 6003
+Done: the task-intake auto-reply (WhatsAppBridgeService.DispatchTaskIntake) now goes through OutboundGuardrailService (new TaskIntakeReplyEndpoint: allow-list + volume caps, no routing, no reply-window exception). It was the one internal send path that skipped the guardrail (flagged after task 869edf485). 4 new tests.
+Verified: dotnet test 220/220 pass. Live bridge audit (read-only) shows no send attempt at all 2026-10-20 07:40-08:30 UTC and the only session disconnected, so this gap is hardening, not the cause of the incident.
+Left: the sender of the 2026-10-20 07:58 UTC messages is still unnamed (not the bridge; needs the admin Audit view or a participant's forwarded message); owner is Martien.

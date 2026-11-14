@@ -19,21 +19,43 @@ public class WhatsAppApiController : ControllerBase
     private readonly WhatsAppBridgeService _whatsappService;
     private readonly EncryptionService _encryptionService;
     private readonly OutboundGuardrailService _outboundGuardrail;
+    private readonly ServerMonitorService _monitor;
+    private readonly MonitorAlertDispatcher _monitorDispatcher;
 
     public WhatsAppApiController(
         AppDbContext context,
         AuthService authService,
         WhatsAppBridgeService whatsappService,
         EncryptionService encryptionService,
-        OutboundGuardrailService outboundGuardrail)
+        OutboundGuardrailService outboundGuardrail,
+        ServerMonitorService monitor,
+        MonitorAlertDispatcher monitorDispatcher)
     {
         _context = context;
         _authService = authService;
         _whatsappService = whatsappService;
         _encryptionService = encryptionService;
         _outboundGuardrail = outboundGuardrail;
+        _monitor = monitor;
+        _monitorDispatcher = monitorDispatcher;
     }
 
+    /// <summary>
+    /// Resolves the bearer token to a user, and — this is the part that was missing — publishes
+    /// that identity on <see cref="HttpContext.User"/>.
+    ///
+    /// This controller authenticates by hand instead of through an [Authorize] attribute, so the
+    /// framework never populated HttpContext.User for any of these routes. Nothing downstream
+    /// noticed, because every action here already had the userId it needed as a local. The audit
+    /// middleware did notice: it reads the caller's identity from HttpContext.User, so every
+    /// single row for /api/wa/* was written with ApiConnectionId = null and AuthScheme =
+    /// "Anonymous" — and the audit page hides null-user rows from non-admins. The log that exists
+    /// specifically to show what was sent with which API key recorded neither.
+    ///
+    /// Adding [Authorize] to the controller would be the tidier fix, but it changes the failure
+    /// response for every existing caller from this method's JSON body to a bare 401, so the
+    /// identity is published here instead and the hand-rolled validation stays as it was.
+    /// </summary>
     private async Task<(bool success, int? userId, string? error)> ValidateApiToken()
     {
         var authHeader = Request.Headers.Authorization.ToString();
@@ -68,6 +90,7 @@ public class WhatsAppApiController : ControllerBase
             {
                 connection.LastUsedAt = DateTime.UtcNow;
                 await _context.SaveChangesAsync();
+                PublishApiKeyIdentity(connection);
                 return (true, connection.UserId, null);
             }
         }
@@ -75,10 +98,43 @@ public class WhatsAppApiController : ControllerBase
         {
             var user = await _authService.ValidateApiTokenAsync(token);
             if (user != null)
+            {
+                var connection = await _context.ApiConnections
+                    .FirstOrDefaultAsync(c => c.Token == token && c.IsActive);
+                PublishApiKeyIdentity(connection, user.Id, user.Email);
                 return (true, user.Id, null);
+            }
         }
 
         return (false, null, "Invalid API token");
+    }
+
+    /// <summary>
+    /// Same claim names the ApiKey authentication handler emits, so the audit middleware and
+    /// anything else reading the caller's identity cannot tell the two paths apart. Deliberately
+    /// does not overwrite an identity the framework already established.
+    /// </summary>
+    private void PublishApiKeyIdentity(ApiConnection? connection, int? userId = null, string? email = null)
+    {
+        if (HttpContext.User?.Identity?.IsAuthenticated == true) return;
+
+        var id = connection?.UserId ?? userId;
+        if (id == null) return;
+
+        var claims = new List<System.Security.Claims.Claim>
+        {
+            new(System.Security.Claims.ClaimTypes.NameIdentifier, id.Value.ToString()),
+        };
+        if (!string.IsNullOrEmpty(email))
+            claims.Add(new System.Security.Claims.Claim(System.Security.Claims.ClaimTypes.Email, email));
+        if (connection != null)
+        {
+            claims.Add(new System.Security.Claims.Claim("ApiConnectionId", connection.Id.ToString()));
+            claims.Add(new System.Security.Claims.Claim("ApiConnectionName", connection.Name ?? string.Empty));
+        }
+
+        HttpContext.User = new System.Security.Claims.ClaimsPrincipal(
+            new System.Security.Claims.ClaimsIdentity(claims, "ApiKey"));
     }
 
     private async Task<string?> GetUserSessionId(int userId, string? sessionIdOrPhone = null)
@@ -141,9 +197,14 @@ public class WhatsAppApiController : ControllerBase
             if (!success)
                 return Unauthorized(new { error });
 
-            var (allowed, blockReason) = await _outboundGuardrail.CheckAsync("sendMessage", request.To, request.Body, userId);
-            if (!allowed)
-                return StatusCode(403, new { error = blockReason, blocked = true });
+            var guard = await _outboundGuardrail.CheckAsync("sendMessage", request.To, request.Body, userId, request.Category);
+            // Suppressed means the recipient already has this exact message. Reporting that as a
+            // failure invites the caller to retry, which is how a duplicate-suppression rule ends
+            // up producing duplicates.
+            if (guard.Suppressed)
+                return Ok(new { success = true, suppressed = true, reason = guard.Reason });
+            if (!guard.Allowed)
+                return StatusCode(403, new { error = guard.Reason, blocked = true });
 
             var sessionId = await GetUserSessionId(userId!.Value, request.SessionId);
             if (sessionId == null)
@@ -156,9 +217,12 @@ public class WhatsAppApiController : ControllerBase
                 ? _encryptionService.Encrypt(request.Body)
                 : request.Body;
 
-            var result = await _whatsappService.SendMessageAsync(sessionId, request.To, messageToSend);
+            // guard.Recipient, not request.To — routing may have redirected this away from
+            // someone who is asleep. Sending to request.To here would silently undo the policy.
+            var result = await _whatsappService.SendMessageAsync(sessionId, guard.Recipient, messageToSend);
+            await _outboundGuardrail.ConfirmDeliveredAsync(guard);
 
-            return Ok(result);
+            return Ok(new { result, routedTo = guard.Recipient, routing = guard.RoutingNote });
         }
         catch (WhatsAppServiceException ex)
         {
@@ -186,6 +250,14 @@ public class WhatsAppApiController : ControllerBase
             if (!success)
                 return Unauthorized(new { error });
 
+            // Same allow-list and the same volume caps as every other send route. This one used
+            // to skip the guardrail entirely, which made it the way to reach any number at any
+            // hour, uncapped and unrecorded, using nothing but a valid API token.
+            var guard = await _outboundGuardrail.CheckAsync(
+                OutboundGuardrailService.DirectReplyEndpoint, request.To, request.Body, userId);
+            if (!guard.Allowed)
+                return StatusCode(403, new { error = guard.Reason, blocked = true });
+
             var sessionId = await GetUserSessionId(userId!.Value, request.SessionId);
             if (sessionId == null)
                 return BadRequest(new { error = request.SessionId != null
@@ -197,7 +269,8 @@ public class WhatsAppApiController : ControllerBase
                 ? _encryptionService.Encrypt(request.Body)
                 : request.Body;
 
-            var result = await _whatsappService.SendReplyAsync(sessionId, request.To, messageToSend, request.QuotedMessageId, request.QuotedFromJid);
+            var result = await _whatsappService.SendReplyAsync(sessionId, guard.Recipient, messageToSend, request.QuotedMessageId, request.QuotedFromJid);
+            await _outboundGuardrail.ConfirmDeliveredAsync(guard);
 
             return Ok(result);
         }
@@ -270,9 +343,16 @@ public class WhatsAppApiController : ControllerBase
             if (!success)
                 return Unauthorized(new { error });
 
-            var (allowed, blockReason) = await _outboundGuardrail.CheckAsync("sendMedia", request.To, request.Caption ?? "", userId);
-            if (!allowed)
-                return StatusCode(403, new { error = blockReason, blocked = true });
+            // The dedupe body is caption PLUS source URL, because the caption alone is not an
+            // identity: most media has none, and two different captionless charts would hash
+            // identically — the second would be "already delivered" and silently dropped. The
+            // URL is what actually distinguishes one file from another here.
+            var guard = await _outboundGuardrail.CheckAsync("sendMedia", request.To,
+                $"{request.Caption}\n{request.MediaUrl}", userId, request.Category);
+            if (guard.Suppressed)
+                return Ok(new { success = true, suppressed = true, reason = guard.Reason });
+            if (!guard.Allowed)
+                return StatusCode(403, new { error = guard.Reason, blocked = true });
 
             var sessionId = await GetUserSessionId(userId!.Value, request.SessionId);
             if (sessionId == null)
@@ -293,14 +373,74 @@ public class WhatsAppApiController : ControllerBase
             var uri = new Uri(request.MediaUrl);
             var fn = Path.GetFileName(uri.LocalPath);
             var result = await _whatsappService.SendMediaAsync(
-                sessionId, request.To, mediaType, mimeType, fileBytes,
+                sessionId, guard.Recipient, mediaType, mimeType, fileBytes,
                 request.Caption ?? "", fn);
+            await _outboundGuardrail.ConfirmDeliveredAsync(guard);
 
             return Ok(result);
         }
         catch (WhatsAppServiceException ex)
         {
             // Return user-friendly error message
+            return StatusCode(400, new
+            {
+                error = ex.Error.UserMessage,
+                errorCode = ex.Error.ErrorCode,
+                details = ex.Error.AdditionalInfo
+            });
+        }
+    }
+
+    /// <summary>
+    /// Send media by uploading a file directly (multipart/form-data).
+    /// POST /api/wa/sendMediaFile
+    /// Fields: File (binary), To (phone/JID), Caption (optional), FileName (optional), SessionId (optional)
+    /// Mirrors /api/wa/sendMedia but accepts an uploaded file instead of a URL.
+    /// </summary>
+    [HttpPost("sendMediaFile")]
+    public async Task<IActionResult> SendMediaFile([FromForm] SendMediaFileRequest request)
+    {
+        try
+        {
+            var (success, userId, error) = await ValidateApiToken();
+            if (!success)
+                return Unauthorized(new { error });
+
+            if (request.File == null || request.File.Length == 0)
+                return BadRequest(new { error = "File is required" });
+
+            var guard = await _outboundGuardrail.CheckAsync("sendMediaFile", request.To,
+                $"{request.Caption}\n{request.FileName ?? request.File.FileName}:{request.File.Length}", userId, request.Category);
+            if (guard.Suppressed)
+                return Ok(new { success = true, suppressed = true, reason = guard.Reason });
+            if (!guard.Allowed)
+                return StatusCode(403, new { error = guard.Reason, blocked = true });
+
+            var sessionId = await GetUserSessionId(userId!.Value, request.SessionId);
+            if (sessionId == null)
+                return BadRequest(new { error = request.SessionId != null
+                    ? $"WhatsApp session '{request.SessionId}' not found or not connected"
+                    : "No active WhatsApp session" });
+
+            using var ms = new MemoryStream();
+            await request.File.CopyToAsync(ms);
+            var fileBytes = ms.ToArray();
+            var mimeType = request.File.ContentType;
+            var mediaType = mimeType.StartsWith("image/") ? "image"
+                          : mimeType.StartsWith("audio/") ? "audio"
+                          : mimeType.StartsWith("video/") ? "video"
+                          : "document";
+            var fileName = request.FileName ?? request.File.FileName;
+
+            var result = await _whatsappService.SendMediaAsync(
+                sessionId, guard.Recipient, mediaType, mimeType, fileBytes,
+                request.Caption ?? "", fileName);
+            await _outboundGuardrail.ConfirmDeliveredAsync(guard);
+
+            return Ok(result);
+        }
+        catch (WhatsAppServiceException ex)
+        {
             return StatusCode(400, new
             {
                 error = ex.Error.UserMessage,
@@ -658,9 +798,11 @@ public class WhatsAppApiController : ControllerBase
         if (!success)
             return Unauthorized(new { error });
 
-        var (allowed, blockReason) = await _outboundGuardrail.CheckAsync("forwardMessage", request.ToJid, request.Text, userId);
-        if (!allowed)
-            return StatusCode(403, new { error = blockReason, blocked = true });
+        var guard = await _outboundGuardrail.CheckAsync("forwardMessage", request.ToJid, request.Text, userId, request.Category);
+        if (guard.Suppressed)
+            return Ok(new { success = true, suppressed = true, reason = guard.Reason });
+        if (!guard.Allowed)
+            return StatusCode(403, new { error = guard.Reason, blocked = true });
 
         var sessionId = await GetUserSessionId(userId!.Value, request.SessionId);
         if (sessionId == null)
@@ -668,7 +810,8 @@ public class WhatsAppApiController : ControllerBase
 
         try
         {
-            var result = await _whatsappService.ForwardMessageAsync(sessionId!, request.ToJid, request.Text);
+            var result = await _whatsappService.ForwardMessageAsync(sessionId!, guard.Recipient, request.Text);
+            await _outboundGuardrail.ConfirmDeliveredAsync(guard);
             return Ok(result);
         }
         catch (Exception ex)
@@ -1017,13 +1160,117 @@ public class WhatsAppApiController : ControllerBase
         var status = _whatsappService.GetMessageStatus(resolvedSessionId!, msgId);
         return Ok(new { messageId = msgId, status = status?.ToString() ?? "unknown" });
     }
+
+    /// <summary>
+    /// Status feed for server monitoring. Monitors POST what they see, every ~5 minutes,
+    /// up or down alike:
+    ///
+    ///   POST /api/wa/monitor  { "subject": "portofgiethoorn.com", "status": "down", "detail": "HTTP 502" }
+    ///
+    /// The BRIDGE decides whether that is worth a WhatsApp message — kritiek subjects alert
+    /// after 5 minutes down, everything else after 30, one alert per outage, a recovery
+    /// message when an announced outage ends, and a "your monitor is silent" alert when the
+    /// reports themselves stop coming. Callers report state; they never decide urgency. That
+    /// split is the point: three separate watchdog scripts each deciding when to alert is how
+    /// the same outage once produced three messages and a different one produced none.
+    /// </summary>
+    [HttpPost("monitor")]
+    public async Task<IActionResult> MonitorReport([FromBody] MonitorReportRequest request)
+    {
+        var (success, _, error) = await ValidateApiToken();
+        if (!success)
+            return Unauthorized(new { error });
+
+        // Same validation bar as the admin form. Without it, subjects self-registered without
+        // limit — a probe URL with a run id in it minted a fresh subject every five minutes,
+        // each earning its own silence alert an hour later.
+        var subject = ServerMonitorService.Normalize(request?.Subject ?? string.Empty);
+        if (!ServerMonitorService.IsValidSubject(subject))
+            return BadRequest(new { error = "subject must be a hostname, e.g. \"portofgiethoorn.com\"." });
+        var status = request!.Status?.Trim().ToLowerInvariant();
+        if (status is not ("up" or "down"))
+            return BadRequest(new { error = "status must be \"up\" or \"down\"." });
+
+        var outcome = await _monitor.ReportAsync(subject, status, request.Detail, DateTime.UtcNow);
+
+        if (outcome.Alert != null)
+        {
+            var dispatched = await _monitorDispatcher.DispatchAsync(outcome.Alert);
+            // A transient failure hands the claim back so the minute-sweep retries; a policy
+            // refusal is a decision and the claim stands. See MonitorAlertDispatcher.
+            if (dispatched == MonitorAlertDispatcher.DispatchOutcome.TransientFailure)
+                await _monitor.ReleaseAlertClaimAsync(outcome.Alert);
+        }
+
+        return Ok(new
+        {
+            subject = outcome.Subject,
+            status = outcome.Status,
+            tier = outcome.Critical ? "kritiek" : "normaal",
+            thresholdMinutes = outcome.ThresholdMinutes,
+            // What this report amounted to: "recorded" (outage clock started), "waiting"
+            // (down, threshold not yet reached), "alerted", "already-alerted", "recovered",
+            // "blip" (came back before anyone was told), or "ok".
+            disposition = outcome.Disposition,
+            alerted = outcome.Alert != null,
+        });
+    }
+
+    /// <summary>
+    /// The monitor's current picture: every known subject with its tier, state and timing.
+    /// GET /api/wa/monitor
+    /// </summary>
+    [HttpGet("monitor")]
+    public async Task<IActionResult> MonitorStatus()
+    {
+        var (success, _, error) = await ValidateApiToken();
+        if (!success)
+            return Unauthorized(new { error });
+
+        var now = DateTime.UtcNow;
+        var subjects = await _context.MonitorSubjects
+            .AsNoTracking()
+            .OrderBy(s => s.Subject)
+            .ToListAsync();
+
+        return Ok(subjects.Select(s => new
+        {
+            s.Subject,
+            tier = s.Critical ? "kritiek" : "normaal",
+            thresholdMinutes = _monitor.ThresholdMinutes(s),
+            s.Status,
+            s.LastDetail,
+            s.FirstDownAtUtc,
+            downAlerted = s.DownAlertAtUtc != null,
+            monitorSilent = s.SilenceAlertAtUtc != null,
+            s.LastReportAtUtc,
+            // Null for a subject that never reported — a default DateTime here rendered as
+            // "silent for a billion minutes", where the truth is "monitor not built yet".
+            minutesSinceLastReport = s.LastReportAtUtc == default
+                ? (int?)null
+                : (int)(now - s.LastReportAtUtc).TotalMinutes,
+        }));
+    }
 }
 
-public record SendMessageRequest(string To, string Body, string? SessionId = null);
+// Category is what kind of message this is ("approval", "deploy:valsuani", "serverdown",
+// "reply", ...). OutboundRoutingService uses it to decide who actually receives it and whether
+// their window is open. Optional and defaulted so every existing caller keeps working; an
+// absent category is treated as "other", which by policy only reaches Martien.
+public record SendMessageRequest(string To, string Body, string? SessionId = null, string? Category = null);
 public record SetContactNameApiRequest(string Jid, string? Name = null);
 public record SendReplyRequest(string To, string Body, string QuotedMessageId, string QuotedFromJid, string? SessionId = null);
 public record RequestHistoryRequest(string ChatId, int Count = 50, bool NoAnchor = false, string? SessionId = null);
-public record SendMediaRequest(string To, string MediaUrl, string? Caption = null, string? SessionId = null);
+public record SendMediaRequest(string To, string MediaUrl, string? Caption = null, string? SessionId = null, string? Category = null);
+public class SendMediaFileRequest
+{
+    public required IFormFile File { get; init; }
+    public required string To { get; init; }
+    public string? Caption { get; init; }
+    public string? FileName { get; init; }
+    public string? SessionId { get; init; }
+    public string? Category { get; init; }
+}
 public record DownloadMediaRequest(
     string? MediaUrl = null,
     string? MediaKey = null,
@@ -1034,7 +1281,8 @@ public record DownloadMediaRequest(
     string? ChatJid = null,
     string? MessageId = null);
 public record RevokeMessageRequest(string ChatJid, string MessageId, bool FromMe = true, string? SessionId = null);
-public record ForwardMessageRequest(string ToJid, string Text, string? SessionId = null);
+public record MonitorReportRequest(string Subject, string Status, string? Detail = null);
+public record ForwardMessageRequest(string ToJid, string Text, string? SessionId = null, string? Category = null);
 public record SendTypingRequest(string ChatJid, bool IsTyping = true, string? SessionId = null);
 public record SetPresenceRequest(bool Available, string? SessionId = null);
 public record CreateGroupRequest(string Subject, List<string> Participants, string? SessionId = null);

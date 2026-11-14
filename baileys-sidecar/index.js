@@ -12,7 +12,9 @@
 
 import {
   makeWASocket,
-  useMultiFileAuthState,
+  BufferJSON,
+  initAuthCreds,
+  proto,
   makeCacheableSignalKeyStore,
   fetchLatestBaileysVersion,
   DisconnectReason,
@@ -22,6 +24,7 @@ import { createInterface } from 'readline'
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import pino from 'pino'
+import { useReliableAuthState, AuthStateCorruptError, archiveAuthDir, evaluateAuthHealth } from './reliable-auth-state.js'
 
 // ─── Args & state ────────────────────────────────────────────────────────────
 
@@ -39,6 +42,10 @@ const logger = pino({ level: 'silent' })
 let sock = null
 let shuttingDown = false
 let reconnectDelayMs = 3000
+let authCtx = null          // reliable auth state (kept across reconnects; replaced after a reset)
+let socketOpen = false
+let lastAuthWarnAt = null
+const AUTH_WARN_MS = Number(process.env.BAILEYS_AUTH_WARN_MS) || 10 * 60 * 1000
 
 // Minimal chat/contact store fed from sync + live events (makeInMemoryStore is gone in
 // recent Baileys releases, and we only need names/jids — messages are stored C#-side).
@@ -169,8 +176,54 @@ function upsertChat(jid, patch) {
 
 // ─── Socket lifecycle ────────────────────────────────────────────────────────
 
+// Moves the current auth folder aside (never deletes it), drops the in-memory state and tells C# that a
+// QR scan is needed. Returns false when the folder could not be moved: then we must not start over in the
+// same folder (we would overwrite the old credentials), so the session stays in needs_qr without a QR.
+async function resetToNeedsQr(reason, detail) {
+  try { authCtx?.close() } catch { }
+  authCtx = null
+  try {
+    const archived = await archiveAuthDir(AUTH_DIR, reason)
+    log(`auth folder archived to ${archived} (${reason}${detail ? `: ${detail}` : ''})`)
+    emit('needs_qr', { reason, detail: detail || null, archivedTo: archived })
+    return true
+  } catch (e) {
+    log(`could not archive auth folder (${reason}): ${e?.message || e}`)
+    emit('needs_qr', { reason, detail: detail || null, archiveFailed: true, error: String(e?.message || e) })
+    return false
+  }
+}
+
+async function loadAuth() {
+  if (authCtx) return authCtx
+  const opts = {
+    log,
+    onWriteError: (file, err) => emit('auth_write_error', { file, error: String(err?.message || err) }),
+  }
+  try {
+    authCtx = await useReliableAuthState(AUTH_DIR, { BufferJSON, initAuthCreds, proto }, opts)
+  } catch (e) {
+    if (!(e instanceof AuthStateCorruptError)) throw e
+    // creds.json exists but is unreadable/corrupt: resuming is impossible, overwriting it would destroy
+    // evidence. Archive and ask for a fresh QR.
+    if (!(await resetToNeedsQr('corrupt-creds', e.message))) throw e
+    authCtx = await useReliableAuthState(AUTH_DIR, { BufferJSON, initAuthCreds, proto }, opts)
+    return authCtx
+  }
+  if (authCtx.loadStatus === 'orphaned') {
+    // Key files but no creds.json: the credentials were lost, the keys are useless without them.
+    authCtx.close()
+    authCtx = null
+    if (!(await resetToNeedsQr('missing-creds', 'creds.json missing but key files present'))) throw new Error('auth folder cannot be archived')
+    authCtx = await useReliableAuthState(AUTH_DIR, { BufferJSON, initAuthCreds, proto }, opts)
+  }
+  return authCtx
+}
+
 async function startSocket() {
-  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR)
+  const auth = await loadAuth()
+  const { state, saveCreds } = auth
+  const hadRegisteredCreds = !!state.creds?.registered
   const { version } = await fetchLatestBaileysVersion()
 
   sock = makeWASocket({
@@ -186,13 +239,14 @@ async function startSocket() {
     markOnlineOnConnect: false,
   })
 
-  sock.ev.on('creds.update', saveCreds)
+  sock.ev.on('creds.update', () => { saveCreds() }) // never rejects: failures are logged, retried and reported
 
   sock.ev.on('connection.update', (update) => {
     const { connection, lastDisconnect, qr } = update
     if (qr) emit('qr', { qr })
 
     if (connection === 'open') {
+      socketOpen = true
       reconnectDelayMs = 3000
       emit('connected', { jid: sock.user?.id || null })
       log(`connected as ${sock.user?.id}`)
@@ -201,11 +255,17 @@ async function startSocket() {
     if (connection === 'close') {
       const code = lastDisconnect?.error?.output?.statusCode
       const loggedOut = code === DisconnectReason.loggedOut
+      socketOpen = false
       log(`connection closed (code ${code}, loggedOut ${loggedOut})`)
       emit('disconnected', { code: code || null, loggedOut })
       if (shuttingDown) return
       if (loggedOut) {
-        // Creds are invalid — stay alive so the C# side can decide, but do not loop.
+        if (!hadRegisteredCreds) return // a pairing attempt that never completed: nothing to reset, do not loop
+        // WhatsApp rejected the saved credentials (logged out / revoked). Move them aside, tell C# a QR
+        // scan is needed and start over with empty credentials so a fresh QR appears.
+        resetToNeedsQr('logged-out', `status ${code}`)
+          .then((ok) => { if (ok) return startSocket() })
+          .catch(e => log(`restart after logout failed: ${e.message}`))
         return
       }
       setTimeout(() => startSocket().catch(e => log(`reconnect failed: ${e.message}`)), reconnectDelayMs)
@@ -461,8 +521,11 @@ const commands = {
     shuttingDown = true
     saveStore()
     try { sock?.end?.(undefined) } catch { }
+    // Flush pending credential/key writes before exiting (bounded, so a hung disk cannot block shutdown forever).
+    const { pending } = authCtx ? await authCtx.flush(5000) : { pending: 0 }
+    if (pending > 0) log(`shutdown with ${pending} credential write(s) still failing`)
     setTimeout(() => process.exit(0), 200)
-    return {}
+    return { pendingAuthWrites: pending }
   },
 }
 
@@ -487,16 +550,36 @@ rl.on('line', async (line) => {
     send({ id, ok: false, error: e?.message || String(e) })
   }
 })
-rl.on('close', () => {
+rl.on('close', async () => {
   // Parent closed stdin (or died) — exit so we never orphan a connected socket.
   shuttingDown = true
   saveStore()
   try { sock?.end?.(undefined) } catch { }
+  try { await authCtx?.flush(5000) } catch { }
   process.exit(0)
 })
 
 process.on('uncaughtException', (e) => log(`uncaught: ${e?.stack || e}`))
 process.on('unhandledRejection', (e) => log(`unhandled rejection: ${e?.stack || e}`))
+
+// Health ticker: a credential write that has been failing or hanging for 10+ minutes while the connection is
+// up means the next restart will resume from stale credentials. Warn (C# surfaces it), and say when it recovers.
+setInterval(() => {
+  if (!authCtx || shuttingDown) return
+  const health = authCtx.getHealth()
+  const verdict = evaluateAuthHealth(health, Date.now(), { thresholdMs: AUTH_WARN_MS, lastWarnedAt: lastAuthWarnAt })
+  if (verdict.warn && socketOpen) {
+    lastAuthWarnAt = Date.now()
+    emit('auth_write_warning', {
+      pending: health.pendingCount,
+      failingForMs: verdict.failingForMs,
+      lastError: health.lastError,
+    })
+  } else if (verdict.recovered) {
+    lastAuthWarnAt = null
+    emit('auth_write_ok', {})
+  }
+}, 60_000).unref()
 
 loadStore()
 startSocket().catch((e) => {
