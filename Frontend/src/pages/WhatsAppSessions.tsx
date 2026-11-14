@@ -452,7 +452,7 @@ export default function WhatsAppSessions() {
                                 </tr>
                               </thead>
                               <tbody>
-                                {contactPanels[session.sessionId].contacts.map((c) => (
+                                {contactPanels[session.sessionId].contacts.map((c: Contact) => (
                                   <tr key={c.jid} style={{ borderTop: '1px solid #f1f5f9' }}>
                                     <td style={{ padding: '6px 8px' }}>{c.name}</td>
                                     <td style={{ padding: '6px 8px' }}>{c.phoneNumber}</td>

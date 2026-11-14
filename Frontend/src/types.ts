@@ -5,6 +5,9 @@ export interface User {
   lastLoginAt?: string;
   isActive?: boolean;
   isAdmin?: boolean;
+  twoFactorEnabled?: boolean;
+  twoFactorMethod?: string;
+  phoneNumber?: string;
 }
 
 export interface ApiConnection {

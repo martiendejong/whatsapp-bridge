@@ -67,11 +67,11 @@ public class AuthController : ControllerBase
                 if (!sent)
                     return BadRequest(new { message = "Failed to send WhatsApp 2FA code. Please ensure you have a phone number linked." });
             }
-            else
+            else if (user.TwoFactorMethod == "email")
             {
-                var sent = await _emailService.SendTwoFactorTokenAsync(user.Email, twoFactorToken.Token);
+                var sent = await _twoFactorService.SendEmailTokenAsync(user.Email, twoFactorToken.Token);
                 if (!sent)
-                    return BadRequest(new { message = "Failed to send email verification code. Please contact support." });
+                    return BadRequest(new { message = "Failed to send email 2FA code. Please check your email configuration." });
             }
 
             // Return pending 2FA status (no JWT token yet)
@@ -159,50 +159,41 @@ public class AuthController : ControllerBase
     }
 
     [Authorize]
-    [HttpGet("2fa/status")]
-    public async Task<IActionResult> Get2FAStatus()
+    [HttpGet("2fa-status")]
+    public async Task<IActionResult> GetTwoFactorStatus()
     {
         var userId = GetUserId();
         var user = await _authService.GetUserByIdAsync(userId);
-        if (user == null)
-            return NotFound();
+        if (user == null) return NotFound();
 
         return Ok(new
         {
             twoFactorEnabled = user.TwoFactorEnabled,
-            twoFactorMethod = user.TwoFactorMethod
+            twoFactorMethod = user.TwoFactorMethod,
+            hasPhoneNumber = !string.IsNullOrEmpty(user.PhoneNumber)
         });
     }
 
     [Authorize]
-    [HttpPut("2fa/enable")]
-    public async Task<IActionResult> Enable2FA()
+    [HttpPut("enable-2fa")]
+    public async Task<IActionResult> EnableTwoFactor([FromBody] EnableTwoFactorRequest request)
     {
         var userId = GetUserId();
-        var user = await _authService.GetUserByIdAsync(userId);
-        if (user == null)
-            return NotFound();
+        var success = await _twoFactorService.EnableTwoFactorAsync(userId, request.Method, request.PhoneNumber);
 
-        user.TwoFactorEnabled = true;
-        user.TwoFactorMethod = "email";
-        await _context.SaveChangesAsync();
+        if (!success)
+            return BadRequest(new { message = "Failed to enable 2FA. For WhatsApp method, ensure you have a connected WhatsApp session or provide a phone number." });
 
-        return Ok(new { message = "Two-factor authentication enabled. You will receive a code to your email on each login." });
+        return Ok(new { message = "Two-factor authentication enabled successfully", method = request.Method });
     }
 
     [Authorize]
-    [HttpPut("2fa/disable")]
-    public async Task<IActionResult> Disable2FA()
+    [HttpPut("disable-2fa")]
+    public async Task<IActionResult> DisableTwoFactor()
     {
         var userId = GetUserId();
-        var user = await _authService.GetUserByIdAsync(userId);
-        if (user == null)
-            return NotFound();
-
-        user.TwoFactorEnabled = false;
-        await _context.SaveChangesAsync();
-
-        return Ok(new { message = "Two-factor authentication disabled." });
+        await _twoFactorService.DisableTwoFactorAsync(userId);
+        return Ok(new { message = "Two-factor authentication disabled" });
     }
 }
 
@@ -211,3 +202,4 @@ public record LoginRequest(string Email, string Password);
 public record UpdateEmailRequest(string Email);
 public record UpdatePasswordRequest(string CurrentPassword, string NewPassword);
 public record Verify2FARequest(string Token);
+public record EnableTwoFactorRequest(string Method, string? PhoneNumber);

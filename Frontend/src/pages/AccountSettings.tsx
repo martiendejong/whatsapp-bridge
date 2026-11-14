@@ -127,72 +127,122 @@ function EngineSettings() {
 }
 
 function TwoFactorSettings() {
-  const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [status, setStatus] = useState<{ twoFactorEnabled: boolean; twoFactorMethod: string; hasPhoneNumber: boolean } | null>(null);
+  const [method, setMethod] = useState('email');
+  const [phoneNumber, setPhoneNumber] = useState('');
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
   const load = async () => {
     try {
-      const res = await auth.get2FAStatus();
-      setEnabled(res.data.twoFactorEnabled);
+      const res = await auth.get2faStatus();
+      setStatus(res.data);
+      setMethod(res.data.twoFactorMethod || 'whatsapp');
     } catch {
-      setEnabled(false);
+      // ignore
     }
   };
 
   useEffect(() => { load(); }, []);
 
-  const handleToggle = async () => {
+  const handleEnable = async (e: React.FormEvent) => {
+    e.preventDefault();
     setError('');
     setMessage('');
     setLoading(true);
     try {
-      if (enabled) {
-        const res = await auth.disable2FA();
-        setMessage(res.data.message);
-        setEnabled(false);
-      } else {
-        const res = await auth.enable2FA();
-        setMessage(res.data.message);
-        setEnabled(true);
-      }
+      await auth.enable2fa(method, phoneNumber || undefined);
+      setMessage('Two-factor authentication enabled.');
+      setPhoneNumber('');
+      await load();
     } catch (err: any) {
-      setError(err.response?.data?.message || 'Failed to update 2FA setting');
+      setError(err.response?.data?.message || 'Failed to enable 2FA');
     } finally {
       setLoading(false);
     }
   };
 
+  const handleDisable = async () => {
+    setError('');
+    setMessage('');
+    setLoading(true);
+    try {
+      await auth.disable2fa();
+      setMessage('Two-factor authentication disabled.');
+      await load();
+    } catch (err: any) {
+      setError(err.response?.data?.message || 'Failed to disable 2FA');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (!status) return null;
+
+
   return (
     <div className="bg-white shadow rounded-lg p-6">
       <h2 className="text-xl font-semibold mb-1">Two-Factor Authentication</h2>
       <p className="text-sm text-gray-600 mb-4">
-        When enabled, you will receive a 6-digit code by email each time you log in.
-        You can either click the link in the email or paste the code manually.
+        Add an extra layer of security to your account. You'll receive a code on each login.
       </p>
 
-      {message && (
-        <div className="mb-4 p-3 bg-green-100 border border-green-400 text-green-700 rounded text-sm">{message}</div>
-      )}
-      {error && (
-        <div className="mb-4 p-3 bg-red-100 border border-red-400 text-red-700 rounded text-sm">{error}</div>
-      )}
+      {message && <div className="mb-4 p-3 bg-green-100 border border-green-400 text-green-700 rounded text-sm">{message}</div>}
+      {error && <div className="mb-4 p-3 bg-red-100 border border-red-400 text-red-700 rounded text-sm">{error}</div>}
 
-      <div className="flex items-center gap-4">
-        {enabled !== null && (
-          <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${enabled ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-700'}`}>
-            {enabled ? 'Enabled' : 'Disabled'}
-          </span>
-        )}
-        <button
-          onClick={handleToggle}
-          disabled={loading || enabled === null}
-          className={`px-6 py-2 text-white rounded-lg transition disabled:bg-gray-400 disabled:cursor-not-allowed ${enabled ? 'bg-red-600 hover:bg-red-700' : 'bg-blue-600 hover:bg-blue-700'}`}
-        >
-          {loading ? 'Saving...' : enabled ? 'Disable 2FA' : 'Enable 2FA'}
-        </button>
+      <div className="mb-4 flex items-center gap-3">
+        <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${status.twoFactorEnabled ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800'}`}>
+          {status.twoFactorEnabled ? `Enabled (${status.twoFactorMethod})` : 'Disabled'}
+        </span>
       </div>
+
+      {status.twoFactorEnabled ? (
+        <button
+          onClick={handleDisable}
+          disabled={loading}
+          className="px-6 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition"
+        >
+          {loading ? 'Disabling...' : 'Disable 2FA'}
+        </button>
+      ) : (
+        <form onSubmit={handleEnable} className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">Authentication Method</label>
+            <div className="space-y-2">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input type="radio" name="2faMethod" value="whatsapp" checked={method === 'whatsapp'} onChange={() => setMethod('whatsapp')} />
+                <span className="text-sm">WhatsApp message</span>
+              </label>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input type="radio" name="2faMethod" value="email" checked={method === 'email'} onChange={() => setMethod('email')} />
+                <span className="text-sm">Email</span>
+              </label>
+            </div>
+          </div>
+          {method === 'whatsapp' && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Phone Number <span className="text-gray-400 font-normal">(optional -- uses your linked WhatsApp number if blank)</span>
+              </label>
+              <input
+                type="tel"
+                value={phoneNumber}
+                onChange={(e) => setPhoneNumber(e.target.value)}
+                placeholder="+31612345678"
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+          )}
+          <button
+            type="submit"
+            disabled={loading}
+            className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition"
+          >
+            {loading ? 'Enabling...' : 'Enable 2FA'}
+          </button>
+        </form>
+      )}
     </div>
   );
 }
@@ -413,7 +463,7 @@ export default function AccountSettings() {
           </form>
         </div>
 
-        {/* Two-Factor Authentication */}
+        {/* Two-factor authentication */}
         <TwoFactorSettings />
 
         {/* WhatsApp engine (admin only) */}

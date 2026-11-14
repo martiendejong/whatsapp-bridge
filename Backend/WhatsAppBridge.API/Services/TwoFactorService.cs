@@ -154,4 +154,81 @@ public class TwoFactorService
 
         _logger.LogInformation("Cleaned up {Count} expired 2FA tokens", expiredTokens.Count);
     }
+
+    public async Task<bool> EnableTwoFactorAsync(int userId, string method, string? phoneNumber)
+    {
+        var user = await _context.Users
+            .Include(u => u.WhatsAppSessions)
+            .FirstOrDefaultAsync(u => u.Id == userId);
+        if (user == null) return false;
+
+        if (!string.IsNullOrEmpty(phoneNumber))
+            user.PhoneNumber = phoneNumber;
+
+        if (method == "whatsapp" && string.IsNullOrEmpty(user.PhoneNumber))
+        {
+            var session = user.WhatsAppSessions
+                .OrderByDescending(s => s.ConnectedAt)
+                .FirstOrDefault(s => !string.IsNullOrEmpty(s.PhoneNumber));
+            if (session != null)
+                user.PhoneNumber = session.PhoneNumber;
+            else
+                return false;
+        }
+
+        user.TwoFactorEnabled = true;
+        user.TwoFactorMethod = method;
+        await _context.SaveChangesAsync();
+        return true;
+    }
+
+    public async Task DisableTwoFactorAsync(int userId)
+    {
+        var user = await _context.Users.FindAsync(userId);
+        if (user != null)
+        {
+            user.TwoFactorEnabled = false;
+            await _context.SaveChangesAsync();
+        }
+    }
+
+    public async Task<bool> SendEmailTokenAsync(string email, string token)
+    {
+        try
+        {
+            var baseUrl = _configuration["BaseUrl"] ?? "http://localhost:5173";
+            var verificationLink = $"{baseUrl}/verify-2fa?token={token}";
+
+            using var smtpClient = new System.Net.Mail.SmtpClient(
+                _configuration["Email:SmtpHost"] ?? "smtp.gmail.com",
+                int.Parse(_configuration["Email:SmtpPort"] ?? "587"))
+            {
+                EnableSsl = true,
+                Credentials = new System.Net.NetworkCredential(
+                    _configuration["Email:FromEmail"] ?? throw new InvalidOperationException("Email:FromEmail not configured"),
+                    _configuration["Email:FromPassword"] ?? throw new InvalidOperationException("Email:FromPassword not configured"))
+            };
+
+            var fromEmail = _configuration["Email:FromEmail"]!;
+            var fromName = _configuration["Email:FromName"] ?? "WhatsApp Bridge";
+            var body = $"Your WhatsApp Bridge login code is: {token}\n\nOr click here to verify: {verificationLink}\n\nThis code expires in 10 minutes.";
+
+            var mailMessage = new System.Net.Mail.MailMessage
+            {
+                From = new System.Net.Mail.MailAddress(fromEmail, fromName),
+                Subject = "Your WhatsApp Bridge Login Code",
+                Body = body
+            };
+            mailMessage.To.Add(email);
+            await smtpClient.SendMailAsync(mailMessage);
+
+            _logger.LogInformation("2FA token email sent to {Email}", email);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error sending 2FA token email to {Email}", email);
+            return false;
+        }
+    }
 }
