@@ -11,6 +11,7 @@ import Messages from './pages/Messages';
 import AuditLog from './pages/AuditLog';
 import Routing from './pages/Routing';
 import Navbar from './components/Navbar';
+import Verify2FA from './pages/Verify2FA';
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuth();
@@ -54,6 +55,7 @@ function AppRoutes() {
           }
         />
         <Route path="/auth/iam/callback" element={<IamCallback />} />
+        <Route path="/verify-2fa" element={<Verify2FA />} />
         <Route
           path="/dashboard"
           element={

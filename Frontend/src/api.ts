@@ -58,6 +58,14 @@ export const auth = {
     api.post('/api/auth/login', { Email: email, Password: password }),
   me: (token: string) =>
     api.get('/api/auth/me', { headers: { Authorization: `Bearer ${token}` } }),
+  verify2fa: (token: string) =>
+    api.post('/api/auth/verify-2fa', { Token: token }),
+  get2faStatus: () =>
+    api.get('/api/auth/2fa-status'),
+  enable2fa: (method: string, phoneNumber?: string) =>
+    api.put('/api/auth/enable-2fa', { Method: method, PhoneNumber: phoneNumber ?? null }),
+  disable2fa: () =>
+    api.put('/api/auth/disable-2fa'),
 };
 
 export const iam = {

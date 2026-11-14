@@ -62,6 +62,12 @@ public class AuthController : ControllerBase
                 if (!sent)
                     return BadRequest(new { message = "Failed to send WhatsApp 2FA code. Please ensure you have a phone number linked." });
             }
+            else if (user.TwoFactorMethod == "email")
+            {
+                var sent = await _twoFactorService.SendEmailTokenAsync(user.Email, twoFactorToken.Token);
+                if (!sent)
+                    return BadRequest(new { message = "Failed to send email 2FA code. Please check your email configuration." });
+            }
 
             // Return pending 2FA status (no JWT token yet)
             return Ok(new
@@ -146,6 +152,44 @@ public class AuthController : ControllerBase
 
         return Ok(new { message = "Password updated successfully" });
     }
+
+    [Authorize]
+    [HttpGet("2fa-status")]
+    public async Task<IActionResult> GetTwoFactorStatus()
+    {
+        var userId = GetUserId();
+        var user = await _authService.GetUserByIdAsync(userId);
+        if (user == null) return NotFound();
+
+        return Ok(new
+        {
+            twoFactorEnabled = user.TwoFactorEnabled,
+            twoFactorMethod = user.TwoFactorMethod,
+            hasPhoneNumber = !string.IsNullOrEmpty(user.PhoneNumber)
+        });
+    }
+
+    [Authorize]
+    [HttpPut("enable-2fa")]
+    public async Task<IActionResult> EnableTwoFactor([FromBody] EnableTwoFactorRequest request)
+    {
+        var userId = GetUserId();
+        var success = await _twoFactorService.EnableTwoFactorAsync(userId, request.Method, request.PhoneNumber);
+
+        if (!success)
+            return BadRequest(new { message = "Failed to enable 2FA. For WhatsApp method, ensure you have a connected WhatsApp session or provide a phone number." });
+
+        return Ok(new { message = "Two-factor authentication enabled successfully", method = request.Method });
+    }
+
+    [Authorize]
+    [HttpPut("disable-2fa")]
+    public async Task<IActionResult> DisableTwoFactor()
+    {
+        var userId = GetUserId();
+        await _twoFactorService.DisableTwoFactorAsync(userId);
+        return Ok(new { message = "Two-factor authentication disabled" });
+    }
 }
 
 public record RegisterRequest(string Email, string Password);
@@ -153,3 +197,4 @@ public record LoginRequest(string Email, string Password);
 public record UpdateEmailRequest(string Email);
 public record UpdatePasswordRequest(string CurrentPassword, string NewPassword);
 public record Verify2FARequest(string Token);
+public record EnableTwoFactorRequest(string Method, string? PhoneNumber);
