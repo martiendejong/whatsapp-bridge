@@ -27,6 +27,13 @@ public class WhatsAppSession
     // the active engine choice is the global AppSettings value; column self-healed in Program.cs.
     public string? Engine { get; set; }
 
+    // Per-number engine choice: "dawa", "baileys", "waweb" or "meta". Null = follow the global
+    // default (AppSettings WhatsAppEngine). Columns self-healed in Program.cs.
+    public string? EnginePreference { get; set; }
+
+    // Meta Cloud API phone-number-id; required when EnginePreference == "meta".
+    public string? MetaPhoneNumberId { get; set; }
+
     // Navigation properties
     public User User { get; set; } = null!;
 }

@@ -87,6 +87,10 @@ export const apiConnections = {
 export const whatsapp = {
   getSessions: () => api.get('/api/whatsapp/sessions'),
   createSession: () => api.post('/api/whatsapp/sessions/create'),
+  createMetaSession: (metaPhoneNumberId: string) =>
+    api.post('/api/whatsapp/sessions/create-meta', { metaPhoneNumberId }),
+  setSessionEngine: (sessionId: string, engine: string | null, metaPhoneNumberId?: string) =>
+    api.put(`/api/whatsapp/sessions/${sessionId}/engine`, { engine, metaPhoneNumberId }),
   getQr: (sessionId: string) => api.get(`/api/whatsapp/sessions/${sessionId}/qr`),
   deleteSession: (sessionId: string) => api.delete(`/api/whatsapp/sessions/${sessionId}`),
   testSession: (sessionId: string) => api.post(`/api/whatsapp/sessions/${sessionId}/test`),

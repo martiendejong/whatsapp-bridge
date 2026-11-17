@@ -48,11 +48,72 @@ public class WhatsAppController : ControllerBase
                 s.Status,
                 s.CreatedAt,
                 s.ConnectedAt,
-                s.LastSeenAt
+                s.LastSeenAt,
+                s.Engine,
+                s.EnginePreference,
+                s.MetaPhoneNumberId
             })
             .ToListAsync();
 
         return Ok(sessions);
+    }
+
+    public record SetSessionEngineRequest(string? Engine, string? MetaPhoneNumberId = null);
+
+    /// <summary>
+    /// Chooses the WhatsApp engine for ONE number: "meta" (official Cloud API, needs
+    /// metaPhoneNumberId), "dawa" (own C# client), "baileys", "waweb", or null to follow the
+    /// global default. The number reconnects on the new engine immediately. Dawa/Baileys/WaWeb
+    /// credentials are not interchangeable (first connect on a different one needs a QR scan);
+    /// Meta needs no QR.
+    /// </summary>
+    [HttpPut("sessions/{sessionId}/engine")]
+    public async Task<IActionResult> SetSessionEngine(string sessionId, [FromBody] SetSessionEngineRequest request)
+    {
+        var userId = GetUserId();
+        var owned = await _context.WhatsAppSessions
+            .AnyAsync(s => s.SessionId == sessionId && s.UserId == userId);
+        if (!owned) return NotFound(new { error = "Session not found" });
+
+        var engine = string.IsNullOrWhiteSpace(request.Engine) ? null : request.Engine;
+        var (ok, error) = await _whatsappService.SetSessionEngineAsync(sessionId, engine, request.MetaPhoneNumberId);
+        if (!ok) return BadRequest(new { error });
+
+        return Ok(new
+        {
+            sessionId,
+            enginePreference = engine,
+            metaPhoneNumberId = request.MetaPhoneNumberId,
+            note = engine is null or "meta"
+                ? "Reconnecting on the selected engine."
+                : "Reconnecting. If this engine has no saved credentials for this number, scan a new QR code.",
+        });
+    }
+
+    public record CreateMetaSessionRequest(string MetaPhoneNumberId);
+
+    /// <summary>Registers a number that already lives on the Meta Cloud API (no QR needed).</summary>
+    [HttpPost("sessions/create-meta")]
+    public async Task<IActionResult> CreateMetaSession([FromBody] CreateMetaSessionRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.MetaPhoneNumberId))
+            return BadRequest(new { error = "metaPhoneNumberId is required" });
+
+        var userId = GetUserId();
+        var sessionId = Guid.NewGuid().ToString();
+        _context.WhatsAppSessions.Add(new Models.WhatsAppSession
+        {
+            UserId = userId,
+            SessionId = sessionId,
+            Status = "disconnected",
+            EnginePreference = "meta",
+            MetaPhoneNumberId = request.MetaPhoneNumberId.Trim(),
+            Engine = "meta",
+        });
+        await _context.SaveChangesAsync();
+
+        await _whatsappService.RestoreSessionAsync(sessionId);
+        return Ok(new { sessionId, status = "connecting" });
     }
 
     [HttpPost("sessions/create")]

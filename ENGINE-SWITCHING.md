@@ -103,3 +103,20 @@ Not supported on WaWeb (surfaced as `NotSupportedException` / explanatory errors
   (informational, shown in the admin UI).
 - Baileys sidecar chat/contact cache: `{sessionDir}/baileys-store.json` (the waweb sidecar
   needs no cache file — chats/contacts come straight from the live WA Web client).
+
+## Per-number engine and the Meta Cloud API
+
+Each number (session) can have its own engine: `meta` (official WhatsApp Cloud API), `dawa`, `baileys`
+or `waweb`. A number without a preference follows the global default above. Change it in the sessions
+page (Engine column) or via `PUT /api/whatsapp/sessions/{sessionId}/engine`
+(`{"engine":"meta","metaPhoneNumberId":"..."}`; `null` = global default). Register a number that already
+lives at Meta with `POST /api/whatsapp/sessions/create-meta` (no QR).
+
+Meta setup (admin): `PUT /api/admin/meta-config` with `accessToken` (system-user token with
+`whatsapp_business_messaging` + `whatsapp_business_management`), optional `appSecret` (enables
+`X-Hub-Signature-256` verification) and `verifyToken`. In the Meta app (WhatsApp > Configuration) set the
+callback URL to `https://<api-host>/api/meta/webhook`, the same verify token, and subscribe to `messages`.
+
+Limits of the Cloud API, surfaced rather than faked: no groups, no contact/chat lists, no history sync, no
+delete-for-everyone; free-form text only inside the 24h customer-service window (outside it Meta returns
+131047 and the bridge says a template is needed).

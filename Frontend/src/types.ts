@@ -27,4 +27,7 @@ export interface WhatsAppSession {
   createdAt: string;
   connectedAt?: string;
   lastSeenAt?: string;
+  engine?: string | null;            // engine the number last connected with
+  enginePreference?: string | null;  // per-number choice: meta | dawa | baileys | waweb | null (= global default)
+  metaPhoneNumberId?: string | null;
 }
