@@ -21,7 +21,20 @@ interface ContactsPanel {
   contacts: Contact[];
 }
 
+const ENGINE_OPTIONS: { value: string; label: string }[] = [
+  { value: '', label: 'Global default' },
+  { value: 'meta', label: 'Meta Cloud API (official)' },
+  { value: 'dawa', label: 'Dawa (our own client)' },
+  { value: 'baileys', label: 'Baileys' },
+  { value: 'waweb', label: 'WhatsApp Web' },
+];
+
 export default function WhatsAppSessions() {
+  const [metaIds, setMetaIds] = useState<{ [sessionId: string]: string }>({});
+  const [engineBusy, setEngineBusy] = useState<string | null>(null);
+  const [engineNote, setEngineNote] = useState('');
+  const [newMetaId, setNewMetaId] = useState('');
+
   const [sessions, setSessions] = useState<WhatsAppSession[]>([]);
   const [loading, setLoading] = useState(true);
   const [qrCode, setQrCode] = useState<string | null>(null);
@@ -103,6 +116,34 @@ export default function WhatsAppSessions() {
       loadSessions();
     } catch (err: any) {
       setError(err.response?.data?.message || 'Failed to create WhatsApp session');
+    }
+  };
+
+  const handleEngineChange = async (sessionId: string, engine: string, metaPhoneNumberId?: string) => {
+    setError('');
+    setEngineNote('');
+    setEngineBusy(sessionId);
+    try {
+      const response = await whatsapp.setSessionEngine(sessionId, engine || null, metaPhoneNumberId);
+      setEngineNote(response.data.note || 'Engine updated.');
+      await loadSessions();
+    } catch (err: any) {
+      setError(err.response?.data?.error || 'Failed to change engine');
+    } finally {
+      setEngineBusy(null);
+    }
+  };
+
+  const handleAddMetaNumber = async () => {
+    setError('');
+    setEngineNote('');
+    try {
+      await whatsapp.createMetaSession(newMetaId.trim());
+      setNewMetaId('');
+      setEngineNote('Meta number added. It connects in a few seconds.');
+      await loadSessions();
+    } catch (err: any) {
+      setError(err.response?.data?.error || 'Failed to add Meta number');
     }
   };
 
@@ -218,6 +259,24 @@ export default function WhatsAppSessions() {
       </div>
 
       {error && <div className="error" style={{ marginBottom: '16px' }}>{error}</div>}
+      {engineNote && <div className="card" style={{ marginBottom: '16px', color: '#166534' }}>{engineNote}</div>}
+
+      <div className="card" style={{ marginBottom: '16px' }}>
+        <h3 style={{ marginBottom: '8px' }}>Add a number from the Meta Cloud API</h3>
+        <p style={{ color: '#666', marginBottom: '12px' }}>
+          Numbers registered at Meta need no QR code. Enter the phone-number ID from the Meta developer console.
+        </p>
+        <input
+          type="text"
+          placeholder="Meta phone-number ID"
+          value={newMetaId}
+          onChange={(e) => setNewMetaId(e.target.value)}
+          style={{ marginRight: '8px', minWidth: '240px' }}
+        />
+        <button className="btn btn-primary" onClick={handleAddMetaNumber} disabled={!newMetaId.trim()}>
+          Add Meta number
+        </button>
+      </div>
 
       {qrCode && (
         <div className="card">
@@ -244,6 +303,7 @@ export default function WhatsAppSessions() {
               <tr>
                 <th>Phone Number</th>
                 <th>Status</th>
+                <th>Engine</th>
                 <th>Created</th>
                 <th>Connected</th>
                 <th>Last Seen</th>
@@ -267,6 +327,51 @@ export default function WhatsAppSessions() {
                       >
                         {session.status === 'needs_qr' ? 'needs QR scan' : session.status}
                       </span>
+                    </td>
+                    <td>
+                      <select
+                        value={session.enginePreference || ''}
+                        disabled={engineBusy === session.sessionId}
+                        onChange={(e) => {
+                          const value = e.target.value;
+                          if (value === 'meta') {
+                            const id = metaIds[session.sessionId] ?? session.metaPhoneNumberId ?? '';
+                            if (!id) {
+                              setMetaIds((prev) => ({ ...prev, [session.sessionId]: '' }));
+                              setSessions((prev) => prev.map((s) => s.sessionId === session.sessionId ? { ...s, enginePreference: 'meta' } : s));
+                              return;
+                            }
+                            handleEngineChange(session.sessionId, 'meta', id);
+                          } else {
+                            handleEngineChange(session.sessionId, value);
+                          }
+                        }}
+                      >
+                        {ENGINE_OPTIONS.map((o) => (
+                          <option key={o.value} value={o.value}>{o.label}</option>
+                        ))}
+                      </select>
+                      {session.enginePreference === 'meta' && (
+                        <div style={{ marginTop: '6px' }}>
+                          <input
+                            type="text"
+                            placeholder="Meta phone-number ID"
+                            value={metaIds[session.sessionId] ?? session.metaPhoneNumberId ?? ''}
+                            onChange={(e) => setMetaIds((prev) => ({ ...prev, [session.sessionId]: e.target.value }))}
+                            style={{ width: '170px', marginRight: '4px' }}
+                          />
+                          <button
+                            className="btn btn-secondary"
+                            disabled={engineBusy === session.sessionId || !(metaIds[session.sessionId] ?? session.metaPhoneNumberId)}
+                            onClick={() => handleEngineChange(session.sessionId, 'meta', metaIds[session.sessionId] ?? session.metaPhoneNumberId ?? '')}
+                          >
+                            Save
+                          </button>
+                        </div>
+                      )}
+                      {session.engine && session.engine !== (session.enginePreference || session.engine) && (
+                        <div style={{ fontSize: '12px', color: '#666' }}>running: {session.engine}</div>
+                      )}
                     </td>
                     <td>{new Date(session.createdAt).toLocaleDateString()}</td>
                     <td>{session.connectedAt ? new Date(session.connectedAt).toLocaleDateString() : 'N/A'}</td>
@@ -311,7 +416,7 @@ export default function WhatsAppSessions() {
                   </tr>
                   {testResults[session.id] && (
                     <tr key={`${session.id}-test-result`}>
-                      <td colSpan={6} style={{ padding: '8px 16px' }}>
+                      <td colSpan={7} style={{ padding: '8px 16px' }}>
                         <div
                           style={{
                             padding: '12px',
@@ -337,7 +442,7 @@ export default function WhatsAppSessions() {
                   )}
                   {sendForms[session.sessionId] && (
                     <tr key={`${session.id}-send-form`}>
-                      <td colSpan={6} style={{ padding: '8px 16px' }}>
+                      <td colSpan={7} style={{ padding: '8px 16px' }}>
                         <div
                           style={{
                             padding: '16px',
@@ -431,7 +536,7 @@ export default function WhatsAppSessions() {
                   )}
                   {contactPanels[session.sessionId] && (
                     <tr key={`${session.id}-contacts`}>
-                      <td colSpan={6} style={{ padding: '8px 16px' }}>
+                      <td colSpan={7} style={{ padding: '8px 16px' }}>
                         <div style={{ padding: '16px', borderRadius: '4px', background: '#f8fafc', border: '1px solid #e2e8f0' }}>
                           <h4 style={{ marginBottom: '12px', color: '#374151' }}>
                             Contacts ({contactPanels[session.sessionId].contacts.length})

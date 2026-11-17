@@ -111,6 +111,9 @@ builder.Services.AddHostedService<MonitorSweepWorker>();
 builder.Services.AddSingleton<WhisperTranscriptionService>();
 // Singleton: admin-selected WhatsApp engine ("dawa"/"baileys"), persisted in AppSettings
 builder.Services.AddSingleton<EngineSettingsService>();
+// Meta WhatsApp Cloud API: credentials (AppSettings) and the webhook-to-engine router
+builder.Services.AddSingleton<MetaCloudSettings>();
+builder.Services.AddSingleton<MetaWebhookRouter>();
 // Singleton: holds long-lived WhatsApp engine instances (one per user session)
 builder.Services.AddSingleton<WhatsAppBridgeService>();
 
@@ -546,6 +549,17 @@ using (var scope = app.Services.CreateScope())
         // Column already present from a prior startup.
     }
 
+    // Per-number engine choice + Meta phone-number-id (engine-per-number feature).
+    foreach (var ddl in new[]
+    {
+        "ALTER TABLE WhatsAppSessions ADD COLUMN EnginePreference TEXT NULL;",
+        "ALTER TABLE WhatsAppSessions ADD COLUMN MetaPhoneNumberId TEXT NULL;",
+    })
+    {
+        try { db.Database.ExecuteSqlRaw(ddl); }
+        catch (Exception ex) when (ex.Message.Contains("duplicate column name", StringComparison.OrdinalIgnoreCase)) { }
+    }
+
     // Durable chat list (fix/message-persistence-survives-deploy): getChats upserts every live
     // result here and falls back to it when Dawa is offline, so known contacts survive
     // restarts and re-pairs. Same self-heal reason as above: EnsureCreated() no-ops on an
@@ -589,12 +603,13 @@ using (var scope = app.Services.CreateScope())
     // RestoreSessionAsync itself checks the engine-specific creds location
     // (creds.json for Dawa, baileys-auth/creds.json for Baileys) and skips otherwise.
     var allSessions = db.WhatsAppSessions
-        .Select(s => s.SessionId)
+        .Select(s => new { s.SessionId, s.EnginePreference })
         .ToList();
-    foreach (var sessionId in allSessions)
+    foreach (var row in allSessions)
     {
-        if (Directory.Exists(Path.Combine(sessionsRoot, sessionId)))
-            await whatsappService.RestoreSessionAsync(sessionId);
+        // Meta sessions have no session directory: their credentials live in AppSettings.
+        if (row.EnginePreference == "meta" || Directory.Exists(Path.Combine(sessionsRoot, row.SessionId)))
+            await whatsappService.RestoreSessionAsync(row.SessionId);
     }
 }
 

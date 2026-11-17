@@ -14,7 +14,14 @@ public class EngineSettingsService
     public const string DawaEngine = "dawa";
     public const string BaileysEngine = "baileys";
     public const string WaWebEngine = "waweb";
+    public const string MetaEngine = "meta";
+    /// <summary>Valid GLOBAL defaults. "meta" is per-number only (it needs a phone-number-id).</summary>
     public static readonly string[] AvailableEngines = { DawaEngine, BaileysEngine, WaWebEngine };
+    /// <summary>Valid per-number choices (global defaults plus Meta Cloud API).</summary>
+    public static readonly string[] SessionEngines = { DawaEngine, BaileysEngine, WaWebEngine, MetaEngine };
+
+    public static bool IsValidSessionEngine(string? engine)
+        => engine != null && SessionEngines.Contains(engine, StringComparer.OrdinalIgnoreCase);
 
     private const string SettingKey = "WhatsAppEngine";
 

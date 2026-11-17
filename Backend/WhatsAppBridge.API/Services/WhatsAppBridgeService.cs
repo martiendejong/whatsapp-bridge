@@ -25,6 +25,8 @@ public class WhatsAppBridgeService : IAsyncDisposable
     private readonly InboundWebhookForwarder _inboundWebhook;
     private readonly CoachOsIntakeForwarder _coachOsIntake;
     private readonly EngineSettingsService _engineSettings;
+    private readonly MetaCloudSettings _metaSettings;
+    private readonly MetaWebhookRouter _metaRouter;
 
     // One engine per sessionId
     private readonly ConcurrentDictionary<string, IWhatsAppEngine> _clients = new();
@@ -42,7 +44,9 @@ public class WhatsAppBridgeService : IAsyncDisposable
         WhisperTranscriptionService whisper,
         InboundWebhookForwarder inboundWebhook,
         CoachOsIntakeForwarder coachOsIntake,
-        EngineSettingsService engineSettings)
+        EngineSettingsService engineSettings,
+        MetaCloudSettings metaSettings,
+        MetaWebhookRouter metaRouter)
     {
         _scopeFactory = scopeFactory;
         _configuration = configuration;
@@ -53,6 +57,8 @@ public class WhatsAppBridgeService : IAsyncDisposable
         _inboundWebhook = inboundWebhook;
         _coachOsIntake = coachOsIntake;
         _engineSettings = engineSettings;
+        _metaSettings = metaSettings;
+        _metaRouter = metaRouter;
     }
 
     // ─── Engine selection ─────────────────────────────────────────────────────
@@ -60,9 +66,39 @@ public class WhatsAppBridgeService : IAsyncDisposable
     private string GetSessionsRoot() => _configuration["WhatsApp:SessionsDirectory"]
         ?? Path.Combine(AppContext.BaseDirectory, "whatsapp-sessions");
 
-    private async Task<IWhatsAppEngine> CreateEngineAsync(string sessionDir)
+    /// <summary>
+    /// Per-number engine choice: the session row's EnginePreference wins; null falls back to the
+    /// global AppSettings default. Returns the engine name and, for "meta", the phone-number-id.
+    /// </summary>
+    private async Task<(string Engine, string? MetaPhoneNumberId)> ResolveEngineAsync(string sessionId)
     {
-        var engine = await _engineSettings.GetEngineAsync();
+        try
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var row = await db.WhatsAppSessions.AsNoTracking()
+                .Where(x => x.SessionId == sessionId)
+                .Select(x => new { x.EnginePreference, x.MetaPhoneNumberId })
+                .FirstOrDefaultAsync();
+            if (row != null && EngineSettingsService.IsValidSessionEngine(row.EnginePreference))
+                return (row.EnginePreference!.ToLowerInvariant(), row.MetaPhoneNumberId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not read engine preference for {SessionId}; using global default", sessionId);
+        }
+        return (await _engineSettings.GetEngineAsync(), null);
+    }
+
+    private async Task<IWhatsAppEngine> CreateEngineAsync(string sessionId, string sessionDir)
+    {
+        var (engine, metaPhoneId) = await ResolveEngineAsync(sessionId);
+        if (engine == EngineSettingsService.MetaEngine)
+        {
+            if (string.IsNullOrWhiteSpace(metaPhoneId))
+                throw new InvalidOperationException($"Session {sessionId} uses the Meta engine but has no MetaPhoneNumberId.");
+            return new MetaCloudEngine(metaPhoneId, _metaSettings, _metaRouter, _loggerFactory);
+        }
         return engine switch
         {
             EngineSettingsService.BaileysEngine => new BaileysEngine(sessionDir, _configuration, _loggerFactory),
@@ -72,12 +108,41 @@ public class WhatsAppBridgeService : IAsyncDisposable
     }
 
     /// <summary>
+    /// Sets the engine for ONE number and reconnects it on that engine. Null engine = follow the
+    /// global default. Dawa, Baileys and WaWeb credentials are not interchangeable: the first
+    /// connect on a different one needs a QR scan. Meta needs no QR (credentials are global).
+    /// </summary>
+    public async Task<(bool ok, string? error)> SetSessionEngineAsync(string sessionId, string? engine, string? metaPhoneNumberId)
+    {
+        if (engine != null && !EngineSettingsService.IsValidSessionEngine(engine))
+            return (false, $"Unknown engine '{engine}'. Valid: {string.Join(", ", EngineSettingsService.SessionEngines)}");
+        engine = engine?.ToLowerInvariant();
+        if (engine == EngineSettingsService.MetaEngine && string.IsNullOrWhiteSpace(metaPhoneNumberId))
+            return (false, "The Meta engine needs a metaPhoneNumberId.");
+
+        using (var scope = _scopeFactory.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var session = await db.WhatsAppSessions.FirstOrDefaultAsync(x => x.SessionId == sessionId);
+            if (session == null) return (false, "Session not found");
+            session.EnginePreference = engine;
+            if (engine == EngineSettingsService.MetaEngine) session.MetaPhoneNumberId = metaPhoneNumberId!.Trim();
+            await db.SaveChangesAsync();
+        }
+
+        await DisconnectSessionAsync(sessionId);
+        await RestoreSessionAsync(sessionId);
+        return (true, null);
+    }
+
+    /// <summary>
     /// Whether the given engine has saved credentials for this session directory.
     /// Dawa, Baileys and WaWeb store creds in different (incompatible) formats, so a
     /// session switching engines needs a fresh QR pairing on the new engine.
     /// </summary>
     public static bool EngineHasSavedSession(string engine, string sessionDir) => engine switch
     {
+        EngineSettingsService.MetaEngine => true, // credentials are global (AppSettings); phone id is on the session row
         EngineSettingsService.BaileysEngine => File.Exists(Path.Combine(sessionDir, "baileys-auth", "creds.json")),
         EngineSettingsService.WaWebEngine => WaWebEngine.HasWaWebProfile(sessionDir),
         _ => File.Exists(Path.Combine(sessionDir, "creds.json")),
@@ -157,7 +222,7 @@ public class WhatsAppBridgeService : IAsyncDisposable
 
         var sessionDir = Path.Combine(GetSessionsRoot(), sessionId);
 
-        var client = await CreateEngineAsync(sessionDir);
+        var client = await CreateEngineAsync(sessionId, sessionDir);
         _clients[sessionId] = client;
         _ = UpdateSessionAsync(sessionId, s => s.Engine = client.EngineName);
 
@@ -238,13 +303,15 @@ public class WhatsAppBridgeService : IAsyncDisposable
     {
         var sessionDir = Path.Combine(GetSessionsRoot(), sessionId);
 
-        if (!Directory.Exists(sessionDir))
-            return false;
-
         if (_clients.ContainsKey(sessionId))
             return false;
 
-        var engineName = await _engineSettings.GetEngineAsync();
+        var (engineName, _) = await ResolveEngineAsync(sessionId);
+
+        // Meta sessions have no session directory (credentials live in AppSettings).
+        if (engineName != EngineSettingsService.MetaEngine && !Directory.Exists(sessionDir))
+            return false;
+
         if (!EngineHasSavedSession(engineName, sessionDir))
         {
             _logger.LogInformation(
@@ -253,7 +320,7 @@ public class WhatsAppBridgeService : IAsyncDisposable
             return false;
         }
 
-        var client = await CreateEngineAsync(sessionDir);
+        var client = await CreateEngineAsync(sessionId, sessionDir);
         _clients[sessionId] = client;
         _ = UpdateSessionAsync(sessionId, s => s.Engine = client.EngineName);
 
@@ -397,7 +464,14 @@ public class WhatsAppBridgeService : IAsyncDisposable
 
     public async Task<byte[]?> DownloadMediaAsync(string sessionId, string mediaUrl, string mediaKeyBase64, string mimeType)
     {
-        try { return await WhatsAppClient.DownloadMediaAsync(mediaUrl, mediaKeyBase64, mimeType); }
+        try
+        {
+            if (mediaUrl.StartsWith("meta-media:", StringComparison.Ordinal))
+                return _clients.TryGetValue(sessionId, out var c) && c is MetaCloudEngine meta
+                    ? await meta.DownloadMediaAsync(mediaUrl["meta-media:".Length..])
+                    : null;
+            return await WhatsAppClient.DownloadMediaAsync(mediaUrl, mediaKeyBase64, mimeType);
+        }
         catch (Exception ex) { _logger.LogWarning(ex, "DownloadMedia failed for session {Sid}", sessionId); return null; }
     }
 
@@ -1002,7 +1076,11 @@ public class WhatsAppBridgeService : IAsyncDisposable
     {
         try
         {
-            var bytes = await WhatsAppClient.DownloadMediaAsync(mediaUrl, mediaKey, mimeType ?? "application/octet-stream");
+            var bytes = mediaUrl.StartsWith("meta-media:", StringComparison.Ordinal)
+                ? (_clients.TryGetValue(sessionId, out var metaClient) && metaClient is MetaCloudEngine metaEngine
+                    ? await metaEngine.DownloadMediaAsync(mediaUrl["meta-media:".Length..])
+                    : null)
+                : await WhatsAppClient.DownloadMediaAsync(mediaUrl, mediaKey, mimeType ?? "application/octet-stream");
             if (bytes == null || bytes.Length == 0)
             {
                 _logger.LogInformation("Media enrichment: decrypt returned no bytes for [{MessageId}] (CDN link may have expired)", messageId);

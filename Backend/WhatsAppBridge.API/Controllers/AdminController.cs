@@ -21,15 +21,18 @@ public class AdminController : ControllerBase
     private readonly IConfiguration _configuration;
     private readonly ILogger<AdminController> _logger;
     private readonly AppDbContext _context;
+    private readonly MetaCloudSettings _metaSettings;
 
     public AdminController(EngineSettingsService engineSettings, WhatsAppBridgeService whatsappService,
-        IConfiguration configuration, ILogger<AdminController> logger, AppDbContext context)
+        IConfiguration configuration, ILogger<AdminController> logger, AppDbContext context,
+        MetaCloudSettings metaSettings)
     {
         _engineSettings = engineSettings;
         _whatsappService = whatsappService;
         _configuration = configuration;
         _logger = logger;
         _context = context;
+        _metaSettings = metaSettings;
     }
 
     private int GetUserId()
@@ -149,5 +152,36 @@ public class AdminController : ControllerBase
                     ? "Sessions reconnected on the new engine. Sessions without saved credentials for this engine stay disconnected until their QR is re-scanned."
                     : "New engine applies on the next (re)connect of each session. Use restartSessions=true to apply immediately."),
         });
+    }
+
+    // ── Meta WhatsApp Cloud API credentials ─────────────────────────────────
+
+    /// <summary>Which Meta settings are configured (never the values) plus the webhook URL to register.</summary>
+    [HttpGet("meta-config")]
+    public async Task<IActionResult> GetMetaConfig()
+    {
+        var verify = await _metaSettings.GetVerifyTokenAsync();
+        return Ok(new
+        {
+            settings = await _metaSettings.DescribeAsync(),
+            webhookPath = "/api/meta/webhook",
+            verifyToken = verify, // admin-only; Meta needs this value in the webhook setup
+        });
+    }
+
+    public record SetMetaConfigRequest(string? AccessToken, string? AppSecret, string? VerifyToken);
+
+    /// <summary>Stores the Meta system-user token, optional app secret (enables webhook signature checks) and verify token.</summary>
+    [HttpPut("meta-config")]
+    public async Task<IActionResult> SetMetaConfig([FromBody] SetMetaConfigRequest request)
+    {
+        if (!string.IsNullOrWhiteSpace(request.AccessToken))
+            await _metaSettings.SetAsync(MetaCloudSettings.KeyAccessToken, request.AccessToken.Trim());
+        if (!string.IsNullOrWhiteSpace(request.AppSecret))
+            await _metaSettings.SetAsync(MetaCloudSettings.KeyAppSecret, request.AppSecret.Trim());
+        if (!string.IsNullOrWhiteSpace(request.VerifyToken))
+            await _metaSettings.SetAsync(MetaCloudSettings.KeyVerifyToken, request.VerifyToken.Trim());
+        _logger.LogInformation("Admin {User} updated Meta WhatsApp settings", User.Identity?.Name ?? "?");
+        return Ok(await _metaSettings.DescribeAsync());
     }
 }
